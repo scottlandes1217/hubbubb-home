@@ -1,0 +1,14 @@
+{
+  "name": "hubbubb-home",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Lovelace cards for Hubbubb Home",
+  "type": "module",
+  "scripts": {
+    "build": "esbuild cards/src/hubbubb-ring-card.js cards/src/hubbubb-remote-card.js cards/src/hubbubb-timers-card.js --bundle --format=esm --minify --target=es2020 --outdir=custom_components/hubbubb_home/www",
+    "watch": "npm run build -- --watch",
+    "test": "node cards/test/envelope.mjs"
+  },
+  "dependencies": { "lit": "^3.2.1" },
+  "devDependencies": { "esbuild": "^0.24.0" }
+}
