@@ -1,21 +1,29 @@
 /* Hubbubb timers card — live countdowns for the voice timer pool.
  *
- * Shows every running timer.hubbubb_timer_1..5 with the spoken name from its
- * input_text.hubbubb_timer_N_name sidecar, a draining progress bar, +1m/+5m
- * extend buttons (timer.change) and a cancel button (timer.cancel — the
- * announce automation clears the name sidecar on the cancelled event).
- * Idle slots are hidden. New timers start from the card too: preset chips
- * and an optional-name + minutes row, both through hubbubb_home.timer_startrt
- * so slot assignment, naming, and the finish announcement stay in one place.
+ * Reads one sensor, not ten helpers: the integration publishes every running
+ * timer in sensor.<assistant>_timers, because an integration cannot create
+ * `timer` entities and ten hand-made helpers is not a setup step anyone
+ * should have to do. Draining bar, +1m/+5m, cancel, and a start row - all of
+ * it through hubbubb_home services, so naming and the finish announcement
+ * stay in one place.
  *
- * Deploy like hubbubb-ring-card: copy here, bump ?v= in the lovelace resource.
+ *   type: custom:hubbubb-timers-card
+ *   entity: sensor.athena_timers
  */
 
 class HubbubbTimersCard extends HTMLElement {
-  static SLOTS = 5;
-
   setConfig(config) {
-    this._config = { prefix: "hubbubb_timer", ...config };
+    if (!config || !config.entity) {
+      throw new Error("hubbubb-timers-card: you need to define an `entity`");
+    }
+    this._config = { ...config };
+  }
+
+  static getStubConfig(hass) {
+    const entity = Object.keys(hass?.states ?? {}).find((e) =>
+      e.startsWith("sensor.") && e.endsWith("_timers")
+    );
+    return { type: "custom:hubbubb-timers-card", entity: entity ?? "" };
   }
 
   set hass(hass) {
@@ -37,27 +45,20 @@ class HubbubbTimersCard extends HTMLElement {
   }
 
   _timers() {
-    const out = [];
-    for (let i = 1; i <= HubbubbTimersCard.SLOTS; i++) {
-      const t = this._hass.states[`timer.${this._config.prefix}_${i}`];
-      if (!t || (t.state !== "active" && t.state !== "paused")) continue;
-      const nameSt = this._hass.states[`input_text.${this._config.prefix}_${i}_name`];
-      const label = (nameSt && nameSt.state && !["unknown", "unavailable"].includes(nameSt.state) ? nameSt.state : "").trim();
-      const durationS = this._hms(t.attributes.duration);
-      let remainingS;
-      if (t.state === "active" && t.attributes.finishes_at) {
-        remainingS = Math.max(0, (new Date(t.attributes.finishes_at) - Date.now()) / 1000);
-      } else {
-        remainingS = this._hms(t.attributes.remaining);
-      }
-      out.push({ entity: t.entity_id, label: label || "Timer", remainingS, durationS, paused: t.state === "paused" });
-    }
-    return out;
-  }
-
-  _hms(str) {
-    if (!str) return 0;
-    return String(str).split(":").reduce((acc, p) => acc * 60 + Number(p), 0);
+    const st = this._hass?.states?.[this._config.entity];
+    const list = st?.attributes?.timers;
+    if (!Array.isArray(list)) return [];
+    return list.map((t) => ({
+      // finishes_at rather than the reported remaining: the sensor only
+      // writes on change, and this card redraws twice a second.
+      id: t.id,
+      label: t.name || "Timer",
+      durationS: Number(t.duration) || 0,
+      remainingS: t.paused
+        ? Number(t.remaining) || 0
+        : Math.max(0, (new Date(t.finishes_at) - Date.now()) / 1000),
+      paused: Boolean(t.paused),
+    }));
   }
 
   _fmt(s) {
@@ -79,7 +80,7 @@ class HubbubbTimersCard extends HTMLElement {
       this._build(timers);
     }
     for (const t of timers) {
-      const row = this.querySelector(`[data-entity="${t.entity}"]`);
+      const row = this.querySelector(`[data-timer="${t.id}"]`);
       if (!row) continue;
       row.querySelector(".jt-time").textContent = t.paused ? `${this._fmt(t.remainingS)} ⏸` : this._fmt(t.remainingS);
       const pct = t.durationS ? Math.min(100, (t.remainingS / t.durationS) * 100) : 0;
@@ -91,7 +92,7 @@ class HubbubbTimersCard extends HTMLElement {
     const rows = timers
       .map(
         (t) => `
-      <div class="jt-row" data-entity="${t.entity}">
+      <div class="jt-row" data-timer="${t.id}">
         <div class="jt-top">
           <span class="jt-label">${this._esc(t.label)}</span>
           <span class="jt-time"></span>
@@ -135,7 +136,7 @@ class HubbubbTimersCard extends HTMLElement {
       </style>
       <ha-card class="jt-card">
         <div class="jt-title">Timers</div>
-        ${rows || `<div class="jt-empty">No timers running — ask for ono set one, or start one below.</div>`}
+        ${rows || `<div class="jt-empty">No timers running — ask out loud, or start one below.</div>`}
         <div class="jt-new">
           <input class="jt-input jt-name-input" data-name placeholder="Name (optional)">
           <input class="jt-input jt-min-input" data-min type="number" min="1" max="1440" placeholder="min">
@@ -152,31 +153,27 @@ class HubbubbTimersCard extends HTMLElement {
       </ha-card>`;
 
     this.querySelectorAll(".jt-row").forEach((row) => {
-      const entity = row.dataset.entity;
-      // timer.change can't extend past the original duration, so "+N min"
-      // restarts the timer at remaining + N instead.
+      const timerId = row.dataset.timer;
       row.querySelectorAll("[data-add]").forEach((b) =>
-        b.addEventListener("click", () => {
-          const t = this._timers().find((x) => x.entity === entity);
-          if (!t) return;
-          this._hass.callService("timer", "start", {
-            entity_id: entity,
-            duration: Math.max(0, Math.round(t.remainingS)) + Number(b.dataset.add),
-          });
-        })
+        b.addEventListener("click", () =>
+          this._hass.callService("hubbubb_home", "timer_add", {
+            timer_id: timerId,
+            seconds: Number(b.dataset.add),
+          })
+        )
       );
       row.querySelector("[data-cancel]").addEventListener("click", () =>
-        this._hass.callService("timer", "cancel", { entity_id: entity })
+        this._hass.callService("hubbubb_home", "timer_cancel", {
+          timer_id: timerId,
+        })
       );
     });
 
     const start = (minutes) => {
       if (!minutes || minutes <= 0) return;
       this._hass.callService("hubbubb_home", "timer_start", {
-        jt_name: this.querySelector("[data-name]").value.trim(),
-        jt_hours: 0,
-        jt_minutes: minutes,
-        jt_seconds: 0,
+        name: this.querySelector("[data-name]").value.trim(),
+        minutes,
       });
     };
     this.querySelector("[data-start]").addEventListener("click", () =>

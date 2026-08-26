@@ -1,0 +1,315 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Name your assistant",
+        "description": "Everything else is optional and can be changed later.",
+        "data": {
+          "assistant_name": "What should it be called?"
+        },
+        "data_description": {
+          "assistant_name": "Used when it speaks, on the dashboard, and in the instructions given to your language model."
+        },
+        "sections": {
+          "hubbubb": {
+            "name": "Hubbubb (optional)",
+            "description": "Connect your Hubbubb organisation so the assistant can answer questions about your records and correspondence. Create a client ID and secret in Hubbubb, then paste them here.",
+            "data": {
+              "hubbubb_url": "MCP endpoint",
+              "hubbubb_client_id": "Client ID",
+              "hubbubb_client_secret": "Client secret"
+            }
+          },
+          "companion": {
+            "name": "Companion (optional)",
+            "description": "Only if you run the companion daemon on a computer with a coding agent on it. Without one, everything works except the build screen.",
+            "data": {
+              "companion_url": "Companion URL",
+              "companion_token": "Token"
+            }
+          }
+        }
+      }
+    },
+    "error": {
+      "hubbubb_incomplete": "Hubbubb needs all three: endpoint, client ID and client secret.",
+      "hubbubb_auth": "Hubbubb refused those credentials, or could not be reached.",
+      "companion_unreachable": "Nothing answered at that address."
+    },
+    "abort": {
+      "already_configured": "Hubbubb Home is already set up."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Hubbubb Home",
+        "data": {
+          "assistant_name": "Assistant name",
+          "prompt": "Personality"
+        },
+        "data_description": {
+          "prompt": "Given to your language model alongside Home Assistant's own instructions. {name} is replaced with the assistant's name."
+        },
+        "sections": {
+          "overnight": {
+            "name": "Overnight sweep",
+            "description": "Once a night, look for things that have gone offline or stopped changing. It only ever reports.",
+            "data": {
+              "nightly_enabled": "Run the overnight sweep",
+              "nightly_time": "Time",
+              "ignore": "Ignore these (one entity ID or pattern per line)"
+            }
+          },
+          "briefing": {
+            "name": "Morning briefing",
+            "description": "Weather, today's calendar, and what the sweep found - spoken through a voice satellite.",
+            "data": {
+              "briefing_enabled": "Speak a morning briefing",
+              "briefing_time": "Time",
+              "briefing_target": "Speak through",
+              "weather_entity": "Weather",
+              "calendars": "Calendars"
+            },
+            "data_description": {
+              "briefing_target": "Also where finished timers announce themselves."
+            }
+          },
+          "hubbubb": {
+            "name": "Hubbubb",
+            "data": {
+              "hubbubb_url": "MCP endpoint",
+              "hubbubb_client_id": "Client ID",
+              "hubbubb_client_secret": "Client secret"
+            }
+          },
+          "companion": {
+            "name": "Companion",
+            "data": {
+              "companion_url": "Companion URL",
+              "companion_token": "Token"
+            }
+          }
+        }
+      }
+    },
+    "error": {
+      "hubbubb_incomplete": "Hubbubb needs all three: endpoint, client ID and client secret.",
+      "hubbubb_auth": "Hubbubb refused those credentials, or could not be reached.",
+      "companion_unreachable": "Nothing answered at that address."
+    }
+  },
+  "services": {
+    "remember": {
+      "name": "Remember",
+      "description": "Store one durable fact about the household.",
+      "fields": {
+        "fact": {
+          "name": "Fact",
+          "description": "One short self-contained sentence."
+        }
+      }
+    },
+    "recall": {
+      "name": "Recall",
+      "description": "Search the household's memories.",
+      "fields": {
+        "query": {
+          "name": "Query",
+          "description": "What to search for."
+        },
+        "limit": {
+          "name": "Limit",
+          "description": "How many memories to return."
+        }
+      }
+    },
+    "forget": {
+      "name": "Forget",
+      "description": "Delete the memory that best matches a description.",
+      "fields": {
+        "query": {
+          "name": "Query",
+          "description": "What to forget."
+        }
+      }
+    },
+    "timer_start": {
+      "name": "Start timer",
+      "description": "Start a named countdown.",
+      "fields": {
+        "name": {
+          "name": "Name",
+          "description": "What the timer is for."
+        },
+        "hours": {
+          "name": "Hours",
+          "description": "Hours."
+        },
+        "minutes": {
+          "name": "Minutes",
+          "description": "Minutes."
+        },
+        "seconds": {
+          "name": "Seconds",
+          "description": "Seconds."
+        }
+      }
+    },
+    "timer_cancel": {
+      "name": "Cancel timer",
+      "description": "Cancel a running countdown.",
+      "fields": {
+        "timer_id": {
+          "name": "Timer ID",
+          "description": "From the timers sensor."
+        },
+        "name": {
+          "name": "Name",
+          "description": "The timer's name; the next to finish if left blank."
+        }
+      }
+    },
+    "timer_add": {
+      "name": "Add time",
+      "description": "Add or remove time on a running countdown.",
+      "fields": {
+        "timer_id": {
+          "name": "Timer ID",
+          "description": "From the timers sensor."
+        },
+        "name": {
+          "name": "Name",
+          "description": "The timer's name."
+        },
+        "seconds": {
+          "name": "Seconds",
+          "description": "Negative removes time."
+        }
+      }
+    },
+    "ask_hubbubb": {
+      "name": "Ask Hubbubb",
+      "description": "Put a plain-English request to Hubbubb.",
+      "fields": {
+        "request": {
+          "name": "Request",
+          "description": "Asked in ordinary words."
+        }
+      }
+    },
+    "run_sweep": {
+      "name": "Sweep the house",
+      "description": "Run the overnight checks now. Changes nothing."
+    },
+    "speak_briefing": {
+      "name": "Speak the briefing",
+      "description": "Say the morning briefing now, and return its text.",
+      "fields": {
+        "target": {
+          "name": "Speak through",
+          "description": "A voice satellite."
+        }
+      }
+    },
+    "agent_status": {
+      "name": "Agent status",
+      "description": "Coding-agent sessions on the companion."
+    },
+    "agent_transcript": {
+      "name": "Agent transcript",
+      "description": "Read back one session.",
+      "fields": {
+        "window": {
+          "name": "Window",
+          "description": "Which session."
+        }
+      }
+    },
+    "agent_prompt_direct": {
+      "name": "Prompt the agent",
+      "description": "Send text straight to the current session.",
+      "fields": {
+        "text": {
+          "name": "Text",
+          "description": "What to send."
+        }
+      }
+    },
+    "agent_start_session": {
+      "name": "Start a session",
+      "description": "Open a new coding-agent session.",
+      "fields": {
+        "project": {
+          "name": "Project",
+          "description": "Which project."
+        }
+      }
+    },
+    "agent_target_window": {
+      "name": "Target a session",
+      "description": "Point speech at one session.",
+      "fields": {
+        "id": {
+          "name": "ID",
+          "description": "Session identifier."
+        }
+      }
+    },
+    "agent_upload": {
+      "name": "Upload to the agent",
+      "description": "Send a file to the session.",
+      "fields": {
+        "name": {
+          "name": "Name",
+          "description": "File name."
+        },
+        "data": {
+          "name": "Data",
+          "description": "Base64 contents."
+        }
+      }
+    },
+    "agent_key": {
+      "name": "Send a key",
+      "description": "Press a key in the session.",
+      "fields": {
+        "key": {
+          "name": "Key",
+          "description": "Which key."
+        }
+      }
+    },
+    "agent_kill": {
+      "name": "End a session",
+      "description": "Close a coding-agent session.",
+      "fields": {
+        "window": {
+          "name": "Window",
+          "description": "Which session."
+        }
+      }
+    }
+  },
+  "entity": {
+    "switch": {
+      "build_mode": {
+        "name": "Build mode"
+      },
+      "agent_announcements": {
+        "name": "Agent announcements"
+      },
+      "message_watch": {
+        "name": "Message watch"
+      }
+    },
+    "sensor": {
+      "timers": {
+        "name": "Timers"
+      },
+      "findings": {
+        "name": "Findings"
+      }
+    }
+  }
+}

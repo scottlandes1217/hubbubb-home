@@ -1,0 +1,30 @@
+language: en
+intents:
+  HubbubbRecall:
+    data:
+      # Bare and question forms first: the wildcard below matches almost
+      # anything, and hassil takes the first rule that fits.
+      - sentences:
+          - "what do you (remember|know) about {query}"
+          - "what did I tell you about {query}"
+          - "do you remember (anything about|) {query}"
+          - "remind me about {query}"
+          - "recall {query}"
+  HubbubbForget:
+    data:
+      - sentences:
+          - "forget (that|what I said|) about {query}"
+          - "forget that {query}"
+          - "stop remembering {query}"
+  HubbubbRemember:
+    data:
+      - sentences:
+          - "remember that {fact}"
+          - "remember {fact}"
+          - "make a note that {fact}"
+          - "don't forget that {fact}"
+lists:
+  fact:
+    wildcard: true
+  query:
+    wildcard: true

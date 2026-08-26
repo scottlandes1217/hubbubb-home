@@ -1,0 +1,49 @@
+language: en
+intents:
+  HubbubbTimerStatus:
+    data:
+      - sentences:
+          - "(what|how much) time (is left|remains)"
+          - "(check|what about) (my|the) timers"
+          - "how (long|much longer) (on|for) (my|the) timer"
+          - "timer status"
+  HubbubbTimerCancel:
+    data:
+      # Bare form before the named form, or the wildcard swallows "the".
+      - sentences:
+          - "(cancel|stop|clear) (the|my|) timer"
+          - "(cancel|stop) all (the|my|) timers"
+      - sentences:
+          - "(cancel|stop) the {name} timer"
+  HubbubbTimerAdd:
+    data:
+      - sentences:
+          - "add {minutes} (minute|minutes) to (the|my|) timer"
+          - "(give me|add) another {minutes} (minute|minutes)"
+          - "add {seconds} (second|seconds) to (the|my|) timer"
+  HubbubbTimerStart:
+    data:
+      - sentences:
+          - "(set|start) a timer for {minutes} (minute|minutes)"
+          - "(set|start) a timer for {seconds} (second|seconds)"
+          - "(set|start) a timer for {hours} (hour|hours)"
+          - "(set|start) a {minutes} minute timer"
+          - "time {minutes} (minute|minutes)"
+      - sentences:
+          - "(set|start) a timer for {name} for {minutes} (minute|minutes)"
+          - "(set|start) a {minutes} minute timer for {name}"
+lists:
+  name:
+    wildcard: true
+  seconds:
+    range:
+      from: 5
+      to: 59
+  minutes:
+    range:
+      from: 1
+      to: 180
+  hours:
+    range:
+      from: 1
+      to: 12

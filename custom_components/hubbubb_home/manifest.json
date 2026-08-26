@@ -1,0 +1,18 @@
+{
+  "domain": "hubbubb_home",
+  "name": "Hubbubb Home",
+  "codeowners": [],
+  "config_flow": true,
+  "dependencies": [
+    "conversation",
+    "http",
+    "frontend",
+    "recorder"
+  ],
+  "documentation": "https://github.com/scottlandes/hubbubb-home",
+  "integration_type": "service",
+  "iot_class": "cloud_polling",
+  "issue_tracker": "https://github.com/scottlandes/hubbubb-home/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

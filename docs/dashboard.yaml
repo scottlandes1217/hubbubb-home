@@ -1,0 +1,37 @@
+# A starter dashboard. Paste into a view's raw configuration editor and
+# change `athena` to whatever you named your assistant.
+#
+# The ring needs an assist_satellite entity - the voice puck, ESP32 box, or
+# whatever is listening in that room.
+
+type: sections
+sections:
+  - type: grid
+    cards:
+      - type: custom:hubbubb-ring-card
+        entity: assist_satellite.living_room_satellite
+        assistant_name: Athena
+        size: 260
+        build_entity: switch.athena_build_mode
+        announce_entity: switch.athena_agent_announcements
+        messages_entity: switch.athena_message_watch
+        tap_message: "Yes?"
+
+      - type: custom:hubbubb-timers-card
+        entity: sensor.athena_timers
+
+      # Only if you have an Apple TV.
+      - type: custom:hubbubb-remote-card
+        entity: media_player.living_room_apple_tv
+        volume_entity: media_player.living_room_tv
+
+  - type: grid
+    cards:
+      - type: entities
+        title: Athena
+        entities:
+          - entity: switch.athena_build_mode
+          - entity: switch.athena_agent_announcements
+          - entity: switch.athena_message_watch
+          - entity: sensor.athena_findings
+            name: Found overnight

@@ -1,0 +1,30 @@
+language: en
+intents:
+  HubbubbBuildOn:
+    data:
+      - sentences:
+          - "(build|builder|build mode) (on|screen)"
+          - "(show|open) (the|) build (screen|mode)"
+          - "let's build (something|)"
+  HubbubbBuildOff:
+    data:
+      - sentences:
+          - "(build|build mode) off"
+          - "(close|exit|leave) (the|) build (screen|mode)"
+          - "(we're|we are) done building"
+  HubbubbFindings:
+    data:
+      - sentences:
+          - "(how is|how's) the house"
+          - "(is|has) anything (broken|wrong|offline|gone quiet)"
+          - "what did you find (last night|overnight|)"
+          - "(any|what) findings"
+  HubbubbAsk:
+    data:
+      - sentences:
+          - "ask hubbubb {request}"
+          - "(check|ask) hubbubb (for|about) {request}"
+          - "hubbubb {request}"
+lists:
+  request:
+    wildcard: true

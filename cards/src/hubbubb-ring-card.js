@@ -604,7 +604,7 @@ class HubbubbRingCard extends LitElement {
   _toggleHelper(id, key, onToast, offToast) {
     const on = this[key] === true;
     this[key] = !on;
-    this._hass.callService("input_boolean", on ? "turn_off" : "turn_on", {
+    this._hass.callService("homeassistant", on ? "turn_off" : "turn_on", {
       entity_id: id,
     });
     this._toast(on ? offToast : onToast);
@@ -612,7 +612,7 @@ class HubbubbRingCard extends LitElement {
 
   _setBuild(on, pushToHass = true) {
     if (pushToHass && this._config.build_entity && this._hass) {
-      this._hass.callService("input_boolean", on ? "turn_on" : "turn_off", {
+      this._hass.callService("homeassistant", on ? "turn_on" : "turn_off", {
         entity_id: this._config.build_entity,
       });
     }
@@ -621,7 +621,7 @@ class HubbubbRingCard extends LitElement {
       const was = this._build;
       this._build = on;
       // Only hand over on a real off->on edge (or a tap here). Landing on this
-      // dashboard while build mode is already on - clicking J.A.R.V.I.S. in the
+      // dashboard while build mode is already on - clicking the assistant in the
       // sidebar to leave the build page - must stay put, not bounce back.
       if (on && (pushToHass || was === false))
         this._navigate(this._config.build_dashboard);
@@ -2814,7 +2814,7 @@ class HubbubbRingCard extends LitElement {
         >
           <svg viewBox="0 0 24 24"><path d="M12 2l8.66 5v10L12 22l-8.66-5V7L12 2z" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8.5 12h7M12 8.5v7" stroke="currentColor" stroke-width="1.5"/></svg>
         </button>
-        <span class="ptitle">J.A.R.V.I.S. Agents</span>
+        <span class="ptitle">${this._name} Agents</span>
         <button
           class="hbtn"
           data-ai="create-session"
@@ -3080,7 +3080,7 @@ class HubbubbRingCard extends LitElement {
         <textarea
           data-ai="compose-prompt"
           rows="2"
-          placeholder="Message J.A.R.V.I.S.…"
+          placeholder="Message ${this._name}…"
           autocomplete="off"
           ?disabled=${this._pending}
           @keydown=${(e) => {

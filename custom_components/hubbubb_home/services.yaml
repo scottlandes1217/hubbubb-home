@@ -1,0 +1,85 @@
+remember:
+  fields:
+    fact:
+      required: true
+      example: "the pool guy comes on tuesdays"
+      selector: { text: }
+recall:
+  fields:
+    query:
+      required: true
+      example: "pool"
+      selector: { text: }
+    limit:
+      default: 3
+      selector: { number: { min: 1, max: 25 } }
+forget:
+  fields:
+    query:
+      required: true
+      selector: { text: }
+timer_start:
+  fields:
+    name:
+      example: "pasta"
+      selector: { text: }
+    hours:
+      default: 0
+      selector: { number: { min: 0, max: 24 } }
+    minutes:
+      default: 0
+      selector: { number: { min: 0, max: 600 } }
+    seconds:
+      default: 0
+      selector: { number: { min: 0, max: 600 } }
+timer_cancel:
+  fields:
+    timer_id:
+      example: "t1"
+      selector: { text: }
+    name:
+      example: "pasta"
+      selector: { text: }
+timer_add:
+  fields:
+    timer_id:
+      selector: { text: }
+    name:
+      selector: { text: }
+    seconds:
+      required: true
+      selector: { number: { min: -3600, max: 3600 } }
+ask_hubbubb:
+  fields:
+    request:
+      required: true
+      example: "what did the Fletchers ask for last week"
+      selector: { text: }
+run_sweep:
+speak_briefing:
+  fields:
+    target:
+      selector: { entity: { domain: assist_satellite } }
+agent_status:
+agent_transcript:
+  fields:
+    window: { selector: { text: } }
+agent_prompt_direct:
+  fields:
+    text: { required: true, selector: { text: } }
+agent_start_session:
+  fields:
+    project: { selector: { text: } }
+agent_target_window:
+  fields:
+    id: { required: true, selector: { text: } }
+agent_upload:
+  fields:
+    name: { selector: { text: } }
+    data: { selector: { text: } }
+agent_key:
+  fields:
+    key: { required: true, selector: { text: } }
+agent_kill:
+  fields:
+    window: { selector: { text: } }
