@@ -8,6 +8,8 @@ type: sections
 sections:
   - type: grid
     cards:
+      # Add this from the UI instead and it fills itself in - the switches
+      # below are found automatically, and the name comes from their ids.
       - type: custom:hubbubb-ring-card
         entity: assist_satellite.living_room_satellite
         assistant_name: Athena

@@ -34,14 +34,14 @@ const DEFAULTS = {
   build_projects: [], // chip allowlist for "+ New"; empty = all known projects
   assistant_name: "Assistant", // what your AI is called, used in every message
   tap_message: "Yes?", // what the assistant says when the ring is tapped
-  /* Helper gating the "Claude Code finished" announcement on the puck (and
-     with it the media pause/mute that the announcement sets off). The
-     bell only renders when the entity actually exists. */
-  announce_entity: "input_boolean.hubbubb_announce_agent",
-  /* Helper arming the Hubbubb inbox watch: on, Home Assistant asks Hubbubb
-     every few minutes what is new and reads it out here. The bell only renders
-     when the entity actually exists. */
-  messages_entity: "input_boolean.hubbubb_messages",
+  /* Gates the "agent finished" announcement on the puck, and with it the
+     media pause/mute the announcement sets off. Left empty because the id
+     carries whatever you named the assistant - getStubConfig finds it, and
+     the bell only renders once the entity actually exists. */
+  announce_entity: "",
+  /* Arms the Hubbubb inbox watch: on, Home Assistant asks Hubbubb every few
+     minutes what is new and reads it out here. Same story. */
+  messages_entity: "",
 };
 
 /* Loudness at time t, in seconds. Outside the file is silence, NOT "no
@@ -527,11 +527,34 @@ class HubbubbRingCard extends LitElement {
     return document.createElement("hubbubb-ring-card-editor");
   }
 
+  /* Wire the card to the integration on the way in. The three switches are
+     named after the assistant, so the build-mode one also tells us what to
+     call it - which means adding this card from the UI needs no typing. */
   static getStubConfig(hass) {
-    const entity = Object.keys(hass?.states ?? {}).find(
-      (id) => id.split(".")[0] === SATELLITE_DOMAIN
-    );
-    return { type: "custom:hubbubb-ring-card", entity: entity ?? "" };
+    const ids = Object.keys(hass?.states ?? {});
+    const bySuffix = (suffix) =>
+      ids.find((id) => id.startsWith("switch.") && id.endsWith(suffix)) ?? "";
+
+    const build = bySuffix("_build_mode");
+    const slug = build.slice("switch.".length, -"_build_mode".length);
+    const name = slug
+      .split("_")
+      .filter(Boolean)
+      .map((w) => w[0].toUpperCase() + w.slice(1))
+      .join(" ");
+
+    return {
+      type: "custom:hubbubb-ring-card",
+      entity: ids.find((id) => id.split(".")[0] === SATELLITE_DOMAIN) ?? "",
+      ...(name && { assistant_name: name }),
+      ...(build && { build_entity: build }),
+      ...(bySuffix("_agent_announcements") && {
+        announce_entity: bySuffix("_agent_announcements"),
+      }),
+      ...(bySuffix("_message_watch") && {
+        messages_entity: bySuffix("_message_watch"),
+      }),
+    };
   }
 
   /* ---------------- canvas veil + 3D core ---------------- */
@@ -586,8 +609,8 @@ class HubbubbRingCard extends LitElement {
     this._toggleHelper(
       this._config.announce_entity,
       "_announce",
-      "Claude finishes: spoken on the puck",
-      "Claude finishes: phone only"
+      `${this._name} finishes: spoken on the puck`,
+      `${this._name} finishes: phone only`
     );
   }
 
@@ -3144,8 +3167,8 @@ class HubbubbRingCard extends LitElement {
                 class="mode speaker ${announce ? "on" : ""}"
                 data-ai="toggle-agent-announcements"
                 title=${announce
-                  ? "Claude finishes out loud - tap to send to your phone instead"
-                  : "Claude finishes go to your phone - tap to hear them here"}
+                  ? `${this._name} finishes out loud - tap to send to your phone instead`
+                  : `${this._name} finishes go to your phone - tap to hear them here`}
                 @click=${this._toggleAnnounce}
               >
                 <svg viewBox="0 0 24 24" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" stroke-linecap="round">
@@ -4406,8 +4429,8 @@ const EDITOR_LABELS = {
   media_player: "Speaker entity (blank = same device)",
   tap_message: "Spoken reply when the ring is tapped",
   build_entity: "Build mode toggle helper (optional)",
-  announce_entity: "Claude announcement toggle helper",
-  messages_entity: "Hubbubb message announcement toggle helper",
+  announce_entity: "Agent announcement toggle",
+  messages_entity: "Hubbubb message toggle",
   idle_color: "Idle",
   listening_color: "Listening",
   processing_color: "Processing",
