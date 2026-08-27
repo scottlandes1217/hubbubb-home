@@ -1,6 +1,6 @@
 import { LitElement, css, html, nothing } from "lit";
 import { rmsEnvelope } from "./envelope.js";
-import { clearCore, pinToCore, separate, widestGap } from "./pack.js";
+import { clearCore, coalesce, pinToCore, separate, widestGap } from "./pack.js";
 
 const CARD_VERSION = "4.11.1";
 
@@ -2597,48 +2597,35 @@ class HubbubbRingCard extends LitElement {
   }
 
   _bubbleField(half) {
-    /* The middle is a bubble in its own right, and everything else is stuck
-       to it: anchors rest on the core's skin, riders rest on the anchors.
-       That nesting is what the logo is - one big bubble carrying a crowd of
-       smaller ones - and it gives speech somewhere to travel from, since a
-       release now visibly leaves the surface of something. */
+    /* One population, not two. A bubble is an "anchor" when it is big enough
+       to sit on the core, and it gets big by merging - so the structure is
+       something the foam grows into rather than something seeded into it.
+       New bubbles are always small; the big ones are earned. */
     const core = half * 0.42;
-    const R = core;
     return {
       core,
-      R,
-      /* Two populations, because one was the problem. A single size range
-         spread evenly round a circle reads as a beaded necklace, not as
-         foam. Anchors are few and large and hold station on the ring; riders
-         are many and small and settle onto whichever anchor is nearest. The
-         separation pass then stacks the riders into layers on the anchors'
-         surfaces, which is what the logo actually looks like. */
-      anchors: 6,
-      riders: 16,
-      /* Sized so the whole stack still fits: core 0.42, an anchor on top of
-         it reaches about 0.72, and a rider on top of that about 0.86. Any
-         larger and the outermost bubbles clip the edge of the card. */
-      minAnchor: half * 0.055,
-      maxAnchor: half * 0.155,
-      anchorR: () => half * (0.09 + Math.random() * 0.055),
-      riderR: () => half * (0.033 + Math.pow(Math.random(), 1.5) * 0.042),
+      R: core,
+      newR: () => half * (0.03 + Math.pow(Math.random(), 1.6) * 0.028),
+      // Above this a bubble rides the core; below it, it rides other bubbles.
+      minAnchor: half * 0.058,
+      // The ceiling. Bigger than this and the stack clips the card edge, so
+      // it bursts instead - which is what makes room for small ones again.
+      maxR: half * 0.13,
     };
   }
 
-  _spawnBubble(field, cx, cy, kind, at, radius) {
+  _spawnBubble(field, cx, cy, at, radius) {
     const a = at ?? Math.random() * Math.PI * 2;
-    const anchor = kind === "anchor";
-    // Riders start just off the ring so they fall onto an anchor rather than
-    // appearing already embedded in one.
-    const d = anchor ? field.core * 1.12 : field.core * 1.55;
+    const r = radius ?? field.newR();
+    const d = field.core + r;
     return {
       x: cx + Math.cos(a) * d,
       y: cy + Math.sin(a) * d,
       vx: 0,
       vy: 0,
       r: 0,
-      full: radius ?? (anchor ? field.anchorR() : field.riderR()),
-      anchor,
+      full: r,
+      anchor: r >= field.minAnchor,
       host: null,
       held: true,
       pop: -1,
@@ -2687,8 +2674,7 @@ class HubbubbRingCard extends LitElement {
     const scale = Number(this._config.particle_size) || 1;
 
     const field = this._bubbleField(half);
-    const wantAnchors = Math.max(3, Math.round(field.anchors * scale));
-    const wantRiders = Math.max(4, Math.round(field.riders * scale));
+    const maxBubbles = Math.max(6, Math.round(22 * scale));
     /* Docking into build mode animates the ring's width, so the observer
        fires on every frame of the transition. Reseeding on each of those was
        the jank: the whole field was destroyed and rebuilt sixty times over
@@ -2710,21 +2696,23 @@ class HubbubbRingCard extends LitElement {
     if (!this._bub) {
       this._bubHalf = half;
       this._bub = [];
-      for (let i = 0; i < wantAnchors; i++) {
+      // Seed a spread of sizes so it opens as foam rather than as a queue of
+      // identical bubbles waiting to merge.
+      for (let i = 0; i < maxBubbles; i++) {
+        const r = field.newR() * (1 + Math.random() * 2.2);
         const b = this._spawnBubble(
-          field, cx, cy, "anchor", (i / wantAnchors) * Math.PI * 2
+          field, cx, cy, (i / maxBubbles) * Math.PI * 2, Math.min(r, field.maxR)
         );
-        b.r = b.full; // seed the first field grown, not swelling in
-        this._bub.push(b);
-      }
-      for (let i = 0; i < wantRiders; i++) {
-        const b = this._spawnBubble(field, cx, cy, "rider");
         b.r = b.full;
+        b.anchor = b.r >= field.minAnchor;
         this._bub.push(b);
       }
       this._release = 0;
     }
     const bub = this._bub;
+    // Size decides the role, every frame: a bubble that has just merged its
+    // way past the threshold sinks to the core on the next one.
+    for (const b of bub) if (b.held && b.pop < 0) b.anchor = b.r >= field.minAnchor;
     const anchors = bub.filter((b) => b.anchor && b.held && b.pop < 0);
     // A bubble under pressure swells; the core does the same as he talks.
     const coreR = field.core * (1 + env * 0.09 + Math.sin(this._t * 0.7) * 0.012);
@@ -2824,32 +2812,52 @@ class HubbubbRingCard extends LitElement {
     clearCore(bub, cx, cy, coreR);
     pinToCore(bub, cx, cy, coreR);
 
-    // retire popped bubbles and grow replacements into the gap
+    /* Merging, bursting, and filling in - the cycle that keeps it moving.
+       Small bubbles find each other and fuse, the fused ones fuse again, and
+       a bubble that reaches the ceiling bursts and leaves a hole that small
+       ones grow back into. Speech only accelerates a loop that is already
+       turning, which is why the ring still has life in it when nobody is
+       talking. */
+    coalesce(bub, {
+      dt,
+      /* Tuned by running the cycle headlessly for a simulated minute and
+         counting: this gives roughly a merge a second and a burst every
+         fifteen, which keeps the field visibly turning over without it
+         churning so fast that nothing holds still long enough to look at. */
+      rate: 1.3 + busy * 0.9,
+      maxRatio: 2.1,
+      maxR: field.maxR,
+    });
+
+    // At the ceiling a bubble bursts rather than growing through the card.
+    for (const b of bub) {
+      if (b.held && b.pop < 0 && b.r >= field.maxR * 0.995) {
+        b.held = false;
+        b.pop = 0;
+        b.popR = b.r;
+      }
+    }
+
     for (let i = bub.length - 1; i >= 0; i--) {
       if (bub[i].pop > 0.34) bub.splice(i, 1);
     }
-    /* Refill each population on its own. A released bubble has already given
-       up its place, so its replacement starts growing while it is still
-       drifting away rather than after it pops - which is what keeps the ring
-       looking alive through a long answer instead of slowly going bald. */
-    const live = (anchor) =>
-      bub.filter((b) => b.held && b.pop < 0 && b.anchor === anchor).length;
-    while (live(true) < wantAnchors) {
-      /* Fill the biggest bare stretch, at a size that fits it. A gap left by
-         a released bubble heals over with one the right shape for the hole,
-         which is why the sizes stay varied instead of converging on the
-         middle of the range. */
-      const held = bub.filter((b) => b.anchor && b.held && b.pop < 0);
-      const { angle, gap } = widestGap(held, cx, cy);
-      const room = Math.sin(Math.min(gap, Math.PI) / 2) * field.core * 0.85;
-      const r = Math.max(
-        field.minAnchor,
-        Math.min(field.maxAnchor, room)
-      );
-      bub.push(this._spawnBubble(field, cx, cy, "anchor", angle, r));
-    }
-    while (live(false) < wantRiders) {
-      bub.push(this._spawnBubble(field, cx, cy, "rider"));
+
+    /* Fill bare stretches, not just missing headcount. Waiting for the count
+       to drop was the reason gaps sat open: merging keeps the count low but
+       leaves holes, and a ring can be short of nothing and still look moth
+       eaten. Spawn while there is both room on the core and room in the
+       budget, and only ever small - size is earned by merging. */
+    let guard = 0;
+    while (guard++ < 4) {
+      const held = bub.filter((b) => b.held && b.pop < 0);
+      if (held.length >= maxBubbles) break;
+      const onCore = held.filter((b) => b.anchor);
+      const { angle, gap } = widestGap(onCore, cx, cy);
+      // Chord across the gap at the core's surface: how much bare skin there
+      // actually is, rather than how many radians it spans.
+      const room = Math.sin(Math.min(gap, Math.PI) / 2) * field.core;
+      if (onCore.length > 1 && room < field.minAnchor * 1.1) break;
+      bub.push(this._spawnBubble(field, cx, cy, angle));
     }
 
     // --- paint ------------------------------------------------------------

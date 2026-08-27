@@ -145,3 +145,57 @@ export function widestGap(anchors, cx, cy) {
   }
   return { angle, gap };
 }
+
+/* Bubbles of a like size that touch for long enough become one bubble.
+
+   Area is conserved, so the survivor's radius is the root of the sum of
+   squares - two equal bubbles make one about 1.41 times the radius, not twice
+   it. Doubling the radius quadruples the area and the foam visibly gains
+   substance out of nowhere.
+
+   Only near-equals merge. Real foam does this too, but the reason here is
+   legibility: let a big one swallow a small one and the field converges on a
+   few giants within seconds, and the small bubbles that make it read as foam
+   are gone. `rate` is per second and the roll is per frame, so merging looks
+   like something that happens rather than something that is switched on. */
+export function coalesce(bubbles, opts) {
+  const { dt, rate, maxRatio, maxR, rand = Math.random } = opts;
+  let merged = 0;
+  for (let i = 0; i < bubbles.length; i++) {
+    const a = bubbles[i];
+    if (!a.held || a.pop >= 0 || a.gone) continue;
+    for (let j = i + 1; j < bubbles.length; j++) {
+      const b = bubbles[j];
+      if (!b.held || b.pop >= 0 || b.gone) continue;
+      const d = Math.hypot(b.x - a.x, b.y - a.y);
+      if (d > a.r + b.r + 1) continue;
+      const ratio = a.r >= b.r ? a.r / b.r : b.r / a.r;
+      if (ratio > maxRatio) continue;
+      const grown = Math.sqrt(a.r * a.r + b.r * b.r);
+      if (grown > maxR) continue;
+      if (rand() > rate * dt) continue;
+
+      const keep = a.r >= b.r ? a : b;
+      const lost = keep === a ? b : a;
+      const wk = keep.r * keep.r;
+      const wl = lost.r * lost.r;
+      const tot = wk + wl;
+      keep.x = (keep.x * wk + lost.x * wl) / tot;
+      keep.y = (keep.y * wk + lost.y * wl) / tot;
+      keep.vx = (keep.vx * wk + lost.vx * wl) / tot;
+      keep.vy = (keep.vy * wk + lost.vy * wl) / tot;
+      keep.r = grown;
+      keep.full = grown;
+      lost.gone = true;
+      merged++;
+      if (keep === a) continue;
+      break;
+    }
+  }
+  if (merged) {
+    for (let i = bubbles.length - 1; i >= 0; i--) {
+      if (bubbles[i].gone) bubbles.splice(i, 1);
+    }
+  }
+  return merged;
+}

@@ -1,6 +1,6 @@
 /* The bubble field's one real invariant: held bubbles must not overlap. */
 import assert from "node:assert";
-import { clearCore, pinToCore, separate, widestGap } from "../src/pack.js";
+import { clearCore, coalesce, pinToCore, separate, widestGap } from "../src/pack.js";
 
 const bubble = (x, y, r, extra = {}) => ({ x, y, r, held: true, pop: -1, ...extra });
 const gap = (a, b) => Math.hypot(b.x - a.x, b.y - a.y) - (a.r + b.r);
@@ -126,6 +126,57 @@ const gap = (a, b) => Math.hypot(b.x - a.x, b.y - a.y) - (a.r + b.r);
   // an empty ring is all gap, and must not divide by anything
   const e = widestGap([], 0, 0);
   assert.ok(Math.abs(e.gap - TAU) < 0.001 && Number.isFinite(e.angle), "empty ring");
+}
+
+// --- merging conserves area, not radius ------------------------------------
+{
+  const always = () => 0; // rand() = 0 always passes the per-frame roll
+  const f = [bubble(0, 0, 10), bubble(19, 0, 10)];
+  const n = coalesce(f, { dt: 1, rate: 1, maxRatio: 1.9, maxR: 100, rand: always });
+  assert.strictEqual(n, 1, "two touching equals did not merge");
+  assert.strictEqual(f.length, 1, "the absorbed bubble was not removed");
+  // sqrt(10^2 + 10^2) = 14.14, NOT 20 - doubling the radius quadruples the area
+  assert.ok(Math.abs(f[0].r - Math.SQRT2 * 10) < 0.001, `radius ${f[0].r}, wanted 14.14`);
+  assert.ok(f[0].x > 0 && f[0].x < 19, "survivor did not sit between the two");
+}
+
+// Only near-equals merge. A big one hoovering up small ones collapses the
+// field into a few giants within seconds and the foam stops reading as foam.
+{
+  const f = [bubble(0, 0, 30), bubble(35, 0, 5)];
+  const n = coalesce(f, { dt: 1, rate: 1, maxRatio: 1.9, maxR: 100, rand: () => 0 });
+  assert.strictEqual(n, 0, "a mismatched pair merged");
+  assert.strictEqual(f.length, 2, "a mismatched pair was consumed");
+}
+
+// The ceiling is respected: a merge that would breach it never happens.
+{
+  const f = [bubble(0, 0, 10), bubble(19, 0, 10)];
+  const n = coalesce(f, { dt: 1, rate: 1, maxRatio: 1.9, maxR: 12, rand: () => 0 });
+  assert.strictEqual(n, 0, "merged straight through the size cap");
+}
+
+// Bubbles that are not touching stay apart however long you wait.
+{
+  const f = [bubble(0, 0, 10), bubble(60, 0, 10)];
+  assert.strictEqual(coalesce(f, { dt: 1, rate: 1, maxRatio: 1.9, maxR: 100, rand: () => 0 }), 0,
+    "distant bubbles merged");
+}
+
+// Released and popping bubbles are out of it - one drifting away must not
+// swallow the ring on its way past.
+{
+  const f = [bubble(0, 0, 10, { held: false }), bubble(19, 0, 10)];
+  assert.strictEqual(coalesce(f, { dt: 1, rate: 1, maxRatio: 1.9, maxR: 100, rand: () => 0 }), 0,
+    "a released bubble merged");
+}
+
+// The roll is per frame and per second: at 60fps a rate of 1 should almost
+// never fire, or merging looks switched on rather than gradual.
+{
+  const f = [bubble(0, 0, 10), bubble(19, 0, 10)];
+  assert.strictEqual(coalesce(f, { dt: 1/60, rate: 1, maxRatio: 1.9, maxR: 100, rand: () => 0.9 }), 0,
+    "merged on a roll it should have lost");
 }
 
 console.log("pack ok");
