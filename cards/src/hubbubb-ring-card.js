@@ -1,5 +1,6 @@
 import { LitElement, css, html, nothing } from "lit";
 import { rmsEnvelope } from "./envelope.js";
+import { separate } from "./pack.js";
 
 const CARD_VERSION = "4.11.1";
 
@@ -2558,33 +2559,51 @@ class HubbubbRingCard extends LitElement {
 
   /* ---------------- hubbubb: a ring, and bubbles around it ----------------
 
-     The logo is a cluster of blue bubbles, so the default animation is that
-     cluster set in motion: a clean ring with bubbles orbiting it, swelling and
-     spreading when he speaks and settling to a slow drift when nobody is
-     talking. Deliberately much less machinery than jarvis-v1 - no segments, no
-     mote field, no wireframe core - because it has to read at 90px on a wall
-     panel as well as at 470px on a desk.
+     The logo is a cluster of bubbles that touch, so this is a small physics
+     toy rather than circles on an orbit. Three rules do all the work:
 
-     Bubbles are drawn the way the logo draws them: a light-to-base radial
-     fill, a darker rim, and one small specular highlight up and to the left.
-     That highlight is most of why a circle reads as a bubble at all. */
-  _seedBubbles(count) {
-    const out = [];
-    for (let i = 0; i < count; i++) {
-      out.push({
-        // Spread round the ring but not evenly - a perfect ring of evenly
-        // spaced circles reads as a loading spinner, not as bubbles.
-        a: Math.random() * Math.PI * 2,
-        rad: 0.05 + Math.pow(Math.random(), 1.7) * 0.16,
-        off: (Math.random() - 0.5) * 0.16,
-        spd: 0.5 + Math.random() * 0.9,
-        wob: Math.random() * Math.PI * 2,
-        wobF: 0.4 + Math.random() * 0.7,
-        drift: 0,
-      });
-    }
-    // Big ones first, so the small bubbles sit on top and read as nearer.
-    return out.sort((x, y) => y.rad - x.rad);
+       Bubbles never overlap. Any two that intersect are pushed apart until
+       they are exactly touching, which is what makes a heap of circles read
+       as foam instead of as a Venn diagram.
+
+       Bubbles stick. Once they are close but not touching they pull together,
+       so they gather into clumps and travel as clumps rather than spacing
+       themselves evenly the way a repulsion-only field would.
+
+       Speaking releases them. Each burst of speech detaches a bubble from the
+       ring; it floats off, thins, and pops, and a new one grows back into the
+       gap. So the ring visibly empties while he talks and refills when he
+       stops, which is the whole point of putting it on a wall.
+
+     Held bubbles are sprung to the ring's circumference rather than pinned to
+     it, so the separation pass can shove them off the line and the spring can
+     draw them back - that give is what stops the clumps looking rigid. */
+  _bubbleField(half) {
+    const R = half * 0.58;
+    return {
+      R,
+      // Radii are weighted small, like the logo: a few big ones carry the
+      // shape and the small ones fill the gaps between them.
+      pick: () => half * (0.04 + Math.pow(Math.random(), 2.1) * 0.085),
+      // Roughly what fits around the circumference without crowding.
+      want: Math.max(7, Math.min(30, Math.round((2 * Math.PI * R) / (half * 0.15)))),
+    };
+  }
+
+  _spawnBubble(field, cx, cy, at) {
+    const a = at ?? Math.random() * Math.PI * 2;
+    return {
+      x: cx + Math.cos(a) * field.R,
+      y: cy + Math.sin(a) * field.R,
+      vx: 0,
+      vy: 0,
+      r: 0,
+      full: field.pick(),
+      held: true,
+      pop: -1,
+      life: 0,
+      wob: Math.random() * Math.PI * 2,
+    };
   }
 
   _drawBubbles(dt) {
@@ -2623,70 +2642,147 @@ class HubbubbRingCard extends LitElement {
 
     this._t += dt;
     const busy = cur.swirl / 1.8;
+    const scale = Number(this._config.particle_size) || 1;
 
-    const wanted = Math.max(
-      10,
-      Math.min(34, Math.round((half / 9) * (Number(this._config.particle_size) || 1)))
-    );
-    if (!this._bubbles || this._bubbles.length !== wanted) {
-      this._bubbles = this._seedBubbles(wanted);
+    const field = this._bubbleField(half);
+    const want = Math.max(5, Math.round(field.want * scale));
+    if (!this._bub || this._bubHalf !== half) {
+      this._bubHalf = half;
+      this._bub = [];
+      for (let i = 0; i < want; i++) {
+        const b = this._spawnBubble(field, cx, cy, (i / want) * Math.PI * 2);
+        b.r = b.full; // seed the first field already grown, not swelling in
+        this._bub.push(b);
+      }
+      this._release = 0;
+    }
+    const bub = this._bub;
+
+    /* Speech lets bubbles go. Rate rises with loudness, and the accumulator
+       carries the fraction over between frames so a quiet passage still
+       releases one eventually rather than rounding to nothing every frame. */
+    this._release += env * dt * 2.6;
+    const heldCount = bub.filter((b) => b.held).length;
+    while (this._release >= 1 && heldCount > 3) {
+      this._release -= 1;
+      const held = bub.filter((b) => b.held && b.r > b.full * 0.6);
+      if (!held.length) break;
+      const b = held[Math.floor(Math.random() * held.length)];
+      b.held = false;
+      b.life = 0;
+      const d = Math.hypot(b.x - cx, b.y - cy) || 1;
+      const ux = (b.x - cx) / d, uy = (b.y - cy) / d;
+      const push = half * (0.5 + Math.random() * 0.5);
+      b.vx = ux * push - uy * half * 0.12;
+      b.vy = uy * push + ux * half * 0.12;
     }
 
+    // --- motion -----------------------------------------------------------
+    const drift = half * (0.16 + busy * 0.32);
+    for (const b of bub) {
+      b.wob += dt * 1.3;
+      if (b.pop >= 0) {
+        b.pop += dt;
+        continue;
+      }
+      if (b.held) {
+        b.r += (b.full - b.r) * (1 - Math.exp(-dt / 0.45));
+        const d = Math.hypot(b.x - cx, b.y - cy) || 1;
+        const ux = (b.x - cx) / d, uy = (b.y - cy) / d;
+        // spring back to the ring, and a slow tangential drift round it
+        const pull = (field.R - d) * 7;
+        b.vx += (ux * pull - uy * drift) * dt;
+        b.vy += (uy * pull + ux * drift) * dt;
+        const damp = Math.exp(-dt * 3.4);
+        b.vx *= damp;
+        b.vy *= damp;
+      } else {
+        b.life += dt;
+        b.vy -= half * 0.16 * dt; // released bubbles rise as they go
+        b.vx *= Math.exp(-dt * 0.5);
+        b.vy *= Math.exp(-dt * 0.5);
+        b.r *= Math.exp(-dt * 0.22); // they thin on the way out
+        const gone =
+          b.life > 1.5 + Math.random() * 0.6 ||
+          b.x < -half || b.x > W + half || b.y < -half;
+        if (gone) {
+          b.pop = 0;
+          b.popR = b.r;
+        }
+      }
+      b.x += b.vx * dt;
+      b.y += b.vy * dt;
+    }
+
+    separate(bub, 2);
+
+    // retire popped bubbles and grow replacements into the gap
+    for (let i = bub.length - 1; i >= 0; i--) {
+      if (bub[i].pop > 0.34) bub.splice(i, 1);
+    }
+    // Count only the held ones: a bubble that has been let go has already
+    // given up its place on the ring, so its replacement starts growing while
+    // it is still drifting away rather than after it pops.
+    while (bub.filter((b) => b.held && b.pop < 0).length < want) {
+      bub.push(this._spawnBubble(field, cx, cy));
+    }
+
+    // --- paint ------------------------------------------------------------
     ctx.clearRect(0, 0, W, H);
     ctx.globalCompositeOperation = "lighter";
 
-    const ringR = half * 0.6;
-    const line = Math.max(1.2, half * 0.022);
-
-    // The ring. Two passes: a wide soft one for the glow, a tight one for the
-    // edge - cheaper and steadier than a canvas shadow at this size.
-    ctx.strokeStyle = `rgba(${R},${G},${B},${0.1 + env * 0.18})`;
+    const line = Math.max(1.2, half * 0.02);
+    ctx.strokeStyle = `rgba(${R},${G},${B},${0.09 + env * 0.16})`;
     ctx.lineWidth = line * 4;
     ctx.beginPath();
-    ctx.arc(cx, cy, ringR, 0, Math.PI * 2);
+    ctx.arc(cx, cy, field.R, 0, Math.PI * 2);
     ctx.stroke();
-
-    ctx.strokeStyle = `rgba(${R},${G},${B},${0.5 + env * 0.4})`;
+    ctx.strokeStyle = `rgba(${R},${G},${B},${0.42 + env * 0.35})`;
     ctx.lineWidth = line;
     ctx.beginPath();
-    ctx.arc(cx, cy, ringR, 0, Math.PI * 2);
+    ctx.arc(cx, cy, field.R, 0, Math.PI * 2);
     ctx.stroke();
 
-    for (const b of this._bubbles) {
-      b.a += dt * b.spd * (0.16 + busy * 0.5 + env * 0.55);
-      b.wob += dt * b.wobF;
-      // Speech pushes the cluster outwards and lets it fall back.
-      b.drift += ((env * 0.09) - b.drift) * k;
-
-      const r = ringR * (1 + b.off + b.drift) + Math.sin(b.wob) * half * 0.035;
-      const x = cx + Math.cos(b.a) * r;
-      const y = cy + Math.sin(b.a) * r;
-      const rad = half * b.rad * (1 + env * 0.22 + Math.sin(b.wob * 1.7) * 0.06);
+    // biggest first, so the small ones sit on top and read as nearer
+    const order = bub.slice().sort((x, y) => y.r - x.r);
+    for (const b of order) {
+      if (b.pop >= 0) {
+        // the pop: a thin ring opening out and fading
+        const t = b.pop / 0.34;
+        const rr = (b.popR || b.r) * (1 + t * 1.5);
+        ctx.strokeStyle = `rgba(${R},${G},${B},${(1 - t) * 0.55})`;
+        ctx.lineWidth = Math.max(0.7, (b.popR || b.r) * 0.16 * (1 - t));
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, rr, 0, Math.PI * 2);
+        ctx.stroke();
+        continue;
+      }
+      const rad = b.r * (1 + Math.sin(b.wob) * 0.02);
       if (rad < 0.6) continue;
+      const fade = b.held ? 1 : Math.max(0, 1 - b.life / 2.1);
+      const a = (0.5 + env * 0.28) * fade;
 
       const g = ctx.createRadialGradient(
-        x - rad * 0.3, y - rad * 0.35, rad * 0.1, x, y, rad
+        b.x - rad * 0.3, b.y - rad * 0.35, rad * 0.1, b.x, b.y, rad
       );
-      const a = 0.5 + env * 0.3;
-      g.addColorStop(0, `rgba(${Math.min(255, R + 90)},${Math.min(255, G + 90)},${Math.min(255, B + 70)},${a})`);
-      g.addColorStop(0.55, `rgba(${R},${G},${B},${a * 0.75})`);
+      g.addColorStop(0, `rgba(${Math.min(255, R + 95)},${Math.min(255, G + 95)},${Math.min(255, B + 75)},${a})`);
+      g.addColorStop(0.55, `rgba(${R},${G},${B},${a * 0.7})`);
       g.addColorStop(1, `rgba(${R},${G},${B},0)`);
       ctx.fillStyle = g;
       ctx.beginPath();
-      ctx.arc(x, y, rad, 0, Math.PI * 2);
+      ctx.arc(b.x, b.y, rad, 0, Math.PI * 2);
       ctx.fill();
 
-      // The rim, and the one highlight that makes it read as a bubble.
-      ctx.strokeStyle = `rgba(${R},${G},${B},${0.45 + env * 0.3})`;
+      ctx.strokeStyle = `rgba(${R},${G},${B},${(0.45 + env * 0.28) * fade})`;
       ctx.lineWidth = Math.max(0.6, rad * 0.09);
       ctx.beginPath();
-      ctx.arc(x, y, rad * 0.94, 0, Math.PI * 2);
+      ctx.arc(b.x, b.y, rad * 0.94, 0, Math.PI * 2);
       ctx.stroke();
 
       if (rad > 3) {
-        ctx.fillStyle = `rgba(255,255,255,${0.28 + env * 0.22})`;
+        ctx.fillStyle = `rgba(255,255,255,${(0.26 + env * 0.2) * fade})`;
         ctx.beginPath();
-        ctx.arc(x - rad * 0.34, y - rad * 0.38, rad * 0.17, 0, Math.PI * 2);
+        ctx.arc(b.x - rad * 0.34, b.y - rad * 0.38, rad * 0.17, 0, Math.PI * 2);
         ctx.fill();
       }
     }
