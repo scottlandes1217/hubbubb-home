@@ -2717,21 +2717,38 @@ class HubbubbRingCard extends LitElement {
     if (!this._bub) {
       this._bubHalf = half;
       this._bub = [];
-      // Seed a spread of sizes so it opens as foam rather than as a queue of
-      // identical bubbles waiting to merge.
+      /* Seed it already settled.
+
+         Placing bubbles round the core and letting the first few seconds of
+         animation untangle them meant the first thing anybody saw on loading
+         the page was the field sorting itself out. Running the constraints
+         hard for a hundred iterations before the first paint costs a couple
+         of milliseconds once, and it opens resolved.
+
+         Even angles, deliberately. Spacing them by the arc each one needs
+         sounds better and measures worse - it starts them more tangled, and
+         the relaxation is what actually does the work either way. */
       for (let i = 0; i < maxBubbles; i++) {
-        const r = field.newR() * (1 + Math.random() * 2.2);
+        const r = Math.min(field.newR() * (1 + Math.random() * 2.2), field.maxR);
         const b = this._spawnBubble(
-          field, cx, cy, (i / maxBubbles) * Math.PI * 2, Math.min(r, field.maxR)
+          field, cx, cy, (i / maxBubbles) * Math.PI * 2, r
         );
         b.r = b.full;
         b.anchor = b.r >= field.minAnchor;
-        /* Start the first crop part way through their lives. Seeded at zero
-           they all age in lockstep: the ring sits perfectly still for a
-           minute and then every bubble goes at once, which looks broken in
-           both directions. */
+        // Start part way through their lives, or they age in lockstep: the
+        // ring sits still for a minute and then every bubble goes at once.
         b.age = Math.random() * b.span;
         this._bub.push(b);
+      }
+      for (let i = 0; i < 100; i++) {
+        separate(this._bub, 2);
+        clearCore(this._bub, cx, cy, field.core);
+        pinToCore(this._bub, cx, cy, field.core);
+        spreadOnCore(this._bub, cx, cy, field.core, 2);
+      }
+      for (const b of this._bub) {
+        b.vx = 0;
+        b.vy = 0;
       }
       this._release = 0;
     }
@@ -2771,7 +2788,7 @@ class HubbubbRingCard extends LitElement {
     // --- motion -----------------------------------------------------------
     // Slow. The field is meant to be something you notice out of the corner
     // of your eye, not something that asks to be watched.
-    const drift = half * (0.075 + busy * 0.16);
+    const drift = half * (0.045 + busy * 0.11);
     for (const b of bub) {
       b.wob += dt * 1.3;
       if (b.pop >= 0) {
@@ -2808,7 +2825,7 @@ class HubbubbRingCard extends LitElement {
             // settle onto the host's surface, and roll slowly around it
             const rest = h.r + b.r;
             const pull = (rest - d) * 6;
-            const roll = half * 0.1 * b.roll;
+            const roll = half * 0.055 * b.roll;
             b.vx += (ux * pull - uy * roll) * dt;
             b.vy += (uy * pull + ux * roll) * dt;
           } else {
@@ -2848,15 +2865,28 @@ class HubbubbRingCard extends LitElement {
           b.popR = b.r;
         }
       }
+      /* A ceiling on speed. Springs and shoves can both hand a bubble more
+         velocity than anything in this animation should ever have, and one
+         bubble darting across the ring is all it takes to make the whole
+         field look frantic. */
+      const vmax = half * (b.held ? 0.22 : 1.4);
+      const v = Math.hypot(b.vx, b.vy);
+      if (v > vmax) {
+        b.vx = (b.vx / v) * vmax;
+        b.vy = (b.vy / v) * vmax;
+      }
       b.x += b.vx * dt;
       b.y += b.vy * dt;
     }
 
-    separate(bub, 2);
+    /* Eased at runtime, hard only at seeding. clearCore stays hard because
+       a bubble inside the core is wrong in a way nobody will forgive; the
+       other two are allowed to take a few frames, which is the difference
+       between the field settling and the field twitching. */
+    separate(bub, 2, 0.55);
     clearCore(bub, cx, cy, coreR);
-    pinToCore(bub, cx, cy, coreR);
-    // ...and then unpick the overlaps pinning just reintroduced, sideways.
-    spreadOnCore(bub, cx, cy, coreR, 2);
+    pinToCore(bub, cx, cy, coreR, 0.35);
+    spreadOnCore(bub, cx, cy, coreR, 2, 0.4);
 
     /* Merging, bursting, and filling in - the cycle that keeps it moving.
        Small bubbles find each other and fuse, the fused ones fuse again, and

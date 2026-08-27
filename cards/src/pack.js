@@ -7,7 +7,7 @@
    Position-based rather than force-based. Pushing overlapping circles apart
    directly settles in a frame or two, where a repulsion force overshoots and
    the heap jitters for as long as you watch it. */
-export function separate(bubbles, passes = 2) {
+export function separate(bubbles, passes = 2, relax = 1) {
   for (let pass = 0; pass < passes; pass++) {
     for (let i = 0; i < bubbles.length; i++) {
       const a = bubbles[i];
@@ -29,14 +29,20 @@ export function separate(bubbles, passes = 2) {
         const ux = dx / d;
         const uy = dy / d;
         if (d < touch) {
-          const push = (touch - d) * 0.5;
+          const push = (touch - d) * 0.5 * relax;
           a.x -= ux * push;
           a.y -= uy * push;
           c.x += ux * push;
           c.y += uy * push;
-        } else if (d < touch * 1.5) {
-          // Close but not touching: draw them into contact, so the field
-          // gathers into clumps instead of spacing itself evenly.
+        } else if (d > touch * 1.04 && d < touch * 1.5) {
+          /* Close but not touching: draw them into contact, so the field
+             gathers into clumps instead of spacing itself evenly.
+
+             The dead zone just above contact matters. Without it cohesion
+             keeps tugging at a pair already resting against each other, the
+             separation pass pushes them back, and the two settle into a
+             permanent overlap of a percent or two - small in a number, plainly
+             visible as bubbles that have sunk into one another. */
           const grab = (d - touch) * 0.06;
           a.x += ux * grab;
           a.y += uy * grab;
@@ -97,7 +103,7 @@ export function clearCore(bubbles, cx, cy, coreR) {
    Only the radial part of the velocity is stripped. The tangential part is
    what lets a nudged anchor roll round the core rather than stopping dead,
    and taking it would freeze the whole field solid. */
-export function pinToCore(bubbles, cx, cy, coreR) {
+export function pinToCore(bubbles, cx, cy, coreR, relax = 1) {
   for (const b of bubbles) {
     if (!b.held || b.pop >= 0 || !b.anchor) continue;
     let dx = b.x - cx;
@@ -111,8 +117,13 @@ export function pinToCore(bubbles, cx, cy, coreR) {
     const nx = dx / d;
     const ny = dy / d;
     const rest = coreR + b.r;
-    b.x = cx + nx * rest;
-    b.y = cy + ny * rest;
+    /* Eased, not snapped. Moving a bubble the whole way to where the
+       constraint wants it in one frame is a teleport, and a field full of
+       them reads as jitter however slowly anything is actually drifting.
+       relax = 1 is the hard version, used to settle the field before the
+       first paint. */
+    b.x += (cx + nx * rest - b.x) * relax;
+    b.y += (cy + ny * rest - b.y) * relax;
     const vn = b.vx * nx + b.vy * ny;
     b.vx -= vn * nx;
     b.vy -= vn * ny;
@@ -223,7 +234,7 @@ export function coalesce(bubbles, opts) {
    both constraints hold at once. Angles are compared with the shortest signed
    difference, or a pair either side of pi push each other the wrong way round
    and swap places every frame. */
-export function spreadOnCore(bubbles, cx, cy, coreR, passes = 2) {
+export function spreadOnCore(bubbles, cx, cy, coreR, passes = 2, relax = 1) {
   const on = bubbles.filter((b) => b.held && b.pop >= 0 === false && b.anchor);
   if (on.length < 2) return bubbles;
   for (let pass = 0; pass < passes; pass++) {
@@ -246,7 +257,7 @@ export function spreadOnCore(bubbles, cx, cy, coreR, passes = 2) {
         if (d >= touch) continue;
         // Convert the shortfall into an angle at the mean radius and split it.
         const mean = (da + db) / 2;
-        const push = ((touch - d) / mean) * 0.5;
+        const push = ((touch - d) / mean) * 0.5 * relax;
         const dir = diff >= 0 ? 1 : -1;
         const na = aa - dir * push;
         const nb = ab + dir * push;
