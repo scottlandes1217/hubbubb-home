@@ -9,10 +9,10 @@
     "frontend",
     "recorder"
   ],
-  "documentation": "https://github.com/scottlandes/hubbubb-home",
+  "documentation": "https://github.com/scottlandes1217/hubbubb-home",
   "integration_type": "service",
   "iot_class": "cloud_polling",
-  "issue_tracker": "https://github.com/scottlandes/hubbubb-home/issues",
+  "issue_tracker": "https://github.com/scottlandes1217/hubbubb-home/issues",
   "requirements": [],
   "version": "0.1.0"
 }
