@@ -51,7 +51,7 @@
           "install_sentences": "Install voice sentences"
         },
         "data_description": {
-          "prompt": "Given to your language model alongside Home Assistant's own instructions. Write '{'name'}' where the assistant's name should go.",
+          "prompt": "Given to your language model alongside Home Assistant's own instructions. Write the assistant's name as a placeholder in curly braces and it will be filled in.",
           "install_sentences": "Turn this off if your setup already answers phrases like \"remember that\u2026\" with its own intents \u2014 two files claiming one phrase means one of them loses, silently. Takes effect after a restart."
         },
         "sections": {

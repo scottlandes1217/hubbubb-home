@@ -20,18 +20,22 @@ Its automated validation wants all of this, and the `validate` workflow in
 - [x] `codeowners` in the manifest, matching a real GitHub user
 - [x] At least one published release, tagged
 - [x] **hassfest** passing — Home Assistant's own manifest validator
-- [ ] **Brand images accepted into `home-assistant/brands`** — see below
+- [x] **Brand assets** — in this repository at
+      `custom_components/hubbubb_home/brand/`. HACS checks there first and only
+      falls back to the central brands repository, which is worth knowing: it
+      means the listing is not blocked on somebody else's review queue.
 
-Everything unticked is the only work left.
+All of HACS's checks pass.
 
 ## Brand images
 
-This is the part that is not in this repository and cannot be automated from
-here. Home Assistant keeps every integration's icon centrally, and HACS will
-not list an integration whose brand is missing — it is also why the card shows
-"icon not available" next to Hubbubb Home in the integrations list today.
+The icon in `brand/` is a placeholder drawn to match the logo's bubbles and
+colours. Replace it with the real asset when there is one — 256x256, square,
+transparent, the mark on its own rather than the wordmark.
 
-Open a pull request against [`home-assistant/brands`](https://github.com/home-assistant/brands)
+Home Assistant's integrations page reads its icons from the central brands
+repository, not from here, which is why Hubbubb Home shows "icon not
+available" there. Fixing that needs a pull request against [`home-assistant/brands`](https://github.com/home-assistant/brands)
 adding:
 
     custom_integrations/hubbubb_home/icon.png     256x256, transparent
