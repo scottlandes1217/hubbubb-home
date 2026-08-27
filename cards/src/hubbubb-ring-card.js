@@ -2695,7 +2695,11 @@ class HubbubbRingCard extends LitElement {
     const scale = Number(this._config.particle_size) || 1;
 
     const field = this._bubbleField(half);
-    const maxBubbles = Math.max(6, Math.round(22 * scale));
+    /* Fewer than it looks like it could hold. Bubbles big enough to sit on
+       the core need real arc between them, and packing to the theoretical
+       limit leaves the solver fighting a problem with no solution - which it
+       expresses as bubbles shuffling against each other forever. */
+    const maxBubbles = Math.max(6, Math.round(18 * scale));
     /* Docking into build mode animates the ring's width, so the observer
        fires on every frame of the transition. Reseeding on each of those was
        the jank: the whole field was destroyed and rebuilt sixty times over
@@ -2758,7 +2762,10 @@ class HubbubbRingCard extends LitElement {
     for (const b of bub) if (b.held && b.pop < 0) b.anchor = b.r >= field.minAnchor;
     const anchors = bub.filter((b) => b.anchor && b.held && b.pop < 0);
     // A bubble under pressure swells; the core does the same as he talks.
-    const coreR = field.core * (1 + env * 0.09 + Math.sin(this._t * 0.7) * 0.012);
+    /* Slow. The core's radius is what every anchor is pinned to, so anything
+       it does, twenty bubbles do at once - a brisk wobble here is a brisk
+       wobble everywhere. */
+    const coreR = field.core * (1 + env * 0.07 + Math.sin(this._t * 0.22) * 0.005);
 
     /* Speech lets bubbles go. Rate rises with loudness, and the accumulator
        carries the fraction over between frames so a quiet passage still
@@ -2791,6 +2798,8 @@ class HubbubbRingCard extends LitElement {
     const drift = half * (0.045 + busy * 0.11);
     for (const b of bub) {
       b.wob += dt * 1.3;
+      const px = b.dx ?? b.x;
+      const py = b.dy ?? b.y;
       if (b.pop >= 0) {
         b.pop += dt;
         continue;
@@ -2798,7 +2807,7 @@ class HubbubbRingCard extends LitElement {
       if (b.held) {
         // A new bubble grows over a second or so. Snapping to full size was
         // half of why creation read as flicker rather than as forming.
-        b.r += (b.full - b.r) * (1 - Math.exp(-dt / 1.1));
+        b.r += (b.full - b.r) * (1 - Math.exp(-dt / 2.0));
         if (b.anchor) {
           // anchors sit on the core's skin and drift slowly round it
           const d = Math.hypot(b.x - cx, b.y - cy) || 1;
@@ -2879,14 +2888,35 @@ class HubbubbRingCard extends LitElement {
       b.y += b.vy * dt;
     }
 
-    /* Eased at runtime, hard only at seeding. clearCore stays hard because
-       a bubble inside the core is wrong in a way nobody will forgive; the
-       other two are allowed to take a few frames, which is the difference
-       between the field settling and the field twitching. */
-    separate(bub, 2, 0.55);
+    /* Hard constraints, always. Easing these was an attempt to stop the
+       corrections looking like teleports, and it worked by simply not
+       resolving them - measured over five seconds the worst overlap went to
+       three quarters of a bubble's radius, and bubbles sliding through each
+       other and snapping apart reads as far worse jitter than the teleport
+       ever did. The smoothing belongs in what gets drawn, not in what is
+       true; see the drawn position below. */
+    separate(bub, 2);
     clearCore(bub, cx, cy, coreR);
-    pinToCore(bub, cx, cy, coreR, 0.35);
-    spreadOnCore(bub, cx, cy, coreR, 2, 0.4);
+    pinToCore(bub, cx, cy, coreR);
+    spreadOnCore(bub, cx, cy, coreR, 2);
+
+    /* Drawn position chases the real one. The solver may move a bubble a
+       whole overlap in a single frame; the drawing follows over about a tenth
+       of a second, so a correction reads as a glide instead of a jump. This
+       is the only smoothing that does not cost correctness - the physics is
+       still exact, it is the eye that is being spared. */
+    const chase = 1 - Math.exp(-dt / 0.11);
+    for (const b of bub) {
+      if (b.dx === undefined) {
+        b.dx = b.x;
+        b.dy = b.y;
+        b.dr = b.r;
+      } else {
+        b.dx += (b.x - b.dx) * chase;
+        b.dy += (b.y - b.dy) * chase;
+        b.dr += (b.r - b.dr) * chase;
+      }
+    }
 
     /* Merging, bursting, and filling in - the cycle that keeps it moving.
        Small bubbles find each other and fuse, the fused ones fuse again, and
@@ -2992,6 +3022,8 @@ class HubbubbRingCard extends LitElement {
     // biggest first, so the small ones sit on top and read as nearer
     const order = bub.slice().sort((x, y) => y.r - x.r);
     for (const b of order) {
+      const px = b.dx ?? b.x;
+      const py = b.dy ?? b.y;
       if (b.pop >= 0) {
         /* A bubble bursting is a film letting go, not a firework. The old
            version threw a thick ring out to one and a half times the radius
@@ -3007,38 +3039,40 @@ class HubbubbRingCard extends LitElement {
         if (t < 0.55) {
           const inner = base * (1 - t * 0.12);
           const g2 = ctx.createRadialGradient(
-            b.x - inner * 0.3, b.y - inner * 0.35, inner * 0.1, b.x, b.y, inner
+            px - inner * 0.3, py - inner * 0.35, inner * 0.1, px, py, inner
           );
           const ia = 0.34 * Math.pow(1 - t / 0.55, 1.4);
           g2.addColorStop(0, `rgba(${Math.min(255, R + 95)},${Math.min(255, G + 95)},${Math.min(255, B + 75)},${ia})`);
           g2.addColorStop(1, `rgba(${R},${G},${B},0)`);
           ctx.fillStyle = g2;
           ctx.beginPath();
-          ctx.arc(b.x, b.y, inner, 0, Math.PI * 2);
+          ctx.arc(px, py, inner, 0, Math.PI * 2);
           ctx.fill();
         }
 
         ctx.strokeStyle = `rgba(${R},${G},${B},${fade * 0.3})`;
         ctx.lineWidth = Math.max(0.4, base * 0.035 * (1 - t * 0.6));
         ctx.beginPath();
-        ctx.arc(b.x, b.y, base * (1 + ease * 0.22), 0, Math.PI * 2);
+        ctx.arc(px, py, base * (1 + ease * 0.22), 0, Math.PI * 2);
         ctx.stroke();
         continue;
       }
-      const rad = b.r * (1 + Math.sin(b.wob) * 0.02);
+      const bx = b.dx ?? b.x;
+      const by = b.dy ?? b.y;
+      const rad = (b.dr ?? b.r) * (1 + Math.sin(b.wob) * 0.015);
       if (rad < 0.6) continue;
       const fade = b.held ? 1 : Math.max(0, 1 - b.life / 2.1);
       const a = (0.5 + env * 0.28) * fade;
 
       const g = ctx.createRadialGradient(
-        b.x - rad * 0.3, b.y - rad * 0.35, rad * 0.1, b.x, b.y, rad
+        bx - rad * 0.3, by - rad * 0.35, rad * 0.1, bx, by, rad
       );
       g.addColorStop(0, `rgba(${Math.min(255, R + 95)},${Math.min(255, G + 95)},${Math.min(255, B + 75)},${a})`);
       g.addColorStop(0.55, `rgba(${R},${G},${B},${a * 0.7})`);
       g.addColorStop(1, `rgba(${R},${G},${B},0)`);
       ctx.fillStyle = g;
       ctx.beginPath();
-      ctx.arc(b.x, b.y, rad, 0, Math.PI * 2);
+      ctx.arc(bx, by, rad, 0, Math.PI * 2);
       ctx.fill();
 
       // A bubble's edge is a meniscus, not an outline: thin, and only just
@@ -3046,13 +3080,13 @@ class HubbubbRingCard extends LitElement {
       ctx.strokeStyle = `rgba(${R},${G},${B},${(0.26 + env * 0.16) * fade})`;
       ctx.lineWidth = Math.max(0.5, rad * 0.045);
       ctx.beginPath();
-      ctx.arc(b.x, b.y, rad * 0.97, 0, Math.PI * 2);
+      ctx.arc(bx, by, rad * 0.97, 0, Math.PI * 2);
       ctx.stroke();
 
       if (rad > 3) {
         ctx.fillStyle = `rgba(255,255,255,${(0.26 + env * 0.2) * fade})`;
         ctx.beginPath();
-        ctx.arc(b.x - rad * 0.34, b.y - rad * 0.38, rad * 0.17, 0, Math.PI * 2);
+        ctx.arc(bx - rad * 0.34, by - rad * 0.38, rad * 0.17, 0, Math.PI * 2);
         ctx.fill();
       }
     }

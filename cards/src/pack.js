@@ -7,7 +7,7 @@
    Position-based rather than force-based. Pushing overlapping circles apart
    directly settles in a frame or two, where a repulsion force overshoots and
    the heap jitters for as long as you watch it. */
-export function separate(bubbles, passes = 2, relax = 1) {
+export function separate(bubbles, passes = 2, relax = 1, grab = 0.06, dead = 1.04) {
   for (let pass = 0; pass < passes; pass++) {
     for (let i = 0; i < bubbles.length; i++) {
       const a = bubbles[i];
@@ -34,7 +34,7 @@ export function separate(bubbles, passes = 2, relax = 1) {
           a.y -= uy * push;
           c.x += ux * push;
           c.y += uy * push;
-        } else if (d > touch * 1.04 && d < touch * 1.5) {
+        } else if (grab > 0 && d > touch * dead && d < touch * 1.5) {
           /* Close but not touching: draw them into contact, so the field
              gathers into clumps instead of spacing itself evenly.
 
@@ -43,11 +43,11 @@ export function separate(bubbles, passes = 2, relax = 1) {
              separation pass pushes them back, and the two settle into a
              permanent overlap of a percent or two - small in a number, plainly
              visible as bubbles that have sunk into one another. */
-          const grab = (d - touch) * 0.06;
-          a.x += ux * grab;
-          a.y += uy * grab;
-          c.x -= ux * grab;
-          c.y -= uy * grab;
+          const pull = (d - touch) * grab;
+          a.x += ux * pull;
+          a.y += uy * pull;
+          c.x -= ux * pull;
+          c.y -= uy * pull;
         }
       }
     }
