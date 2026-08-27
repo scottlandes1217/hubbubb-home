@@ -2652,7 +2652,7 @@ class HubbubbRingCard extends LitElement {
          nothing reaches the size that bursts, so no gaps open and nothing new
          is made. A foam that can only change by luck eventually stops
          changing. Age cannot stall. */
-      span: 22 + Math.random() * 30,
+      span: 45 + Math.random() * 70,
     };
   }
 
@@ -2726,6 +2726,11 @@ class HubbubbRingCard extends LitElement {
         );
         b.r = b.full;
         b.anchor = b.r >= field.minAnchor;
+        /* Start the first crop part way through their lives. Seeded at zero
+           they all age in lockstep: the ring sits perfectly still for a
+           minute and then every bubble goes at once, which looks broken in
+           both directions. */
+        b.age = Math.random() * b.span;
         this._bub.push(b);
       }
       this._release = 0;
@@ -2764,7 +2769,9 @@ class HubbubbRingCard extends LitElement {
     }
 
     // --- motion -----------------------------------------------------------
-    const drift = half * (0.16 + busy * 0.32);
+    // Slow. The field is meant to be something you notice out of the corner
+    // of your eye, not something that asks to be watched.
+    const drift = half * (0.075 + busy * 0.16);
     for (const b of bub) {
       b.wob += dt * 1.3;
       if (b.pop >= 0) {
@@ -2772,13 +2779,15 @@ class HubbubbRingCard extends LitElement {
         continue;
       }
       if (b.held) {
-        b.r += (b.full - b.r) * (1 - Math.exp(-dt / 0.45));
+        // A new bubble grows over a second or so. Snapping to full size was
+        // half of why creation read as flicker rather than as forming.
+        b.r += (b.full - b.r) * (1 - Math.exp(-dt / 1.1));
         if (b.anchor) {
           // anchors sit on the core's skin and drift slowly round it
           const d = Math.hypot(b.x - cx, b.y - cy) || 1;
           const ux = (b.x - cx) / d, uy = (b.y - cy) / d;
           const rest = coreR + b.r;
-          const pull = (rest - d) * 8;
+          const pull = (rest - d) * 5;
           b.vx += (ux * pull - uy * drift) * dt;
           b.vy += (uy * pull + ux * drift) * dt;
         } else {
@@ -2798,8 +2807,8 @@ class HubbubbRingCard extends LitElement {
             const ux = dx / d, uy = dy / d;
             // settle onto the host's surface, and roll slowly around it
             const rest = h.r + b.r;
-            const pull = (rest - d) * 9;
-            const roll = half * 0.22 * b.roll;
+            const pull = (rest - d) * 6;
+            const roll = half * 0.1 * b.roll;
             b.vx += (ux * pull - uy * roll) * dt;
             b.vy += (uy * pull + ux * roll) * dt;
           } else {
@@ -2809,11 +2818,15 @@ class HubbubbRingCard extends LitElement {
             // out every frame, which reads as a bubble hovering and buzzing.
             const d = Math.hypot(b.x - cx, b.y - cy) || 1;
             const rest = coreR + b.r;
-            b.vx += ((b.x - cx) / d) * (rest - d) * 7 * dt;
-            b.vy += ((b.y - cy) / d) * (rest - d) * 7 * dt;
+            b.vx += ((b.x - cx) / d) * (rest - d) * 5 * dt;
+            b.vy += ((b.y - cy) / d) * (rest - d) * 5 * dt;
           }
         }
-        const damp = Math.exp(-dt * (b.anchor ? 3.4 : 4.6));
+        /* Heavier damping than looks necessary on paper. The constraint
+           passes shove bubbles by a whole overlap in one frame, and with a
+           light damper that shove rings - the bubble overshoots, comes back,
+           overshoots again. Viscosity turns a correction into a settle. */
+        const damp = Math.exp(-dt * (b.anchor ? 5.5 : 6.5));
         b.vx *= damp;
         b.vy *= damp;
       } else {
@@ -2886,8 +2899,11 @@ class HubbubbRingCard extends LitElement {
        leaves holes, and a ring can be short of nothing and still look moth
        eaten. Spawn while there is both room on the core and room in the
        budget, and only ever small - size is earned by merging. */
+    /* One new bubble per frame at most. Four was a burst of them appearing
+       together whenever a hole opened, which is the jarring bit - a gap
+       should close over, not be filled in one go. */
     let guard = 0;
-    while (guard++ < 4) {
+    while (guard++ < 1) {
       const held = bub.filter((b) => b.held && b.pop < 0);
       /* Anything actually resting on the core counts, not just the ones big
          enough to be anchors. Measuring between anchors alone reads a stretch

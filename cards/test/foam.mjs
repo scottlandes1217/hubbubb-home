@@ -29,12 +29,17 @@ const spawn = (a, r) => {
   return {
     x: Math.cos(a) * (core + rad), y: Math.sin(a) * (core + rad),
     vx: 0, vy: 0, r: rad, full: rad, anchor: rad >= minAnchor,
-    held: true, pop: -1, life: 0, age: 0, span: 22 + rnd() * 30,
+    held: true, pop: -1, life: 0, age: 0, span: 45 + rnd() * 70,
   };
 };
 
 const bub = [];
-for (let i = 0; i < MAX; i++) bub.push(spawn((i / MAX) * Math.PI * 2, Math.min(newR() * (1 + rnd() * 2.2), maxR)));
+for (let i = 0; i < MAX; i++) {
+  const b = spawn((i / MAX) * Math.PI * 2, Math.min(newR() * (1 + rnd() * 2.2), maxR));
+  // de-synchronised, or the whole crop expires together
+  b.age = rnd() * b.span;
+  bub.push(b);
+}
 
 const windows = [];
 let merges = 0, bursts = 0, spawns = 0;
@@ -68,7 +73,7 @@ for (let step = 0; step < 60 * 150; step++) {
   for (let i = bub.length - 1; i >= 0; i--) if (bub[i].pop > 0.62) bub.splice(i, 1);
 
   let guard = 0;
-  while (guard++ < 4) {
+  while (guard++ < 1) {
     const held = bub.filter((b) => b.held && b.pop < 0);
     const onCore = held.filter((b) => Math.hypot(b.x, b.y) <= core + b.r * 1.7);
     const { angle, gap } = widestGap(onCore, 0, 0);
