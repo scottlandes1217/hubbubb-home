@@ -4582,6 +4582,19 @@ const EDITOR_SCHEMA = [
     selector: { entity: { domain: SATELLITE_DOMAIN } },
   },
   {
+    name: "animation",
+    selector: {
+      select: {
+        mode: "dropdown",
+        options: [
+          { value: "hubbubb", label: "Hubbubb - ring and bubbles" },
+          { value: "jarvis-v1", label: "Jarvis v1 - segments and motes" },
+        ],
+      },
+    },
+  },
+  { name: "assistant_name", selector: { text: {} } },
+  {
     name: "size",
     selector: { number: { min: 80, max: 600, step: 10, mode: "slider" } },
   },
@@ -4598,48 +4611,51 @@ const EDITOR_SCHEMA = [
       },
     },
   },
-  {
-    name: "particles",
-    selector: { number: { min: 0, max: 4000, step: 20, mode: "box" } },
-  },
-  {
-    name: "particle_size",
-    selector: { number: { min: 0.5, max: 3, step: 0.1, mode: "slider" } },
-  },
+  { name: "honeycomb", selector: { boolean: {} } },
   { name: "tap_message", selector: { text: {} } },
-  { name: "follow_media_player", selector: { boolean: {} } },
   {
-    name: "audio_offset",
-    selector: { number: { min: -2, max: 2, step: 0.05, mode: "box" } },
-  },
-  {
-    name: "media_player",
-    selector: { entity: { domain: "media_player" } },
-  },
-  {
+    /* The integration owns switches; a hand-rolled setup may well use
+       input_boolean. Accepting both is one line and saves everyone who
+       already had helpers from having to remake them. */
     name: "",
     type: "expandable",
-    title: "Build mode",
-    icon: "mdi:hexagon-multiple-outline",
+    title: "Toggles",
+    icon: "mdi:toggle-switch-outline",
     schema: [
       {
         name: "build_entity",
-        selector: { entity: { domain: "input_boolean" } },
+        selector: { entity: { domain: ["switch", "input_boolean"] } },
+      },
+      {
+        name: "announce_entity",
+        selector: { entity: { domain: ["switch", "input_boolean"] } },
+      },
+      {
+        name: "messages_entity",
+        selector: { entity: { domain: ["switch", "input_boolean"] } },
       },
     ],
   },
   {
-    name: "announce_entity",
-    selector: { entity: { domain: "input_boolean" } },
-  },
-  {
-    name: "messages_entity",
-    selector: { entity: { domain: "input_boolean" } },
+    name: "",
+    type: "expandable",
+    title: "Build panel",
+    icon: "mdi:hexagon-multiple-outline",
+    schema: [
+      { name: "panel_fullscreen", selector: { boolean: {} } },
+      {
+        name: "panel_height",
+        selector: { number: { min: 0, max: 1400, step: 20, mode: "box" } },
+      },
+      { name: "build_dashboard", selector: { text: {} } },
+      { name: "build_page", selector: { boolean: {} } },
+      { name: "build_return", selector: { text: {} } },
+    ],
   },
   {
     name: "",
     type: "expandable",
-    title: "Colors",
+    title: "Ring colours",
     icon: "mdi:palette",
     schema: [
       { name: "idle_color", selector: { text: {} } },
@@ -4649,26 +4665,74 @@ const EDITOR_SCHEMA = [
       { name: "offline_color", selector: { text: {} } },
     ],
   },
+  {
+    name: "",
+    type: "expandable",
+    title: "Panel colours",
+    icon: "mdi:console",
+    schema: [
+      { name: "panel_bg", selector: { text: {} } },
+      { name: "panel_border", selector: { text: {} } },
+      { name: "panel_text", selector: { text: {} } },
+      { name: "terminal_bg", selector: { text: {} } },
+      { name: "terminal_text", selector: { text: {} } },
+    ],
+  },
+  {
+    name: "",
+    type: "expandable",
+    title: "Advanced",
+    icon: "mdi:tune",
+    schema: [
+      { name: "follow_media_player", selector: { boolean: {} } },
+      {
+        name: "audio_offset",
+        selector: { number: { min: -2, max: 2, step: 0.05, mode: "box" } },
+      },
+      { name: "media_player", selector: { entity: { domain: "media_player" } } },
+      {
+        name: "particle_size",
+        selector: { number: { min: 0.5, max: 3, step: 0.1, mode: "slider" } },
+      },
+      {
+        name: "particles",
+        selector: { number: { min: 0, max: 4000, step: 20, mode: "box" } },
+      },
+    ],
+  },
 ];
 
 const EDITOR_LABELS = {
   entity: "Assist satellite",
+  animation: "Animation",
+  assistant_name: "Assistant name",
   size: "Ring size (px)",
   background: "Card background",
-  particles: "Particle count (0 = auto)",
-  particle_size: "Particle size",
+  honeycomb: "Honeycomb background",
   follow_media_player: "Animate while the device is playing audio",
   audio_offset: "Audio sync offset (seconds)",
   media_player: "Speaker entity (blank = same device)",
   tap_message: "Spoken reply when the ring is tapped",
-  build_entity: "Build mode toggle helper (optional)",
+  particles: "Particle count, Jarvis v1 (0 = auto)",
+  particle_size: "Bubble / particle size",
+  build_entity: "Build mode toggle",
   announce_entity: "Agent announcement toggle",
   messages_entity: "Hubbubb message toggle",
+  panel_fullscreen: "Full screen (floats over the dashboard)",
+  panel_height: "Panel height in px (0 = match the ring)",
+  build_dashboard: "Open this dashboard instead",
+  build_page: "This card IS the build dashboard",
+  build_return: "Exit goes back to",
   idle_color: "Idle",
   listening_color: "Listening",
   processing_color: "Processing",
   responding_color: "Responding",
   offline_color: "Unavailable",
+  panel_bg: "Panel background",
+  panel_border: "Panel border",
+  panel_text: "Panel text",
+  terminal_bg: "Terminal background",
+  terminal_text: "Terminal text",
 };
 
 class HubbubbRingCardEditor extends LitElement {
