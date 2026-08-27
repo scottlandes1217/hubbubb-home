@@ -1,6 +1,13 @@
 import { LitElement, css, html, nothing } from "lit";
 import { rmsEnvelope } from "./envelope.js";
-import { clearCore, coalesce, pinToCore, separate, widestGap } from "./pack.js";
+import {
+  clearCore,
+  coalesce,
+  pinToCore,
+  separate,
+  spreadOnCore,
+  widestGap,
+} from "./pack.js";
 
 const CARD_VERSION = "4.11.1";
 
@@ -278,6 +285,10 @@ const HEX_PATH = (() => {
   return [hex(0, 0), hex(3 * s, 0), hex(0, h), hex(3 * s, h), hex(1.5 * s, h / 2)].join("");
 })();
 const HEX_TILE = { w: 15, h: r2(Math.sqrt(3) * 5) };
+
+/* How long a bubble takes to burst, in seconds. Long enough to read as a
+   film letting go rather than a flash. */
+const POP_TIME = 0.62;
 
 /* The same tile again, as a CSS background.
 
@@ -2782,22 +2793,32 @@ class HubbubbRingCard extends LitElement {
             b.vx += (ux * pull - uy * roll) * dt;
             b.vy += (uy * pull + ux * roll) * dt;
           } else {
+            // No anchor to sit on: rest on the core itself. Target the
+            // surface plus its own radius, not the surface - aiming at the
+            // skin puts its centre there and leaves clearCore shoving it back
+            // out every frame, which reads as a bubble hovering and buzzing.
             const d = Math.hypot(b.x - cx, b.y - cy) || 1;
-            b.vx += ((b.x - cx) / d) * (field.R - d) * 5 * dt;
-            b.vy += ((b.y - cy) / d) * (field.R - d) * 5 * dt;
+            const rest = coreR + b.r;
+            b.vx += ((b.x - cx) / d) * (rest - d) * 7 * dt;
+            b.vy += ((b.y - cy) / d) * (rest - d) * 7 * dt;
           }
         }
         const damp = Math.exp(-dt * (b.anchor ? 3.4 : 4.6));
         b.vx *= damp;
         b.vy *= damp;
       } else {
+        /* A released bubble has to visibly go somewhere. It used to be
+           damped hard enough that it slowed to a halt a little way out and
+           hung there until its timer expired - a bubble attached to nothing,
+           hovering, which is worse than not releasing it at all. Buoyancy is
+           constant and the damping only touches sideways drift, so it keeps
+           accelerating upward and is gone well before it pops. */
         b.life += dt;
-        b.vy -= half * 0.16 * dt; // released bubbles rise as they go
-        b.vx *= Math.exp(-dt * 0.5);
-        b.vy *= Math.exp(-dt * 0.5);
-        b.r *= Math.exp(-dt * 0.22); // they thin on the way out
+        b.vy -= half * 0.85 * dt;
+        b.vx *= Math.exp(-dt * 0.9);
+        b.r *= Math.exp(-dt * 0.16);
         const gone =
-          b.life > 1.5 + Math.random() * 0.6 ||
+          b.life > 1.0 + Math.random() * 0.4 ||
           b.x < -half || b.x > W + half || b.y < -half;
         if (gone) {
           b.pop = 0;
@@ -2811,6 +2832,8 @@ class HubbubbRingCard extends LitElement {
     separate(bub, 2);
     clearCore(bub, cx, cy, coreR);
     pinToCore(bub, cx, cy, coreR);
+    // ...and then unpick the overlaps pinning just reintroduced, sideways.
+    spreadOnCore(bub, cx, cy, coreR, 2);
 
     /* Merging, bursting, and filling in - the cycle that keeps it moving.
        Small bubbles find each other and fuse, the fused ones fuse again, and
@@ -2818,20 +2841,27 @@ class HubbubbRingCard extends LitElement {
        ones grow back into. Speech only accelerates a loop that is already
        turning, which is why the ring still has life in it when nobody is
        talking. */
+    /* Merging is slow while they are small and quickens with size. A flat
+       rate made the little ones vanish into each other the moment they
+       touched, so the field never actually looked like small bubbles - it
+       looked like a brief sparkle on the way to being medium ones. */
     coalesce(bub, {
       dt,
-      /* Tuned by running the cycle headlessly for a simulated minute and
-         counting: this gives roughly a merge a second and a burst every
-         fifteen, which keeps the field visibly turning over without it
-         churning so fast that nothing holds still long enough to look at. */
-      rate: 1.3 + busy * 0.9,
+      rate: 0.14 + busy * 0.1,
+      sizeBias: 3,
       maxRatio: 2.1,
       maxR: field.maxR,
     });
 
-    // At the ceiling a bubble bursts rather than growing through the card.
+    /* Bursting is a chance that climbs steeply with size rather than a hard
+       edge at the ceiling. Waiting for the exact maximum meant a big bubble
+       could sit there for a minute looking stuck; now the largest ones go
+       within a few seconds and the ceiling is only a backstop. */
     for (const b of bub) {
-      if (b.held && b.pop < 0 && b.r >= field.maxR * 0.995) {
+      if (!b.held || b.pop >= 0) continue;
+      const t = b.r / field.maxR;
+      const chance = t > 0.75 ? 0.35 * Math.pow(t, 7) : 0;
+      if (b.r >= field.maxR * 0.995 || Math.random() < chance * dt) {
         b.held = false;
         b.pop = 0;
         b.popR = b.r;
@@ -2839,7 +2869,7 @@ class HubbubbRingCard extends LitElement {
     }
 
     for (let i = bub.length - 1; i >= 0; i--) {
-      if (bub[i].pop > 0.34) bub.splice(i, 1);
+      if (bub[i].pop > POP_TIME) bub.splice(i, 1);
     }
 
     /* Fill bare stretches, not just missing headcount. Waiting for the count
@@ -2850,13 +2880,29 @@ class HubbubbRingCard extends LitElement {
     let guard = 0;
     while (guard++ < 4) {
       const held = bub.filter((b) => b.held && b.pop < 0);
-      if (held.length >= maxBubbles) break;
-      const onCore = held.filter((b) => b.anchor);
+      /* Anything actually resting on the core counts, not just the ones big
+         enough to be anchors. Measuring between anchors alone reads a stretch
+         packed with small bubbles as bare, so the filler kept piling more into
+         somewhere already full and left the real holes open. */
+      const onCore = held.filter(
+        (b) => Math.hypot(b.x - cx, b.y - cy) <= coreR + b.r * 1.7
+      );
       const { angle, gap } = widestGap(onCore, cx, cy);
       // Chord across the gap at the core's surface: how much bare skin there
       // actually is, rather than how many radians it spans.
-      const room = Math.sin(Math.min(gap, Math.PI) / 2) * field.core;
-      if (onCore.length > 1 && room < field.minAnchor * 1.1) break;
+      const room = Math.sin(Math.min(gap, Math.PI) / 2) * coreR;
+      if (onCore.length > 1 && room < field.newR() * 1.4) break;
+
+      /* A real hole gets filled whether or not the budget says so. Letting
+         the headcount veto it was why gaps sat open for minutes: bubbles pile
+         up as riders on the anchors, away from the core, so the population
+         can be at its limit while a third of the core is bare. The budget
+         governs crowding; the gap governs coverage; the hard ceiling stops
+         the two arguing forever. */
+      const bare = room > field.minAnchor * 1.5;
+      if (held.length >= maxBubbles && !bare) break;
+      if (held.length >= maxBubbles * 1.7) break;
+
       bub.push(this._spawnBubble(field, cx, cy, angle));
     }
 
@@ -2892,13 +2938,35 @@ class HubbubbRingCard extends LitElement {
     const order = bub.slice().sort((x, y) => y.r - x.r);
     for (const b of order) {
       if (b.pop >= 0) {
-        // the pop: a thin ring opening out and fading
-        const t = b.pop / 0.34;
-        const rr = (b.popR || b.r) * (1 + t * 1.5);
-        ctx.strokeStyle = `rgba(${R},${G},${B},${(1 - t) * 0.55})`;
-        ctx.lineWidth = Math.max(0.7, (b.popR || b.r) * 0.16 * (1 - t));
+        /* A bubble bursting is a film letting go, not a firework. The old
+           version threw a thick ring out to one and a half times the radius
+           in a third of a second, which read as a flash going off. This one
+           takes twice as long, barely expands, and spends most of that time
+           fading - the skin thins until there is nothing left of it. */
+        const t = Math.min(1, b.pop / POP_TIME);
+        const base = b.popR || b.r;
+        const ease = 1 - Math.pow(1 - t, 2);
+        const fade = Math.pow(1 - t, 1.7);
+
+        // what is left of the bubble itself, thinning as it goes
+        if (t < 0.55) {
+          const inner = base * (1 - t * 0.12);
+          const g2 = ctx.createRadialGradient(
+            b.x - inner * 0.3, b.y - inner * 0.35, inner * 0.1, b.x, b.y, inner
+          );
+          const ia = 0.34 * Math.pow(1 - t / 0.55, 1.4);
+          g2.addColorStop(0, `rgba(${Math.min(255, R + 95)},${Math.min(255, G + 95)},${Math.min(255, B + 75)},${ia})`);
+          g2.addColorStop(1, `rgba(${R},${G},${B},0)`);
+          ctx.fillStyle = g2;
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, inner, 0, Math.PI * 2);
+          ctx.fill();
+        }
+
+        ctx.strokeStyle = `rgba(${R},${G},${B},${fade * 0.3})`;
+        ctx.lineWidth = Math.max(0.4, base * 0.035 * (1 - t * 0.6));
         ctx.beginPath();
-        ctx.arc(b.x, b.y, rr, 0, Math.PI * 2);
+        ctx.arc(b.x, b.y, base * (1 + ease * 0.22), 0, Math.PI * 2);
         ctx.stroke();
         continue;
       }

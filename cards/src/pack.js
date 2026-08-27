@@ -159,7 +159,7 @@ export function widestGap(anchors, cx, cy) {
    are gone. `rate` is per second and the roll is per frame, so merging looks
    like something that happens rather than something that is switched on. */
 export function coalesce(bubbles, opts) {
-  const { dt, rate, maxRatio, maxR, rand = Math.random } = opts;
+  const { dt, rate, maxRatio, maxR, sizeBias = 0, rand = Math.random } = opts;
   let merged = 0;
   for (let i = 0; i < bubbles.length; i++) {
     const a = bubbles[i];
@@ -173,7 +173,15 @@ export function coalesce(bubbles, opts) {
       if (ratio > maxRatio) continue;
       const grown = Math.sqrt(a.r * a.r + b.r * b.r);
       if (grown > maxR) continue;
-      if (rand() > rate * dt) continue;
+      /* Size bias: the smaller of the pair decides how eagerly they fuse, so
+         two specks linger and two half-grown bubbles join readily. Without it
+         a flat rate makes the small ones disappear on contact and the field
+         never looks fine-grained. */
+      const small = Math.min(a.r, b.r);
+      const eager = sizeBias
+        ? Math.pow(Math.min(1, small / maxR), 1 / sizeBias)
+        : 1;
+      if (rand() > rate * eager * dt) continue;
 
       const keep = a.r >= b.r ? a : b;
       const lost = keep === a ? b : a;
@@ -198,4 +206,53 @@ export function coalesce(bubbles, opts) {
     }
   }
   return merged;
+}
+
+/* Slide bubbles apart along the core's surface.
+
+   separate() pushes overlapping circles apart in a straight line, and then
+   pinToCore drags anything on the core straight back onto it - undoing most
+   of what separate just did and leaving the big ones visibly interpenetrating.
+   The two constraints fight because they pull in different directions.
+
+   The fix is to resolve those overlaps the only way that does not break the
+   pin: tangentially. Neighbours slide around the core rather than off it, so
+   both constraints hold at once. Angles are compared with the shortest signed
+   difference, or a pair either side of pi push each other the wrong way round
+   and swap places every frame. */
+export function spreadOnCore(bubbles, cx, cy, coreR, passes = 2) {
+  const on = bubbles.filter((b) => b.held && b.pop >= 0 === false && b.anchor);
+  if (on.length < 2) return bubbles;
+  for (let pass = 0; pass < passes; pass++) {
+    for (let i = 0; i < on.length; i++) {
+      for (let j = i + 1; j < on.length; j++) {
+        const a = on[i];
+        const b = on[j];
+        const da = coreR + a.r;
+        const db = coreR + b.r;
+        const aa = Math.atan2(a.y - cy, a.x - cx);
+        const ab = Math.atan2(b.y - cy, b.x - cx);
+        let diff = ab - aa;
+        while (diff > Math.PI) diff -= Math.PI * 2;
+        while (diff < -Math.PI) diff += Math.PI * 2;
+        // Straight-line distance between two points at their own radii.
+        const d = Math.sqrt(
+          da * da + db * db - 2 * da * db * Math.cos(diff)
+        );
+        const touch = a.r + b.r;
+        if (d >= touch) continue;
+        // Convert the shortfall into an angle at the mean radius and split it.
+        const mean = (da + db) / 2;
+        const push = ((touch - d) / mean) * 0.5;
+        const dir = diff >= 0 ? 1 : -1;
+        const na = aa - dir * push;
+        const nb = ab + dir * push;
+        a.x = cx + Math.cos(na) * da;
+        a.y = cy + Math.sin(na) * da;
+        b.x = cx + Math.cos(nb) * db;
+        b.y = cy + Math.sin(nb) * db;
+      }
+    }
+  }
+  return bubbles;
 }
