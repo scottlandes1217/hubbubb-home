@@ -34,7 +34,8 @@
     "error": {
       "hubbubb_incomplete": "Hubbubb needs all three: endpoint, client ID and client secret.",
       "hubbubb_auth": "Hubbubb refused those credentials, or could not be reached.",
-      "companion_unreachable": "Nothing answered at that address."
+      "companion_unreachable": "Nothing answered at that address. Check the host and port, and that the companion is running and reachable from Home Assistant.",
+      "companion_refused": "The companion answered but refused the request \u2014 usually a wrong token."
     },
     "abort": {
       "already_configured": "Hubbubb Home is already set up."
@@ -98,7 +99,8 @@
     "error": {
       "hubbubb_incomplete": "Hubbubb needs all three: endpoint, client ID and client secret.",
       "hubbubb_auth": "Hubbubb refused those credentials, or could not be reached.",
-      "companion_unreachable": "Nothing answered at that address."
+      "companion_unreachable": "Nothing answered at that address. Check the host and port, and that the companion is running and reachable from Home Assistant.",
+      "companion_refused": "The companion answered but refused the request \u2014 usually a wrong token."
     }
   },
   "services": {

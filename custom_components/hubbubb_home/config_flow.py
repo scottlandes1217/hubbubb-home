@@ -123,11 +123,24 @@ async def _validate(hass, data: dict) -> dict[str, str]:
             companion[CONF_COMPANION_URL],
             companion.get(CONF_COMPANION_TOKEN),
         )
+        # GET, not POST. /health is a read - posting to it is a 404, which
+        # reads back as "nothing answered at that address" and sends people
+        # hunting for a network fault that is not there.
         try:
-            await client.async_call("health")
+            await client.async_call("health", method="GET")
         except CompanionError as err:
             _LOGGER.debug("companion unreachable at setup: %s", err)
             errors[CONF_COMPANION] = "companion_unreachable"
+        else:
+            # Health says something is listening; it does not say the token is
+            # right, because health is deliberately unauthenticated. Ask for
+            # something real so a wrong token is caught on this form rather
+            # than as a 503 in the build panel an hour later.
+            try:
+                await client.async_call("status", method="GET")
+            except CompanionError as err:
+                _LOGGER.debug("companion refused status: %s", err)
+                errors[CONF_COMPANION] = "companion_refused"
 
     return errors
 

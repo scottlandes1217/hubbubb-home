@@ -10,9 +10,15 @@ feature works and the build screen says so instead of hanging.
 
 ## Configuring
 
-Options → Companion → URL, and a bearer token if the daemon wants one. It is
-checked at setup: a URL that does not answer `GET /health` is rejected on the
-form rather than failing silently at three in the morning.
+Options → Companion → URL, and a bearer token if the daemon wants one. Setup
+makes two calls: `GET /health` to prove something is listening, then
+`GET /status` to prove it will actually talk to you. `/health` is deliberately
+unauthenticated — it is the reachability check — so it is `/status` that
+catches a wrong token, and it catches it on the form rather than as a 503 in
+the build panel an hour later.
+
+Both are GETs. They are reads, and a companion that only answers POST on
+those paths will be reported as unreachable.
 
 Put it on a private address. It executes things.
 
