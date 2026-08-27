@@ -18,6 +18,7 @@ an assistant's name until you type one.
 
 1. **HACS → Integrations → ⋮ → Custom repositories.** Add this repository as
    an *Integration*, then install it and restart Home Assistant.
+   *(Not in HACS's own list yet — see [`docs/hacs-submission.md`](docs/hacs-submission.md).)*
 2. **Settings → Devices & Services → Add Integration → Hubbubb Home.**
 3. Type a name. Everything else on that screen is optional.
 4. Restart once more so the voice sentences load.
