@@ -1,6 +1,6 @@
 import { LitElement, css, html, nothing } from "lit";
 import { rmsEnvelope } from "./envelope.js";
-import { clearCore, separate } from "./pack.js";
+import { clearCore, pinToCore, separate, widestGap } from "./pack.js";
 
 const CARD_VERSION = "4.11.1";
 
@@ -15,7 +15,10 @@ const DEFAULTS = {
   size: 240,
   background: "dark", // dark | card | transparent
   particles: 0, // 0 = auto (scales with size)
-  particle_size: 1, // multiplier on the mote size
+  /* Hubbubb: how many bubbles, as a multiple of the default 22. Jarvis v1:
+     the size of a mote. One slider, because the two animations never run at
+     once and a second one would sit greyed out whichever you picked. */
+  particle_size: 1,
   follow_media_player: true, // also treat device playback as speech
   /* Fine-tune only: speech now follows the device's media_player, which
      already lines up with the sound. Negative holds the animation back
@@ -2615,12 +2618,14 @@ class HubbubbRingCard extends LitElement {
       /* Sized so the whole stack still fits: core 0.42, an anchor on top of
          it reaches about 0.72, and a rider on top of that about 0.86. Any
          larger and the outermost bubbles clip the edge of the card. */
+      minAnchor: half * 0.055,
+      maxAnchor: half * 0.155,
       anchorR: () => half * (0.09 + Math.random() * 0.055),
       riderR: () => half * (0.033 + Math.pow(Math.random(), 1.5) * 0.042),
     };
   }
 
-  _spawnBubble(field, cx, cy, kind, at) {
+  _spawnBubble(field, cx, cy, kind, at, radius) {
     const a = at ?? Math.random() * Math.PI * 2;
     const anchor = kind === "anchor";
     // Riders start just off the ring so they fall onto an anchor rather than
@@ -2632,7 +2637,7 @@ class HubbubbRingCard extends LitElement {
       vx: 0,
       vy: 0,
       r: 0,
-      full: anchor ? field.anchorR() : field.riderR(),
+      full: radius ?? (anchor ? field.anchorR() : field.riderR()),
       anchor,
       host: null,
       held: true,
@@ -2817,6 +2822,7 @@ class HubbubbRingCard extends LitElement {
 
     separate(bub, 2);
     clearCore(bub, cx, cy, coreR);
+    pinToCore(bub, cx, cy, coreR);
 
     // retire popped bubbles and grow replacements into the gap
     for (let i = bub.length - 1; i >= 0; i--) {
@@ -2829,7 +2835,18 @@ class HubbubbRingCard extends LitElement {
     const live = (anchor) =>
       bub.filter((b) => b.held && b.pop < 0 && b.anchor === anchor).length;
     while (live(true) < wantAnchors) {
-      bub.push(this._spawnBubble(field, cx, cy, "anchor"));
+      /* Fill the biggest bare stretch, at a size that fits it. A gap left by
+         a released bubble heals over with one the right shape for the hole,
+         which is why the sizes stay varied instead of converging on the
+         middle of the range. */
+      const held = bub.filter((b) => b.anchor && b.held && b.pop < 0);
+      const { angle, gap } = widestGap(held, cx, cy);
+      const room = Math.sin(Math.min(gap, Math.PI) / 2) * field.core * 0.85;
+      const r = Math.max(
+        field.minAnchor,
+        Math.min(field.maxAnchor, room)
+      );
+      bub.push(this._spawnBubble(field, cx, cy, "anchor", angle, r));
     }
     while (live(false) < wantRiders) {
       bub.push(this._spawnBubble(field, cx, cy, "rider"));
@@ -4940,7 +4957,7 @@ const EDITOR_SCHEMA = [
       { name: "media_player", selector: { entity: { domain: "media_player" } } },
       {
         name: "particle_size",
-        selector: { number: { min: 0.5, max: 3, step: 0.1, mode: "slider" } },
+        selector: { number: { min: 0.3, max: 3, step: 0.1, mode: "slider" } },
       },
       {
         name: "particles",
@@ -4962,7 +4979,7 @@ const EDITOR_LABELS = {
   media_player: "Speaker entity (blank = same device)",
   tap_message: "Spoken reply when the ring is tapped",
   particles: "Particle count, Jarvis v1 (0 = auto)",
-  particle_size: "Bubble / particle size",
+  particle_size: "How many bubbles (1 = about 22)",
   build_entity: "Build mode toggle",
   announce_entity: "Agent announcement toggle",
   messages_entity: "Hubbubb message toggle",

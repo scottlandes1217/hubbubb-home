@@ -1,6 +1,6 @@
 /* The bubble field's one real invariant: held bubbles must not overlap. */
 import assert from "node:assert";
-import { clearCore, separate } from "../src/pack.js";
+import { clearCore, pinToCore, separate, widestGap } from "../src/pack.js";
 
 const bubble = (x, y, r, extra = {}) => ({ x, y, r, held: true, pop: -1, ...extra });
 const gap = (a, b) => Math.hypot(b.x - a.x, b.y - a.y) - (a.r + b.r);
@@ -81,6 +81,51 @@ const gap = (a, b) => Math.hypot(b.x - a.x, b.y - a.y) - (a.r + b.r);
   const f = [bubble(5, 0, 6, { held: false })];
   clearCore(f, 0, 0, 40);
   assert.strictEqual(f[0].x, 5, "a released bubble was pushed out of the core");
+}
+
+// --- anchors stay stuck to the core ----------------------------------------
+// A rider settling on an anchor pushes it outward, and clearCore is only a
+// floor - it stops things sinking in, not drifting off. This is the rail.
+{
+  const core = 40;
+  const a = bubble(80, 0, 10, { anchor: true, vx: 60, vy: 20 });
+  pinToCore([a], 0, 0, core);
+  assert.ok(Math.abs(Math.hypot(a.x, a.y) - (core + a.r)) < 0.001,
+    `anchor sits at ${Math.hypot(a.x, a.y)}, wanted ${core + a.r}`);
+  // radial speed gone, tangential kept - take both and the field freezes
+  assert.ok(Math.abs(a.vx) < 0.001, "outward velocity survived");
+  assert.ok(Math.abs(a.vy - 20) < 0.001, "tangential velocity was taken too");
+
+  // pulled inward as well as pushed out
+  const b = bubble(12, 0, 10, { anchor: true, vx: 0, vy: 0 });
+  pinToCore([b], 0, 0, core);
+  assert.ok(Math.abs(Math.hypot(b.x, b.y) - (core + b.r)) < 0.001, "not pulled back out");
+
+  // riders are not pinned - they belong to their anchor, not the core
+  const r = bubble(200, 0, 5, { anchor: false });
+  pinToCore([r], 0, 0, core);
+  assert.strictEqual(r.x, 200, "a rider was pinned to the core");
+}
+
+// --- new bubbles go where the room is --------------------------------------
+{
+  const TAU = Math.PI * 2;
+  const at = (deg, r = 10) =>
+    bubble(Math.cos((deg * Math.PI) / 180) * 50, Math.sin((deg * Math.PI) / 180) * 50, r, { anchor: true });
+
+  // a ring with a hole between 90 and 270 degrees
+  const { angle, gap } = widestGap([at(0), at(45), at(90), at(270), at(315)], 0, 0);
+  const deg = ((angle * 180) / Math.PI + 360) % 360;
+  assert.ok(Math.abs(deg - 180) < 1, `filled at ${deg}, expected the hole at 180`);
+  assert.ok(Math.abs(gap - Math.PI) < 0.01, `gap ${gap}, expected pi`);
+
+  // the wrap-around gap counts: bubbles clustered near zero leave the rest bare
+  const w = widestGap([at(0), at(10), at(20)], 0, 0);
+  assert.ok(w.gap > Math.PI, `wrap-around gap missed, got ${w.gap}`);
+
+  // an empty ring is all gap, and must not divide by anything
+  const e = widestGap([], 0, 0);
+  assert.ok(Math.abs(e.gap - TAU) < 0.001 && Number.isFinite(e.angle), "empty ring");
 }
 
 console.log("pack ok");

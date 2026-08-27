@@ -86,3 +86,62 @@ export function clearCore(bubbles, cx, cy, coreR) {
   }
   return bubbles;
 }
+
+/* Hold the big bubbles onto the core.
+
+   clearCore only stops things sinking *into* the core - it is a floor, not a
+   rail. An anchor with a rider settling on it gets pushed outward instead, and
+   drifts off the surface it is supposed to be stuck to. This pins the anchors
+   to exactly the core's skin, so they can slide around it but never leave it.
+
+   Only the radial part of the velocity is stripped. The tangential part is
+   what lets a nudged anchor roll round the core rather than stopping dead,
+   and taking it would freeze the whole field solid. */
+export function pinToCore(bubbles, cx, cy, coreR) {
+  for (const b of bubbles) {
+    if (!b.held || b.pop >= 0 || !b.anchor) continue;
+    let dx = b.x - cx;
+    let dy = b.y - cy;
+    let d = Math.hypot(dx, dy);
+    if (d < 1e-3) {
+      dx = 1;
+      dy = 0;
+      d = 1;
+    }
+    const nx = dx / d;
+    const ny = dy / d;
+    const rest = coreR + b.r;
+    b.x = cx + nx * rest;
+    b.y = cy + ny * rest;
+    const vn = b.vx * nx + b.vy * ny;
+    b.vx -= vn * nx;
+    b.vy -= vn * ny;
+  }
+  return bubbles;
+}
+
+/* The widest bare stretch of the core's surface, and how wide it is.
+
+   New bubbles go here rather than at a random angle, and take their size from
+   the room available - which is what makes a refilling ring look like it is
+   healing over rather than like circles appearing on top of each other. */
+export function widestGap(anchors, cx, cy) {
+  const TAU = Math.PI * 2;
+  if (!anchors.length) return { angle: 0, gap: TAU };
+  const angles = anchors
+    .map((b) => Math.atan2(b.y - cy, b.x - cx))
+    .sort((p, q) => p - q);
+  let gap = -1;
+  let angle = 0;
+  for (let i = 0; i < angles.length; i++) {
+    const a0 = angles[i];
+    // The last gap wraps past pi back to the first bubble.
+    const a1 = i + 1 < angles.length ? angles[i + 1] : angles[0] + TAU;
+    const g = a1 - a0;
+    if (g > gap) {
+      gap = g;
+      angle = a0 + g / 2;
+    }
+  }
+  return { angle, gap };
+}
