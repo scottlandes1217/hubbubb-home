@@ -1,6 +1,6 @@
 import { LitElement, css, html, nothing } from "lit";
 import { rmsEnvelope } from "./envelope.js";
-import { separate } from "./pack.js";
+import { clearCore, separate } from "./pack.js";
 
 const CARD_VERSION = "4.11.1";
 
@@ -2578,30 +2578,67 @@ class HubbubbRingCard extends LitElement {
      Held bubbles are sprung to the ring's circumference rather than pinned to
      it, so the separation pass can shove them off the line and the spring can
      draw them back - that give is what stops the clumps looking rigid. */
+  /* Nearest anchor, with hysteresis: a rider keeps the host it has until
+     another is meaningfully closer, or one sitting equidistant between two
+     flicks between them every frame and jitters. */
+  _nearestAnchor(b, anchors, current) {
+    let best = current;
+    let bestD = current
+      ? Math.hypot(b.x - current.x, b.y - current.y) - current.r * 0.35
+      : Infinity;
+    for (const a of anchors) {
+      const d = Math.hypot(b.x - a.x, b.y - a.y);
+      if (d < bestD) { bestD = d; best = a; }
+    }
+    return best;
+  }
+
   _bubbleField(half) {
-    const R = half * 0.58;
+    /* The middle is a bubble in its own right, and everything else is stuck
+       to it: anchors rest on the core's skin, riders rest on the anchors.
+       That nesting is what the logo is - one big bubble carrying a crowd of
+       smaller ones - and it gives speech somewhere to travel from, since a
+       release now visibly leaves the surface of something. */
+    const core = half * 0.42;
+    const R = core;
     return {
+      core,
       R,
-      // Radii are weighted small, like the logo: a few big ones carry the
-      // shape and the small ones fill the gaps between them.
-      pick: () => half * (0.04 + Math.pow(Math.random(), 2.1) * 0.085),
-      // Roughly what fits around the circumference without crowding.
-      want: Math.max(7, Math.min(30, Math.round((2 * Math.PI * R) / (half * 0.15)))),
+      /* Two populations, because one was the problem. A single size range
+         spread evenly round a circle reads as a beaded necklace, not as
+         foam. Anchors are few and large and hold station on the ring; riders
+         are many and small and settle onto whichever anchor is nearest. The
+         separation pass then stacks the riders into layers on the anchors'
+         surfaces, which is what the logo actually looks like. */
+      anchors: 6,
+      riders: 16,
+      /* Sized so the whole stack still fits: core 0.42, an anchor on top of
+         it reaches about 0.72, and a rider on top of that about 0.86. Any
+         larger and the outermost bubbles clip the edge of the card. */
+      anchorR: () => half * (0.09 + Math.random() * 0.055),
+      riderR: () => half * (0.033 + Math.pow(Math.random(), 1.5) * 0.042),
     };
   }
 
-  _spawnBubble(field, cx, cy, at) {
+  _spawnBubble(field, cx, cy, kind, at) {
     const a = at ?? Math.random() * Math.PI * 2;
+    const anchor = kind === "anchor";
+    // Riders start just off the ring so they fall onto an anchor rather than
+    // appearing already embedded in one.
+    const d = anchor ? field.core * 1.12 : field.core * 1.55;
     return {
-      x: cx + Math.cos(a) * field.R,
-      y: cy + Math.sin(a) * field.R,
+      x: cx + Math.cos(a) * d,
+      y: cy + Math.sin(a) * d,
       vx: 0,
       vy: 0,
       r: 0,
-      full: field.pick(),
+      full: anchor ? field.anchorR() : field.riderR(),
+      anchor,
+      host: null,
       held: true,
       pop: -1,
       life: 0,
+      roll: Math.random() < 0.5 ? -1 : 1,
       wob: Math.random() * Math.PI * 2,
     };
   }
@@ -2645,29 +2682,64 @@ class HubbubbRingCard extends LitElement {
     const scale = Number(this._config.particle_size) || 1;
 
     const field = this._bubbleField(half);
-    const want = Math.max(5, Math.round(field.want * scale));
-    if (!this._bub || this._bubHalf !== half) {
+    const wantAnchors = Math.max(3, Math.round(field.anchors * scale));
+    const wantRiders = Math.max(4, Math.round(field.riders * scale));
+    /* Docking into build mode animates the ring's width, so the observer
+       fires on every frame of the transition. Reseeding on each of those was
+       the jank: the whole field was destroyed and rebuilt sixty times over
+       half a second. Scale it instead - the bubbles keep their arrangement
+       and simply shrink into the corner. */
+    if (this._bub && this._bubHalf && this._bubHalf !== half) {
+      const k2 = half / this._bubHalf;
+      for (const b of this._bub) {
+        b.x = cx + (b.x - cx) * k2;
+        b.y = cy + (b.y - cy) * k2;
+        b.r *= k2;
+        b.full *= k2;
+        b.vx *= k2;
+        b.vy *= k2;
+        if (b.popR) b.popR *= k2;
+      }
+      this._bubHalf = half;
+    }
+    if (!this._bub) {
       this._bubHalf = half;
       this._bub = [];
-      for (let i = 0; i < want; i++) {
-        const b = this._spawnBubble(field, cx, cy, (i / want) * Math.PI * 2);
-        b.r = b.full; // seed the first field already grown, not swelling in
+      for (let i = 0; i < wantAnchors; i++) {
+        const b = this._spawnBubble(
+          field, cx, cy, "anchor", (i / wantAnchors) * Math.PI * 2
+        );
+        b.r = b.full; // seed the first field grown, not swelling in
+        this._bub.push(b);
+      }
+      for (let i = 0; i < wantRiders; i++) {
+        const b = this._spawnBubble(field, cx, cy, "rider");
+        b.r = b.full;
         this._bub.push(b);
       }
       this._release = 0;
     }
     const bub = this._bub;
+    const anchors = bub.filter((b) => b.anchor && b.held && b.pop < 0);
+    // A bubble under pressure swells; the core does the same as he talks.
+    const coreR = field.core * (1 + env * 0.09 + Math.sin(this._t * 0.7) * 0.012);
 
     /* Speech lets bubbles go. Rate rises with loudness, and the accumulator
        carries the fraction over between frames so a quiet passage still
        releases one eventually rather than rounding to nothing every frame. */
-    this._release += env * dt * 2.6;
-    const heldCount = bub.filter((b) => b.held).length;
-    while (this._release >= 1 && heldCount > 3) {
+    this._release += env * dt * 3.2;
+    while (this._release >= 1) {
       this._release -= 1;
-      const held = bub.filter((b) => b.held && b.r > b.full * 0.6);
-      if (!held.length) break;
-      const b = held[Math.floor(Math.random() * held.length)];
+      // Riders go first - a big anchor leaving tears a hole in the ring, and
+      // the small ones streaming off it is the thing that reads as bubbling.
+      const riders = bub.filter(
+        (b) => b.held && !b.anchor && b.pop < 0 && b.r > b.full * 0.6
+      );
+      const pool = riders.length > 2 ? riders
+        : bub.filter((b) => b.held && b.pop < 0 && b.r > b.full * 0.6);
+      if (pool.length < 3) break;
+      const b = pool[Math.floor(Math.random() * pool.length)];
+      b.host = null;
       b.held = false;
       b.life = 0;
       const d = Math.hypot(b.x - cx, b.y - cy) || 1;
@@ -2687,13 +2759,42 @@ class HubbubbRingCard extends LitElement {
       }
       if (b.held) {
         b.r += (b.full - b.r) * (1 - Math.exp(-dt / 0.45));
-        const d = Math.hypot(b.x - cx, b.y - cy) || 1;
-        const ux = (b.x - cx) / d, uy = (b.y - cy) / d;
-        // spring back to the ring, and a slow tangential drift round it
-        const pull = (field.R - d) * 7;
-        b.vx += (ux * pull - uy * drift) * dt;
-        b.vy += (uy * pull + ux * drift) * dt;
-        const damp = Math.exp(-dt * 3.4);
+        if (b.anchor) {
+          // anchors sit on the core's skin and drift slowly round it
+          const d = Math.hypot(b.x - cx, b.y - cy) || 1;
+          const ux = (b.x - cx) / d, uy = (b.y - cy) / d;
+          const rest = coreR + b.r;
+          const pull = (rest - d) * 8;
+          b.vx += (ux * pull - uy * drift) * dt;
+          b.vy += (uy * pull + ux * drift) * dt;
+        } else {
+          /* Riders sit on whatever anchor is nearest. Keeping the host until
+             another is clearly closer stops a bubble equidistant between two
+             from flicking back and forth between them every frame. */
+          if (!b.host || !b.host.held || b.host.pop >= 0) {
+            b.host = this._nearestAnchor(b, anchors, null);
+          } else {
+            b.host = this._nearestAnchor(b, anchors, b.host);
+          }
+          const h = b.host;
+          if (h) {
+            let dx = b.x - h.x, dy = b.y - h.y;
+            let d = Math.hypot(dx, dy);
+            if (d < 0.001) { dx = 0.1; dy = 0; d = 0.1; }
+            const ux = dx / d, uy = dy / d;
+            // settle onto the host's surface, and roll slowly around it
+            const rest = h.r + b.r;
+            const pull = (rest - d) * 9;
+            const roll = half * 0.22 * b.roll;
+            b.vx += (ux * pull - uy * roll) * dt;
+            b.vy += (uy * pull + ux * roll) * dt;
+          } else {
+            const d = Math.hypot(b.x - cx, b.y - cy) || 1;
+            b.vx += ((b.x - cx) / d) * (field.R - d) * 5 * dt;
+            b.vy += ((b.y - cy) / d) * (field.R - d) * 5 * dt;
+          }
+        }
+        const damp = Math.exp(-dt * (b.anchor ? 3.4 : 4.6));
         b.vx *= damp;
         b.vy *= damp;
       } else {
@@ -2715,33 +2816,52 @@ class HubbubbRingCard extends LitElement {
     }
 
     separate(bub, 2);
+    clearCore(bub, cx, cy, coreR);
 
     // retire popped bubbles and grow replacements into the gap
     for (let i = bub.length - 1; i >= 0; i--) {
       if (bub[i].pop > 0.34) bub.splice(i, 1);
     }
-    // Count only the held ones: a bubble that has been let go has already
-    // given up its place on the ring, so its replacement starts growing while
-    // it is still drifting away rather than after it pops.
-    while (bub.filter((b) => b.held && b.pop < 0).length < want) {
-      bub.push(this._spawnBubble(field, cx, cy));
+    /* Refill each population on its own. A released bubble has already given
+       up its place, so its replacement starts growing while it is still
+       drifting away rather than after it pops - which is what keeps the ring
+       looking alive through a long answer instead of slowly going bald. */
+    const live = (anchor) =>
+      bub.filter((b) => b.held && b.pop < 0 && b.anchor === anchor).length;
+    while (live(true) < wantAnchors) {
+      bub.push(this._spawnBubble(field, cx, cy, "anchor"));
+    }
+    while (live(false) < wantRiders) {
+      bub.push(this._spawnBubble(field, cx, cy, "rider"));
     }
 
     // --- paint ------------------------------------------------------------
     ctx.clearRect(0, 0, W, H);
     ctx.globalCompositeOperation = "lighter";
 
-    const line = Math.max(1.2, half * 0.02);
-    ctx.strokeStyle = `rgba(${R},${G},${B},${0.09 + env * 0.16})`;
-    ctx.lineWidth = line * 4;
+    // the core, drawn exactly like the bubbles stuck to it, only bigger
+    const cg = ctx.createRadialGradient(
+      cx - coreR * 0.3, cy - coreR * 0.35, coreR * 0.08, cx, cy, coreR
+    );
+    const ca = 0.34 + env * 0.22;
+    cg.addColorStop(0, `rgba(${Math.min(255, R + 80)},${Math.min(255, G + 80)},${Math.min(255, B + 65)},${ca})`);
+    cg.addColorStop(0.6, `rgba(${R},${G},${B},${ca * 0.55})`);
+    cg.addColorStop(1, `rgba(${R},${G},${B},0)`);
+    ctx.fillStyle = cg;
     ctx.beginPath();
-    ctx.arc(cx, cy, field.R, 0, Math.PI * 2);
-    ctx.stroke();
-    ctx.strokeStyle = `rgba(${R},${G},${B},${0.42 + env * 0.35})`;
-    ctx.lineWidth = line;
+    ctx.arc(cx, cy, coreR, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = `rgba(${R},${G},${B},${0.3 + env * 0.28})`;
+    ctx.lineWidth = Math.max(0.8, coreR * 0.018);
     ctx.beginPath();
-    ctx.arc(cx, cy, field.R, 0, Math.PI * 2);
+    ctx.arc(cx, cy, coreR * 0.985, 0, Math.PI * 2);
     ctx.stroke();
+
+    ctx.fillStyle = `rgba(255,255,255,${0.13 + env * 0.12})`;
+    ctx.beginPath();
+    ctx.arc(cx - coreR * 0.36, cy - coreR * 0.4, coreR * 0.14, 0, Math.PI * 2);
+    ctx.fill();
 
     // biggest first, so the small ones sit on top and read as nearer
     const order = bub.slice().sort((x, y) => y.r - x.r);
@@ -2773,10 +2893,12 @@ class HubbubbRingCard extends LitElement {
       ctx.arc(b.x, b.y, rad, 0, Math.PI * 2);
       ctx.fill();
 
-      ctx.strokeStyle = `rgba(${R},${G},${B},${(0.45 + env * 0.28) * fade})`;
-      ctx.lineWidth = Math.max(0.6, rad * 0.09);
+      // A bubble's edge is a meniscus, not an outline: thin, and only just
+      // brighter than the fill. Heavier than this and they read as rings.
+      ctx.strokeStyle = `rgba(${R},${G},${B},${(0.26 + env * 0.16) * fade})`;
+      ctx.lineWidth = Math.max(0.5, rad * 0.045);
       ctx.beginPath();
-      ctx.arc(b.x, b.y, rad * 0.94, 0, Math.PI * 2);
+      ctx.arc(b.x, b.y, rad * 0.97, 0, Math.PI * 2);
       ctx.stroke();
 
       if (rad > 3) {
@@ -3597,6 +3719,12 @@ class HubbubbRingCard extends LitElement {
     }
     .wrap {
       position: relative;
+      /* Docking is three things moving at once - the ring shrinking, the row
+         reflowing, the panel arriving. They share one curve and one duration
+         so it reads as a single movement rather than three that happen to
+         overlap. flex-direction cannot be transitioned, so the panel covers
+         that instant with its own entrance. */
+      transition: height 380ms cubic-bezier(0.22, 1, 0.36, 1);
       display: flex;
       flex-direction: column;
       align-items: center;
@@ -3612,7 +3740,7 @@ class HubbubbRingCard extends LitElement {
       max-width: 100%;
       aspect-ratio: 1 / 1;
       cursor: pointer;
-      transition: width 0.45s cubic-bezier(0.4, 0, 0.2, 1);
+      transition: width 380ms cubic-bezier(0.22, 1, 0.36, 1);
       -webkit-tap-highlight-color: transparent;
     }
     .ring:active {
@@ -3708,6 +3836,30 @@ class HubbubbRingCard extends LitElement {
       transition: fill 0.25s;
     }
 
+    /* Conditionally rendered, so there is no "before" state to transition
+       from - a mount animation is the only thing that can play here. */
+    @keyframes jr-panel-in {
+      from {
+        opacity: 0;
+        transform: translateX(22px) scale(0.985);
+      }
+      to {
+        opacity: 1;
+        transform: none;
+      }
+    }
+    .wrap.build .panel {
+      animation: jr-panel-in 380ms cubic-bezier(0.22, 1, 0.36, 1) both;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .wrap,
+      .ring {
+        transition: none;
+      }
+      .wrap.build .panel {
+        animation: none;
+      }
+    }
     .panel {
       order: 2;
       flex: 1;

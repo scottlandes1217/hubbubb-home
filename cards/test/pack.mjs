@@ -1,6 +1,6 @@
 /* The bubble field's one real invariant: held bubbles must not overlap. */
 import assert from "node:assert";
-import { separate } from "../src/pack.js";
+import { clearCore, separate } from "../src/pack.js";
 
 const bubble = (x, y, r, extra = {}) => ({ x, y, r, held: true, pop: -1, ...extra });
 const gap = (a, b) => Math.hypot(b.x - a.x, b.y - a.y) - (a.r + b.r);
@@ -54,6 +54,33 @@ const gap = (a, b) => Math.hypot(b.x - a.x, b.y - a.y) - (a.r + b.r);
   const x = f[1].x;
   separate(f, 4);
   assert.strictEqual(f[1].x, x, "a released bubble was pushed by the field");
+}
+
+// --- nothing may sit inside the core bubble --------------------------------
+{
+  const core = 40;
+  const f = [
+    bubble(0, 0, 8, { vx: -50, vy: 0 }),      // right on the centre
+    bubble(10, 5, 6, { vx: 0, vy: 0 }),       // buried in the core
+    bubble(200, 0, 6, { vx: 0, vy: 0 }),      // well outside, must not move
+  ];
+  const before = f[2].x;
+  clearCore(f, 0, 0, core);
+  for (const b of f.slice(0, 2)) {
+    const d = Math.hypot(b.x, b.y);
+    assert.ok(d >= core + b.r - 0.001, `bubble still inside the core at ${d}`);
+    assert.ok(Number.isFinite(b.x) && Number.isFinite(b.y), "NaN from a centred bubble");
+  }
+  assert.strictEqual(f[2].x, before, "a bubble outside the core was moved");
+  // inward speed is cancelled, or it buzzes against the boundary
+  assert.ok(f[0].vx >= -0.001, `still driving inward at ${f[0].vx}`);
+}
+
+// A released bubble passes straight through the core - it is on its way out.
+{
+  const f = [bubble(5, 0, 6, { held: false })];
+  clearCore(f, 0, 0, 40);
+  assert.strictEqual(f[0].x, 5, "a released bubble was pushed out of the core");
 }
 
 console.log("pack ok");

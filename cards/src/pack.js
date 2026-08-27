@@ -48,3 +48,41 @@ export function separate(bubbles, passes = 2) {
   }
   return bubbles;
 }
+
+/* Keep the field outside the core bubble.
+
+   The anchors are sprung to the core's surface, but a spring is a suggestion:
+   riders shove anchors, anchors shove each other, and anything pushed inward
+   sinks straight through the core because separate() only knows about pairs.
+   This is the hard constraint that the spring is not - after it runs, nothing
+   held is inside the core, whatever the forces wanted.
+
+   Inward velocity is cancelled at the same time. Snapping a bubble back to the
+   surface while it still carries speed towards the middle makes it buzz
+   against the boundary for as long as the force lasts. */
+export function clearCore(bubbles, cx, cy, coreR) {
+  for (const b of bubbles) {
+    if (!b.held || b.pop >= 0) continue;
+    let dx = b.x - cx;
+    let dy = b.y - cy;
+    let d = Math.hypot(dx, dy);
+    if (d < 1e-3) {
+      dx = 1;
+      dy = 0;
+      d = 1;
+    }
+    const min = coreR + b.r;
+    if (d < min) {
+      const nx = dx / d;
+      const ny = dy / d;
+      b.x = cx + nx * min;
+      b.y = cy + ny * min;
+      const vn = b.vx * nx + b.vy * ny;
+      if (vn < 0) {
+        b.vx -= vn * nx;
+        b.vy -= vn * ny;
+      }
+    }
+  }
+  return bubbles;
+}
