@@ -13,6 +13,7 @@ from __future__ import annotations
 import logging
 import shutil
 from dataclasses import dataclass, field
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -129,6 +130,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     memory = Memory(hass)
     await memory.async_setup()
 
+    findings = FindingsReport(hass)
+    await findings.async_load()
+
     hub_conf = entry.data.get(CONF_HUBBUBB) or {}
     hubbubb = None
     if all(
@@ -155,7 +159,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         name=name,
         memory=memory,
         timers=None,  # set below; the pool needs a callback that needs runtime
-        findings=FindingsReport(),
+        findings=findings,
         hubbubb=hubbubb,
         companion=companion,
     )
@@ -395,6 +399,15 @@ def _async_register_services(hass: HomeAssistant, runtime: Runtime) -> None:
         )
 
 
+def _since(finding: dict) -> str:
+    """' (since 20 August)' - only when it is not the first night."""
+    first = finding.get("first_seen")
+    today = dt_util.now().date().isoformat()
+    if not first or first == today:
+        return ""
+    return f" (since {dt_util.parse_date(first).strftime('%d %B').lstrip('0')})"
+
+
 def _resolve_timer(runtime: Runtime, call: ServiceCall):
     timer = None
     if timer_id := call.data.get("timer_id"):
@@ -453,13 +466,15 @@ async def _sweep(runtime: Runtime) -> None:
     raw = runtime.option("overnight", CONF_IGNORE, "") or ""
     ignore = [line.strip() for line in raw.replace(",", "\n").splitlines() if line.strip()]
     findings = await async_sweep(runtime.hass, ignore)
-    runtime.findings.update(findings, runtime.findings.spoken(runtime.name))
+    await runtime.findings.async_update(findings)
     _LOGGER.info("overnight sweep: %d finding(s)", len(findings))
 
     if findings:
         from homeassistant.components import persistent_notification
 
-        body = "\n".join(f"- {f['detail']}" for f in findings[:20])
+        body = "\n".join(
+            f"- {f['detail']}" + _since(f) for f in findings[:20]
+        )
         if len(findings) > 20:
             body += f"\n- ...and {len(findings) - 20} more."
         persistent_notification.async_create(
@@ -494,7 +509,11 @@ async def _briefing_text(runtime: Runtime) -> str:
                 {
                     "entity_id": calendars,
                     "start_date_time": dt_util.now().isoformat(),
-                    "duration": {"hours": 24},
+                    # End of today, not twenty-four hours out: a duration
+                    # window announces tomorrow morning's dentist as "today".
+                    "end_date_time": (
+                        dt_util.start_of_local_day() + timedelta(days=1)
+                    ).isoformat(),
                 },
                 blocking=True,
                 return_response=True,

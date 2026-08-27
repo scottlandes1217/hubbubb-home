@@ -25,13 +25,15 @@ from __future__ import annotations
 import fnmatch
 import logging
 from collections import defaultdict
-from dataclasses import dataclass, field
 from datetime import timedelta
 from typing import Any
 
 from homeassistant.components.recorder import get_instance, history
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
+
+from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -53,14 +55,35 @@ QUIET_SKIP = (
 )
 
 
-@dataclass
 class FindingsReport:
-    """What the last sweep turned up, and who wants telling when it changes."""
+    """What the sweep turned up, kept across nights and across restarts.
 
-    items: list[dict] = field(default_factory=list)
-    summary: str = ""
-    last_run: str | None = None
-    _listeners: list[CALLBACK_TYPE] = field(default_factory=list, repr=False)
+    Holding this in memory only was a real defect: every sweep overwrote the
+    last, a restart erased it, and a fault found on Tuesday and not acted on
+    was gone by Wednesday - which teaches people to stop listening. Findings
+    now persist, and one that is still true keeps the date it was first seen,
+    so "offline since the twentieth" is sayable instead of a fresh alarm every
+    single night about the same dead bulb.
+    """
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._store = Store(hass, 1, f"{DOMAIN}.findings")
+        self._listeners: list[CALLBACK_TYPE] = []
+        self.items: list[dict] = []
+        self.last_run: str | None = None
+
+    @property
+    def summary(self) -> str:
+        return self.spoken("")
+
+    @staticmethod
+    def _key(finding: dict) -> tuple:
+        return (finding.get("kind"), finding.get("entity_id"))
+
+    async def async_load(self) -> None:
+        data = await self._store.async_load() or {}
+        self.items = data.get("items", [])
+        self.last_run = data.get("last_run")
 
     @callback
     def async_add_listener(self, update: CALLBACK_TYPE) -> CALLBACK_TYPE:
@@ -71,11 +94,19 @@ class FindingsReport:
 
         return _remove
 
-    @callback
-    def update(self, items: list[dict], summary: str) -> None:
+    async def async_update(self, items: list[dict]) -> None:
+        """Replace the findings, carrying first_seen forward for survivors."""
+        previous = {self._key(f): f for f in self.items}
+        today = dt_util.now().date().isoformat()
+        for finding in items:
+            old = previous.get(self._key(finding))
+            finding["first_seen"] = (old or {}).get("first_seen") or today
+
         self.items = items
-        self.summary = summary
         self.last_run = dt_util.now().isoformat()
+        await self._store.async_save(
+            {"items": self.items, "last_run": self.last_run}
+        )
         for listener in self._listeners:
             listener()
 
@@ -92,7 +123,16 @@ class FindingsReport:
             parts.append(
                 f"{quiet} {'has' if quiet == 1 else 'have'} gone quiet"
             )
-        return "Overnight I found " + " and ".join(parts) + "."
+        sentence = "Overnight I found " + " and ".join(parts) + "."
+        # Anything carried over is the more useful fact: it says nobody has
+        # dealt with it, which a nightly count never does.
+        today = dt_util.now().date().isoformat()
+        carried = sum(
+            1 for f in self.items if f.get("first_seen") and f["first_seen"] != today
+        )
+        if carried:
+            sentence += f" {carried} of them {'was' if carried == 1 else 'were'} there yesterday too."
+        return sentence
 
 
 def _ignored(entity_id: str, patterns: list[str]) -> bool:

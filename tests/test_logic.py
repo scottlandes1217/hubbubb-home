@@ -58,6 +58,24 @@ _stub(
 )
 _stub("homeassistant.helpers")
 _stub("homeassistant.helpers.event", async_track_point_in_time=_track_point_in_time)
+
+
+class _Store:
+    """The one behaviour that matters here: it survives being reconstructed."""
+
+    _disk = {}
+
+    def __init__(self, hass, version, key):
+        self._key = key
+
+    async def async_load(self):
+        return _Store._disk.get(self._key)
+
+    async def async_save(self, data):
+        _Store._disk[self._key] = data
+
+
+_stub("homeassistant.helpers.storage", Store=_Store)
 _stub("homeassistant.util")
 _stub(
     "homeassistant.util.dt",
@@ -227,19 +245,65 @@ def test_cancel_all_disarms_everything():
 # --- findings ----------------------------------------------------------------
 
 def test_findings_speech_counts_both_kinds():
-    report = FindingsReport()
+    import asyncio
+
+    report = FindingsReport(None)
     assert "Nothing" in report.spoken("Athena")
-    report.update(
-        [
-            {"kind": "dead", "detail": "x"},
-            {"kind": "quiet", "detail": "y"},
-            {"kind": "quiet", "detail": "z"},
-        ],
-        "",
+    asyncio.run(
+        report.async_update(
+            [
+                {"kind": "dead", "entity_id": "a", "detail": "x"},
+                {"kind": "quiet", "entity_id": "b", "detail": "y"},
+                {"kind": "quiet", "entity_id": "c", "detail": "z"},
+            ]
+        )
     )
     speech = report.spoken("Athena")
     assert "1 thing offline" in speech, speech
     assert "2 have gone quiet" in speech, speech
+
+
+def test_findings_survive_a_restart_and_keep_their_first_seen():
+    """The defect this guards: a fault found on Tuesday and not acted on
+    vanishing by Wednesday, which teaches people to stop listening."""
+    import asyncio
+
+    _Store._disk.clear()
+    report = FindingsReport(None)
+
+    async def _first_night():
+        await report.async_load()
+        await report.async_update(
+            [{"kind": "quiet", "entity_id": "media_player.tv", "detail": "tv"}]
+        )
+
+    asyncio.run(_first_night())
+    first_seen = report.items[0]["first_seen"]
+    assert first_seen
+
+    # Home Assistant restarts: a brand-new report object, same store.
+    revived = FindingsReport(None)
+    asyncio.run(revived.async_load())
+    assert revived.items and revived.items[0]["entity_id"] == "media_player.tv"
+    assert revived.last_run
+
+    # Tonight finds the same fault again. It must not read as new.
+    async def _second_night():
+        await revived.async_update(
+            [
+                {"kind": "quiet", "entity_id": "media_player.tv", "detail": "tv"},
+                {"kind": "dead", "entity_id": "light.hall", "detail": "hall"},
+            ]
+        )
+
+    asyncio.run(_second_night())
+    carried = {f["entity_id"]: f["first_seen"] for f in revived.items}
+    assert carried["media_player.tv"] == first_seen, "first_seen must carry forward"
+    assert carried["light.hall"] != "", "a new finding still gets a date"
+
+    # And a fixed fault must actually leave.
+    asyncio.run(revived.async_update([]))
+    assert revived.items == []
 
 
 def test_days_reads_as_speech_not_as_a_clock():

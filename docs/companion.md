@@ -37,6 +37,22 @@ Answer with JSON. A non-2xx status, or a body carrying `{"ok": false,
 "detail": "..."}`, is surfaced to the card as an error rather than a blank
 screen. Anything that is not JSON comes back as `{"content": "<the body>"}`.
 
+## The announcement toggle
+
+`switch.<name>_agent_announcements` is owned by the integration but enforced by
+the companion — Hubbubb Home never sees an agent turn finish, so it cannot
+decide whether to speak one. Read the switch and honour it.
+
+Two things should override it, both learned the hard way:
+
+- **The agent is waiting on the user** — a permission prompt. Nobody hearing
+  it means nobody acts, and the session sits there.
+- **The agent asked a question and cannot continue** without an answer.
+
+What should *not* override it is "the turn was dictated". In a spoken working
+session every turn is dictated, so yielding to that narrates the whole
+afternoon with the bell switched off.
+
 ## Errors
 
 A companion that is configured but unreachable answers `status: 503` with a
