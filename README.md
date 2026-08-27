@@ -10,6 +10,8 @@ run a coding agent somewhere, a build screen that drives it from the wall.
 Call it Athena, or Jeeves, or your dog's name. Nothing in it is branded with
 an assistant's name until you type one.
 
+![The ring on a dashboard](docs/images/ring.png)
+
 ---
 
 ## Install
@@ -22,6 +24,11 @@ an assistant's name until you type one.
 
 That is the whole setup. No YAML, no Lovelace resources to register, no
 helpers to create — the integration makes its own and serves its own cards.
+
+<p align="center">
+  <img src="docs/images/setup.png" alt="Naming your assistant" width="49%">
+  <img src="docs/images/editor.png" alt="The card editor" width="49%">
+</p>
 
 ### Give it a brain
 
@@ -61,6 +68,34 @@ Entity IDs take the name you chose, so an assistant called Athena gets
 | Animated listening ring, with the build screen | `custom:hubbubb-ring-card` |
 | Apple TV / Siri Remote | `custom:hubbubb-remote-card` |
 | Voice timer countdowns | `custom:hubbubb-timers-card` |
+
+Add the ring card from the dashboard editor and it wires itself up: it finds
+your voice satellite and the three switches, and reads the assistant's name
+out of them. Everything else has a sensible default.
+
+<p align="center">
+  <img src="docs/images/build.png" alt="Build mode" width="49%">
+  <img src="docs/images/timers.png" alt="Voice timers" width="49%">
+</p>
+
+### Two animations
+
+**Hubbubb** (the default) is a foam. A core bubble with smaller ones stuck to
+its skin, and smaller ones again riding those. It is a small physics toy
+rather than a loop: bubbles never overlap, they stick where they touch, ones
+of a like size fuse into bigger ones, and a bubble that grows too big bursts
+and leaves a gap that new ones grow into. Speaking releases bubbles, which
+float off and pop — so the ring empties while your assistant talks and fills
+back in when it stops.
+
+**Jarvis v1** is the original: block segments, a wireframe core and a field of
+motes. Pick either in the card editor.
+
+The slider marked *how many bubbles* sets the population — and doubles as the
+mote size for Jarvis v1, since the two never run at once.
+
+The build panel takes a height, or floats over the whole dashboard. Panel and
+terminal colours are settable, as are the five state colours of the ring.
 
 They are served by the integration at a versioned URL, so a HACS update can
 never leave a stale bundle in someone's browser cache. There is nothing to add
@@ -133,6 +168,18 @@ Without one, everything else works exactly the same. See
     npm run build     # cards -> custom_components/hubbubb_home/www/
     npm test          # card unit tests + the integration's logic checks
 
+Two of those checks guard bugs that are invisible in a short run:
+
+`cards/test/pack.mjs` asserts the foam's geometric invariants — after the
+solver runs, no two bubbles intersect, nothing sits inside the core, and a
+merge conserves area rather than radius.
+
+`cards/test/foam.mjs` runs the whole life cycle for 150 simulated seconds and
+asserts the **last** window is still busy. An early version looked right for
+thirty seconds and then froze solid, because the only thing that could end a
+bubble was growing into the ceiling — and once the packing settles, nothing is
+pressed hard enough against anything else to grow.
+
 ## Licence
 
-MIT
+MIT — see [LICENSE](LICENSE).

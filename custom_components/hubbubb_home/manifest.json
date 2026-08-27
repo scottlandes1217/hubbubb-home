@@ -1,7 +1,9 @@
 {
   "domain": "hubbubb_home",
   "name": "Hubbubb Home",
-  "codeowners": [],
+  "codeowners": [
+    "@scottlandes1217"
+  ],
   "config_flow": true,
   "dependencies": [
     "conversation",
