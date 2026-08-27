@@ -66,6 +66,9 @@ They are served by the integration at a versioned URL, so a HACS update can
 never leave a stale bundle in someone's browser cache. There is nothing to add
 to your Lovelace resources.
 
+The build panel takes a height, or floats over the whole dashboard. Panel and
+terminal colours are settable, as are the five state colours of the ring.
+
 A starter dashboard is in [`docs/dashboard.yaml`](docs/dashboard.yaml).
 
 ### Voice
