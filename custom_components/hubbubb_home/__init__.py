@@ -55,6 +55,7 @@ from .const import (
     CONF_NIGHTLY_TIME,
     CONF_PROMPT,
     CONF_SENTENCES,
+    CONF_TTS,
     CONF_WEATHER,
     DEFAULT_BRIEFING_TIME,
     DEFAULT_NAME,
@@ -317,7 +318,9 @@ SERVICE_SCHEMAS: dict[str, vol.Schema] = {
     ),
     "ask_hubbubb": vol.Schema({vol.Required("request"): str}),
     "run_sweep": vol.Schema({}),
-    "speak_briefing": vol.Schema({vol.Optional("target"): str}),
+    "speak_briefing": vol.Schema(
+        {vol.Optional("target"): vol.Any(str, [str])}
+    ),
 }
 
 
@@ -555,25 +558,60 @@ async def _briefing_text(runtime: Runtime) -> str:
     return " ".join(parts)
 
 
-async def _announce(runtime: Runtime, text: str, target: str | None = None) -> None:
-    """Say something out loud through a voice satellite.
+async def _announce(
+    runtime: Runtime, text: str, target: str | list[str] | None = None
+) -> None:
+    """Say something out loud, in every room that was asked for.
 
-    Only assist_satellite, deliberately. Every other way of making a house
-    talk - a speaker group, a phone notification, a specific TTS voice - is
-    one automation away, and `speak_briefing` returns the text so that
-    automation has something to say. Guessing at the rest would mean owning
-    a media-player routing problem that Home Assistant already solves.
+    Satellites and speakers are announced differently - a satellite ducks and
+    resumes whatever it was doing, a media player needs a text-to-speech
+    entity to render through - so they are grouped by domain and sent as two
+    calls rather than one. Rooms are independent: one unplugged speaker must
+    not swallow the announcement everywhere else, so each group is awaited
+    separately and a failure is logged rather than raised.
     """
-    target = target or runtime.option("briefing", CONF_BRIEFING_TARGET)
-    if not target:
+    chosen = target if target is not None else runtime.option(
+        "briefing", CONF_BRIEFING_TARGET
+    )
+    if isinstance(chosen, str):
+        chosen = [chosen]
+    chosen = [e for e in (chosen or []) if e]
+    if not chosen:
         _LOGGER.info("%s had nothing to speak through: %s", runtime.name, text)
         return
+
+    satellites = [e for e in chosen if e.startswith("assist_satellite.")]
+    players = [e for e in chosen if e.startswith("media_player.")]
+
+    if satellites:
+        await _speak(
+            runtime, "assist_satellite", "announce",
+            {"entity_id": satellites, "message": text},
+        )
+
+    if players:
+        engine = runtime.option("briefing", CONF_TTS)
+        if not engine:
+            _LOGGER.warning(
+                "%s cannot speak through %s: no text-to-speech entity is "
+                "chosen in the options",
+                runtime.name, ", ".join(players),
+            )
+        else:
+            await _speak(
+                runtime, "tts", "speak",
+                {
+                    "entity_id": engine,
+                    "media_player_entity_id": players,
+                    "message": text,
+                },
+            )
+
+
+async def _speak(runtime: Runtime, domain: str, service: str, data: dict) -> None:
     try:
         await runtime.hass.services.async_call(
-            "assist_satellite",
-            "announce",
-            {"entity_id": target, "message": text},
-            blocking=False,
+            domain, service, data, blocking=False
         )
     except HomeAssistantError as err:
-        _LOGGER.warning("could not speak the announcement: %s", err)
+        _LOGGER.warning("could not speak through %s: %s", domain, err)

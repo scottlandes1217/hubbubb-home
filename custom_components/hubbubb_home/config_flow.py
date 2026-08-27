@@ -50,6 +50,7 @@ from .const import (
     CONF_NIGHTLY_TIME,
     CONF_PROMPT,
     CONF_SENTENCES,
+    CONF_TTS,
     CONF_WEATHER,
     DEFAULT_BRIEFING_TIME,
     DEFAULT_NAME,
@@ -237,7 +238,13 @@ class HubbubbHomeOptionsFlow(OptionsFlow):
                                 CONF_BRIEFING_TIME, default=DEFAULT_BRIEFING_TIME
                             ): TimeSelector(),
                             vol.Optional(CONF_BRIEFING_TARGET): EntitySelector(
-                                EntitySelectorConfig(domain="assist_satellite")
+                                EntitySelectorConfig(
+                                    domain=["assist_satellite", "media_player"],
+                                    multiple=True,
+                                )
+                            ),
+                            vol.Optional(CONF_TTS): EntitySelector(
+                                EntitySelectorConfig(domain="tts")
                             ),
                             vol.Optional(CONF_WEATHER): EntitySelector(
                                 EntitySelectorConfig(domain="weather")

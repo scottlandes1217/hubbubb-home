@@ -24,6 +24,7 @@ CONF_IGNORE = "ignore"
 CONF_BRIEFING_TIME = "briefing_time"
 CONF_BRIEFING_ENABLED = "briefing_enabled"
 CONF_BRIEFING_TARGET = "briefing_target"
+CONF_TTS = "tts_entity"
 CONF_WEATHER = "weather_entity"
 CONF_CALENDARS = "calendars"
 

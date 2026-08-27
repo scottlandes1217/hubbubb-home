@@ -72,10 +72,12 @@
               "briefing_time": "Time",
               "briefing_target": "Speak through",
               "weather_entity": "Weather",
-              "calendars": "Calendars"
+              "calendars": "Calendars",
+              "tts_entity": "Voice for speakers"
             },
             "data_description": {
-              "briefing_target": "Also where finished timers announce themselves."
+              "briefing_target": "One or more voice satellites or speakers. Also where finished timers announce themselves.",
+              "tts_entity": "Only needed if you chose a speaker \u2014 a satellite has its own voice, a speaker needs one picking."
             }
           },
           "hubbubb": {

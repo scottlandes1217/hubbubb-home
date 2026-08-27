@@ -32,7 +32,24 @@ const DEFAULTS = {
   build_page: false, // this card IS the dedicated build dashboard
   build_return: "/", // where the build page's exit button goes back to
   build_projects: [], // chip allowlist for "+ New"; empty = all known projects
+  /* Which ring to draw. "hubbubb" is the default look - a plain ring with
+     bubbles going round it. "jarvis-v1" is the original: block segments, a
+     wireframe core and a mote field. */
+  animation: "hubbubb",
   assistant_name: "Assistant", // what your AI is called, used in every message
+  /* Build panel: how tall, and whether it lifts off the dashboard.
+     `panel_height` takes a number of pixels or "fill". Fullscreen floats the
+     panel over whatever else is on the dashboard rather than pushing it
+     around, which is what you want from a console you open and close. */
+  panel_height: 0, // 0 = follow the ring's size, as before
+  panel_fullscreen: false,
+  /* Panel and terminal colours. Empty means "use the built-in look". */
+  panel_bg: "",
+  panel_border: "",
+  panel_text: "",
+  terminal_bg: "",
+  terminal_text: "",
+  honeycomb: true,
   tap_message: "Yes?", // what the assistant says when the ring is tapped
   /* Gates the "agent finished" announcement on the puck, and with it the
      media pause/mute the announcement sets off. Left empty because the id
@@ -257,6 +274,23 @@ const HEX_PATH = (() => {
   return [hex(0, 0), hex(3 * s, 0), hex(0, h), hex(3 * s, h), hex(1.5 * s, h / 2)].join("");
 })();
 const HEX_TILE = { w: 15, h: r2(Math.sqrt(3) * 5) };
+
+/* The same tile again, as a CSS background.
+
+   The honeycomb used to live inside the ring's own SVG, which meant it could
+   only ever cover a square around the ring - on a full-width card that left
+   the pattern stopping in mid-air a third of the way across. A tiled
+   background on the card itself covers whatever shape the card happens to be.
+   currentColor cannot reach into a data URI, so the stroke is passed in. */
+const hexTileUrl = (stroke) =>
+  "url(\"data:image/svg+xml," +
+  encodeURIComponent(
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${HEX_TILE.w}" ` +
+      `height="${HEX_TILE.h}" viewBox="0 0 ${HEX_TILE.w} ${HEX_TILE.h}">` +
+      `<path d="${HEX_PATH}" fill="none" stroke="${stroke}" ` +
+      `stroke-width="0.35"/></svg>`
+  ) +
+  "\")";
 
 /* The block ring is drawn on canvas as dynamic "dataset" segments —
    see _segTick / _drawSegs. */
@@ -521,6 +555,28 @@ class HubbubbRingCard extends LitElement {
   getGridOptions() {
     const rows = Math.max(2, Math.ceil(Number(this._config?.size ?? 240) / 56));
     return { rows, columns: 12, min_rows: 2, min_columns: 6 };
+  }
+
+  /* Every user-settable colour and size, as custom properties. Kept in one
+     place so the stylesheet can stay a stylesheet: a rule reads var(--jr-x,
+     fallback) and neither knows nor cares whether anybody set it. */
+  _cardVars(color) {
+    const c = this._config;
+    const px = (v) => (Number(v) > 0 ? `${Number(v)}px` : "");
+    const set = {
+      "--jr-size": `${Number(c.size)}px`,
+      "--jr-color": color,
+      "--jr-panel-h": c.panel_height === "fill" ? "100%" : px(c.panel_height),
+      "--jr-panel-bg": c.panel_bg,
+      "--jr-panel-border": c.panel_border,
+      "--jr-panel-text": c.panel_text,
+      "--jr-term-bg": c.terminal_bg,
+      "--jr-term-text": c.terminal_text,
+    };
+    return Object.entries(set)
+      .filter(([, v]) => v)
+      .map(([k, v]) => `${k}:${v}`)
+      .join(";");
   }
 
   static getConfigElement() {
@@ -2500,9 +2556,149 @@ class HubbubbRingCard extends LitElement {
     return { energy: ENERGY[state], rgb: parseColor(color) };
   }
 
+  /* ---------------- hubbubb: a ring, and bubbles around it ----------------
+
+     The logo is a cluster of blue bubbles, so the default animation is that
+     cluster set in motion: a clean ring with bubbles orbiting it, swelling and
+     spreading when he speaks and settling to a slow drift when nobody is
+     talking. Deliberately much less machinery than jarvis-v1 - no segments, no
+     mote field, no wireframe core - because it has to read at 90px on a wall
+     panel as well as at 470px on a desk.
+
+     Bubbles are drawn the way the logo draws them: a light-to-base radial
+     fill, a darker rim, and one small specular highlight up and to the left.
+     That highlight is most of why a circle reads as a bubble at all. */
+  _seedBubbles(count) {
+    const out = [];
+    for (let i = 0; i < count; i++) {
+      out.push({
+        // Spread round the ring but not evenly - a perfect ring of evenly
+        // spaced circles reads as a loading spinner, not as bubbles.
+        a: Math.random() * Math.PI * 2,
+        rad: 0.05 + Math.pow(Math.random(), 1.7) * 0.16,
+        off: (Math.random() - 0.5) * 0.16,
+        spd: 0.5 + Math.random() * 0.9,
+        wob: Math.random() * Math.PI * 2,
+        wobF: 0.4 + Math.random() * 0.7,
+        drift: 0,
+      });
+    }
+    // Big ones first, so the small bubbles sit on top and read as nearer.
+    return out.sort((x, y) => y.rad - x.rad);
+  }
+
+  _drawBubbles(dt) {
+    const ctx = this._ctx;
+    const W = this._w, H = this._h;
+    if (!W || !H) return;
+    const cx = W / 2, cy = H / 2;
+    const half = Math.min(W, H) / 2;
+
+    /* Same easing as jarvis-v1, and deliberately a copy rather than a shared
+       helper: it is nine lines, and pulling them out of a 300-line renderer
+       that already works is a bigger risk than repeating them. */
+    const { energy, rgb } = this._targets();
+    const k = 1 - Math.exp(-dt / 0.55);
+    const kOff = 1 - Math.exp(-dt / 0.16);
+    const cur = this._cur;
+    for (const key of Object.keys(energy)) {
+      const rate = key === "speech" && energy[key] < cur[key] ? kOff : k;
+      cur[key] += (energy[key] - cur[key]) * rate;
+    }
+    for (let i = 0; i < 3; i++) this._rgb[i] += (rgb[i] - this._rgb[i]) * k;
+    const R = Math.round(this._rgb[0]);
+    const G = Math.round(this._rgb[1]);
+    const B = Math.round(this._rgb[2]);
+
+    if (energy.speech > 0.5 && this._speech.env < 0.05) {
+      this._speech.next = this._speech.t;
+      this._speech.pulses.length = 0;
+    }
+    if (cur.speech > 0.005) this._speechTick(dt);
+    else this._speech.env += (0 - this._speech.env) * k;
+    const sp = this._speech;
+    const flow = 0.5 + 0.5 * Math.sin(sp.t * 0.5 + 0.8 * Math.sin(sp.t * 0.21));
+    const m = sp.live ? 0.88 : 0.62;
+    const env = (m * sp.env + (1 - m) * flow) * cur.speech;
+
+    this._t += dt;
+    const busy = cur.swirl / 1.8;
+
+    const wanted = Math.max(
+      10,
+      Math.min(34, Math.round((half / 9) * (Number(this._config.particle_size) || 1)))
+    );
+    if (!this._bubbles || this._bubbles.length !== wanted) {
+      this._bubbles = this._seedBubbles(wanted);
+    }
+
+    ctx.clearRect(0, 0, W, H);
+    ctx.globalCompositeOperation = "lighter";
+
+    const ringR = half * 0.6;
+    const line = Math.max(1.2, half * 0.022);
+
+    // The ring. Two passes: a wide soft one for the glow, a tight one for the
+    // edge - cheaper and steadier than a canvas shadow at this size.
+    ctx.strokeStyle = `rgba(${R},${G},${B},${0.1 + env * 0.18})`;
+    ctx.lineWidth = line * 4;
+    ctx.beginPath();
+    ctx.arc(cx, cy, ringR, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = `rgba(${R},${G},${B},${0.5 + env * 0.4})`;
+    ctx.lineWidth = line;
+    ctx.beginPath();
+    ctx.arc(cx, cy, ringR, 0, Math.PI * 2);
+    ctx.stroke();
+
+    for (const b of this._bubbles) {
+      b.a += dt * b.spd * (0.16 + busy * 0.5 + env * 0.55);
+      b.wob += dt * b.wobF;
+      // Speech pushes the cluster outwards and lets it fall back.
+      b.drift += ((env * 0.09) - b.drift) * k;
+
+      const r = ringR * (1 + b.off + b.drift) + Math.sin(b.wob) * half * 0.035;
+      const x = cx + Math.cos(b.a) * r;
+      const y = cy + Math.sin(b.a) * r;
+      const rad = half * b.rad * (1 + env * 0.22 + Math.sin(b.wob * 1.7) * 0.06);
+      if (rad < 0.6) continue;
+
+      const g = ctx.createRadialGradient(
+        x - rad * 0.3, y - rad * 0.35, rad * 0.1, x, y, rad
+      );
+      const a = 0.5 + env * 0.3;
+      g.addColorStop(0, `rgba(${Math.min(255, R + 90)},${Math.min(255, G + 90)},${Math.min(255, B + 70)},${a})`);
+      g.addColorStop(0.55, `rgba(${R},${G},${B},${a * 0.75})`);
+      g.addColorStop(1, `rgba(${R},${G},${B},0)`);
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(x, y, rad, 0, Math.PI * 2);
+      ctx.fill();
+
+      // The rim, and the one highlight that makes it read as a bubble.
+      ctx.strokeStyle = `rgba(${R},${G},${B},${0.45 + env * 0.3})`;
+      ctx.lineWidth = Math.max(0.6, rad * 0.09);
+      ctx.beginPath();
+      ctx.arc(x, y, rad * 0.94, 0, Math.PI * 2);
+      ctx.stroke();
+
+      if (rad > 3) {
+        ctx.fillStyle = `rgba(255,255,255,${0.28 + env * 0.22})`;
+        ctx.beginPath();
+        ctx.arc(x - rad * 0.34, y - rad * 0.38, rad * 0.17, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    ctx.globalCompositeOperation = "source-over";
+  }
+
   _draw(dt) {
     const ctx = this._ctx;
-    if (!ctx || !this._particles) return;
+    if (!ctx) return;
+    if (this._config.animation !== "jarvis-v1") return this._drawBubbles(dt);
+    if (!this._particles) return;
     const W = this._w, H = this._h;
     const cx = W / 2, cy = H / 2;
     const half = Math.min(W, H) / 2;
@@ -3148,10 +3344,13 @@ class HubbubbRingCard extends LitElement {
     const messages = this._messages ?? null;
 
     return html`
-      <ha-card class="bg-${this._config.background}">
+      <ha-card
+        class="bg-${this._config.background}${this._config.honeycomb === false ? "" : " comb"}${state === "offline" ? " dim" : ""}"
+        style=${this._config.honeycomb === false ? "" : `--jr-comb:${hexTileUrl(color)}`}
+      >
         <div
-          class="wrap state-${state} ${build && !this._config.build_dashboard ? "build" : ""} ${this._config.build_page ? "page" : ""}"
-          style=${`--jr-size:${Number(this._config.size)}px;--jr-color:${color};`}
+          class="wrap state-${state} ${build && !this._config.build_dashboard ? "build" : ""} ${this._config.build_page ? "page" : ""} ${build && this._config.panel_fullscreen && !this._config.build_dashboard ? "over" : ""}"
+          style=${this._cardVars(color)}
         >
           <button
             class="mode ${build ? "on" : ""}"
@@ -3204,7 +3403,7 @@ class HubbubbRingCard extends LitElement {
                 ${this._err ? html`<div class="perr">${this._err}</div>` : nothing}
               </div>`
             : nothing}
-          <div class="ring" data-ai="activate-assistant" @click=${this._ringTap}>
+          <div class="ring ${this._config.animation === "jarvis-v1" ? "" : "bubbles"}" data-ai="activate-assistant" @click=${this._ringTap}>
             <canvas></canvas>
             <svg viewBox="0 0 200 200" aria-hidden="true">
               <defs>
@@ -3235,10 +3434,6 @@ class HubbubbRingCard extends LitElement {
                   <circle cx="100" cy="100" r="40" fill="#000" />
                 </mask>
               </defs>
-
-              <g class="honeycomb-bg">
-                <rect x="-150" y="-150" width="500" height="500" fill="url(#jrHex)" />
-              </g>
 
               <circle class="core" cx="100" cy="100" r="92" fill="url(#jrCore)" />
 
@@ -3274,6 +3469,25 @@ class HubbubbRingCard extends LitElement {
       background: radial-gradient(circle at 50% 45%, #0a181c 0%, #030709 72%);
       border: none;
     }
+    /* Full-bleed honeycomb. A pseudo-element rather than a background on the
+       card, so the card keeps its own gradient underneath and the pattern can
+       be faded independently of it. */
+    ha-card.comb::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background-image: var(--jr-comb);
+      background-repeat: repeat;
+      opacity: 0.055;
+      pointer-events: none;
+      transition: opacity 900ms ease;
+    }
+    ha-card.comb.dim::before {
+      opacity: 0.02;
+    }
+    ha-card {
+      position: relative;
+    }
     ha-card.bg-transparent {
       background: none;
       border: none;
@@ -3292,6 +3506,9 @@ class HubbubbRingCard extends LitElement {
       align-items: center;
       max-width: 100%;
       width: 100%;
+    }
+    .ring.bubbles svg {
+      display: none;
     }
     .ring {
       position: relative;
@@ -3313,7 +3530,7 @@ class HubbubbRingCard extends LitElement {
       gap: 12px;
       padding: 12px;
       box-sizing: border-box;
-      height: clamp(280px, var(--jr-size), 480px);
+      height: var(--jr-panel-h, clamp(280px, var(--jr-size), 480px));
     }
     /* The dedicated build dashboard fills the view. Sized off the VISIBLE
        viewport, not dvh: dvh ignores the keyboard, so the page stayed taller
@@ -3326,6 +3543,22 @@ class HubbubbRingCard extends LitElement {
          under the card. */
       height: calc(100vh - var(--header-height, 56px));
       height: calc(var(--jr-vvh, 100dvh) - var(--header-height, 56px));
+    }
+    /* Fullscreen build mode. Fixed, not absolute: the panel should cover the
+       dashboard, and an absolutely positioned child is still trapped inside
+       whatever grid cell the card was given. */
+    :host(.jr-over) {
+      position: fixed;
+      inset: 0;
+      z-index: 8;
+    }
+    .wrap.build.over {
+      position: fixed;
+      inset: var(--header-height, 56px) 0 0 0;
+      height: auto;
+      z-index: 8;
+      background: var(--jr-panel-bg, rgba(3, 7, 9, 0.97));
+      backdrop-filter: blur(3px);
     }
     .wrap.build .ring {
       order: 1;
@@ -3385,12 +3618,15 @@ class HubbubbRingCard extends LitElement {
       min-width: 0;
       display: flex;
       flex-direction: column;
-      background: linear-gradient(160deg, rgba(10, 24, 32, 0.92), rgba(4, 10, 14, 0.96));
-      border: 1px solid rgba(53, 154, 210, 0.35);
+      background: var(
+        --jr-panel-bg,
+        linear-gradient(160deg, rgba(10, 24, 32, 0.92), rgba(4, 10, 14, 0.96))
+      );
+      border: 1px solid var(--jr-panel-border, rgba(53, 154, 210, 0.35));
       border-radius: 10px;
       box-shadow: inset 0 0 28px rgba(46, 157, 245, 0.08);
       padding: 10px 12px;
-      color: #cfe9f7;
+      color: var(--jr-panel-text, #cfe9f7);
       font-family: "Avenir Next", "Segoe UI", Roboto, sans-serif;
       line-height: 1.4;
       text-align: left;
@@ -3706,7 +3942,8 @@ class HubbubbRingCard extends LitElement {
     }
     .msg.screen {
       max-width: 100%;
-      font-family: "SF Mono", Menlo, monospace;
+      font-family: "SF Mono", Menlo, Consolas, "Cascadia Mono", monospace;
+      color: var(--jr-term-text, inherit);
       font-size: 11.5px;
       opacity: 0.85;
       background: rgba(0, 0, 0, 0.35);
@@ -3729,7 +3966,8 @@ class HubbubbRingCard extends LitElement {
     .msg.err {
       align-self: stretch;
       max-width: 100%;
-      font-family: "SF Mono", Menlo, monospace;
+      font-family: "SF Mono", Menlo, Consolas, "Cascadia Mono", monospace;
+      color: var(--jr-term-text, inherit);
       font-size: 11.5px;
       line-height: 1.45;
       padding: 5px 8px;
@@ -3766,7 +4004,8 @@ class HubbubbRingCard extends LitElement {
       color: #ffd9a0;
     }
     .msg code {
-      font-family: "SF Mono", Menlo, monospace;
+      font-family: "SF Mono", Menlo, Consolas, "Cascadia Mono", monospace;
+      color: var(--jr-term-text, inherit);
       font-size: 0.92em;
       color: #8fd0ff;
       background: rgba(46, 157, 245, 0.13);
@@ -3898,7 +4137,8 @@ class HubbubbRingCard extends LitElement {
     .msg.cmd {
       align-self: center;
       max-width: 100%;
-      font-family: "SF Mono", Menlo, monospace;
+      font-family: "SF Mono", Menlo, Consolas, "Cascadia Mono", monospace;
+      color: var(--jr-term-text, inherit);
       font-size: 11.5px;
       line-height: 1.5;
       color: rgba(150, 195, 220, 0.75);
@@ -3982,7 +4222,8 @@ class HubbubbRingCard extends LitElement {
     }
     .activity {
       align-self: flex-start;
-      font-family: "SF Mono", Menlo, monospace;
+      font-family: "SF Mono", Menlo, Consolas, "Cascadia Mono", monospace;
+      color: var(--jr-term-text, inherit);
       font-size: 11px;
       color: rgba(160, 200, 220, 0.7);
       animation: jr-blink 1.6s ease-in-out infinite;
@@ -4264,11 +4505,6 @@ class HubbubbRingCard extends LitElement {
     .honeycomb {
       opacity: 0.2;
     }
-    /* faint substrate across the whole card, fading out past the ring */
-    .honeycomb-bg {
-      opacity: 0.055;
-      transition: opacity 900ms ease;
-    }
 
     .sphere-fill {
       stroke: none;
@@ -4302,9 +4538,6 @@ class HubbubbRingCard extends LitElement {
     }
     .state-offline .core {
       opacity: 0.06;
-    }
-    .state-offline .honeycomb-bg {
-      opacity: 0.015;
     }
     .state-listening .core {
       opacity: 0.9;
