@@ -194,6 +194,9 @@ export function coalesce(bubbles, opts) {
       keep.vy = (keep.vy * wk + lost.vy * wl) / tot;
       keep.r = grown;
       keep.full = grown;
+      // A fused bubble is a new bubble: a fresh lease on life, rather than
+      // inheriting whichever parent happened to be closest to bursting.
+      keep.age = 0;
       lost.gone = true;
       merged++;
       if (keep === a) continue;
@@ -255,4 +258,26 @@ export function spreadOnCore(bubbles, cx, cy, coreR, passes = 2) {
     }
   }
   return bubbles;
+}
+
+/* Whether a bubble's time is up.
+
+   Two clocks, and the reason for both is a failure worth remembering: with
+   only the size rule, the field ran for half a minute and then froze solid.
+   Once the packing settles nothing is pressed hard enough against anything
+   else to merge, so nothing grows, so nothing ever reaches the size that
+   bursts, so no gaps open and nothing new is made. A foam that can only
+   change by luck eventually stops changing.
+
+   Age is the floor that cannot stall. Size scales it - a big bubble lives
+   longer than a small one and then goes suddenly - because a flat lifespan
+   killed the little ones before they could merge their way up, leaving the
+   field uniformly small and making merging pointless. */
+export function shouldBurst(b, opts) {
+  const { dt, maxR, rand = Math.random } = opts;
+  const t = b.r / maxR;
+  if (b.r >= maxR * 0.995) return true;
+  if (b.age > b.span * (0.55 + 1.7 * t)) return true;
+  const chance = t > 0.7 ? 0.5 * Math.pow(t, 6) : 0;
+  return chance > 0 && rand() < chance * dt;
 }

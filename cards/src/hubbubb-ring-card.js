@@ -5,6 +5,7 @@ import {
   coalesce,
   pinToCore,
   separate,
+  shouldBurst,
   spreadOnCore,
   widestGap,
 } from "./pack.js";
@@ -2643,6 +2644,15 @@ class HubbubbRingCard extends LitElement {
       life: 0,
       roll: Math.random() < 0.5 ? -1 : 1,
       wob: Math.random() * Math.PI * 2,
+      age: 0,
+      /* Every bubble has a lifespan, and this is what actually keeps the
+         field alive. Relying on merging alone looked fine for half a minute
+         and then stopped dead: once the packing settles, nothing is pressed
+         hard enough against anything else to fuse, so nothing grows, so
+         nothing reaches the size that bursts, so no gaps open and nothing new
+         is made. A foam that can only change by luck eventually stops
+         changing. Age cannot stall. */
+      span: 22 + Math.random() * 30,
     };
   }
 
@@ -2847,7 +2857,7 @@ class HubbubbRingCard extends LitElement {
        looked like a brief sparkle on the way to being medium ones. */
     coalesce(bub, {
       dt,
-      rate: 0.14 + busy * 0.1,
+      rate: 0.2 + busy * 0.15,
       sizeBias: 3,
       maxRatio: 2.1,
       maxR: field.maxR,
@@ -2859,9 +2869,8 @@ class HubbubbRingCard extends LitElement {
        within a few seconds and the ceiling is only a backstop. */
     for (const b of bub) {
       if (!b.held || b.pop >= 0) continue;
-      const t = b.r / field.maxR;
-      const chance = t > 0.75 ? 0.35 * Math.pow(t, 7) : 0;
-      if (b.r >= field.maxR * 0.995 || Math.random() < chance * dt) {
+      b.age += dt * (1 + busy * 0.5);
+      if (shouldBurst(b, { dt, maxR: field.maxR })) {
         b.held = false;
         b.pop = 0;
         b.popR = b.r;
