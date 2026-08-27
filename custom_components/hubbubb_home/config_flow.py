@@ -49,6 +49,7 @@ from .const import (
     CONF_NIGHTLY_ENABLED,
     CONF_NIGHTLY_TIME,
     CONF_PROMPT,
+    CONF_SENTENCES,
     CONF_WEATHER,
     DEFAULT_BRIEFING_TIME,
     DEFAULT_NAME,
@@ -194,6 +195,7 @@ class HubbubbHomeOptionsFlow(OptionsFlow):
                 vol.Optional(CONF_PROMPT, default=DEFAULT_PROMPT): TextSelector(
                     TextSelectorConfig(type=TextSelectorType.TEXT, multiline=True)
                 ),
+                vol.Optional(CONF_SENTENCES, default=True): BooleanSelector(),
                 vol.Required("overnight"): section(
                     vol.Schema(
                         {

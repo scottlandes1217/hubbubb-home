@@ -46,10 +46,12 @@
         "title": "Hubbubb Home",
         "data": {
           "assistant_name": "Assistant name",
-          "prompt": "Personality"
+          "prompt": "Personality",
+          "install_sentences": "Install voice sentences"
         },
         "data_description": {
-          "prompt": "Given to your language model alongside Home Assistant's own instructions. {name} is replaced with the assistant's name."
+          "prompt": "Given to your language model alongside Home Assistant's own instructions. {name} is replaced with the assistant's name.",
+          "install_sentences": "Turn this off if your setup already answers phrases like \"remember that\u2026\" with its own intents \u2014 two files claiming one phrase means one of them loses, silently. Takes effect after a restart."
         },
         "sections": {
           "overnight": {

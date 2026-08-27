@@ -54,6 +54,7 @@ from .const import (
     CONF_NIGHTLY_ENABLED,
     CONF_NIGHTLY_TIME,
     CONF_PROMPT,
+    CONF_SENTENCES,
     CONF_WEATHER,
     DEFAULT_BRIEFING_TIME,
     DEFAULT_NAME,
@@ -175,7 +176,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
 
     await _async_serve_cards(hass)
-    await _async_install_sentences(hass)
+    await _async_install_sentences(
+        hass, entry.options.get(CONF_SENTENCES, True)
+    )
 
     async_register_all(hass, runtime)
     runtime.unsubscribe.append(llm.async_register_api(hass, HubbubbAPI(hass, runtime)))
@@ -229,19 +232,31 @@ async def _async_serve_cards(hass: HomeAssistant) -> None:
         frontend.add_extra_js_url(hass, f"{base}/{card}")
 
 
-async def _async_install_sentences(hass: HomeAssistant) -> None:
-    """Copy the sentence files where the conversation agent looks for them.
+async def _async_install_sentences(hass: HomeAssistant, install: bool) -> None:
+    """Put the sentence files where the conversation agent looks for them.
 
     custom_sentences is read from the configuration directory at startup and
     nowhere else, so an integration cannot register sentences at runtime - it
     can only put the files there and say a restart is needed.
+
+    Turning this off is not a nicety. Home Assistant merges every file in that
+    directory, so a house that already answers "remember that ..." with its own
+    intent gets two claiming the same phrase, and whichever wins, one of them
+    is writing somebody's memory into the wrong database with nothing to say
+    so. When the setting is off the files are removed again rather than merely
+    not written, or turning it off would do nothing until a reinstall.
     """
     source = Path(__file__).parent / "sentences" / "en"
     target = Path(hass.config.path("custom_sentences", "en"))
 
-    def _copy() -> bool:
-        target.mkdir(parents=True, exist_ok=True)
+    def _sync() -> bool:
         changed = False
+        if not install:
+            for dest in target.glob(f"{DOMAIN}_*.yaml"):
+                dest.unlink()
+                changed = True
+            return changed
+        target.mkdir(parents=True, exist_ok=True)
         for path in sorted(source.glob("*.yaml")):
             dest = target / f"{DOMAIN}_{path.name}"
             if dest.exists() and dest.read_bytes() == path.read_bytes():
@@ -251,9 +266,9 @@ async def _async_install_sentences(hass: HomeAssistant) -> None:
         return changed
 
     try:
-        changed = await hass.async_add_executor_job(_copy)
+        changed = await hass.async_add_executor_job(_sync)
     except OSError as err:
-        _LOGGER.warning("could not install voice sentences: %s", err)
+        _LOGGER.warning("could not sync voice sentences: %s", err)
         return
 
     if changed:
@@ -261,8 +276,13 @@ async def _async_install_sentences(hass: HomeAssistant) -> None:
 
         persistent_notification.async_create(
             hass,
-            "Hubbubb Home installed its voice sentences. Restart Home "
-            "Assistant to start using them - everything else already works.",
+            (
+                "Hubbubb Home installed its voice sentences. Restart Home "
+                "Assistant to start using them - everything else already works."
+                if install
+                else "Hubbubb Home removed its voice sentences. They stop "
+                "being matched after the next restart."
+            ),
             title="Hubbubb Home: restart to finish",
             notification_id=f"{DOMAIN}_sentences",
         )

@@ -17,6 +17,7 @@ CONF_COMPANION = "companion"
 CONF_COMPANION_URL = "companion_url"
 CONF_COMPANION_TOKEN = "companion_token"
 
+CONF_SENTENCES = "install_sentences"
 CONF_NIGHTLY_TIME = "nightly_time"
 CONF_NIGHTLY_ENABLED = "nightly_enabled"
 CONF_IGNORE = "ignore"
