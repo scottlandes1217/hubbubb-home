@@ -312,6 +312,12 @@ const HEX_TILE = { w: 15, h: r2(Math.sqrt(3) * 5) };
    film letting go rather than a flash. */
 const POP_TIME = 0.62;
 
+/* How long a speech-election claim stays comparable, in ms. Wide enough to
+   cover one screen receiving the announcement a couple of seconds behind
+   another (a throttled webview, slow wifi); claims older than this are a
+   previous election's. */
+const CLAIM_WINDOW = 3000;
+
 /* The same tile again, as a CSS background.
 
    The honeycomb used to live inside the ring's own SVG, which meant it could
@@ -766,7 +772,14 @@ class HubbubbRingCard extends LitElement {
       .catch(() => (this._speechSub = false));
     hass.connection
       .subscribeEvents((ev) => {
-        this._claims?.push(ev?.data || {});
+        /* Always collecting, into a rolling window. Gating this on "my
+           election is open" dropped every claim that arrived before this
+           screen had even received the message — a wall panel a beat behind
+           the Mac saw an empty room, elected itself, and both spoke. */
+        const c = { ...(ev?.data || {}), at: Date.now() };
+        const list = (this._claims ||= []);
+        list.push(c);
+        while (list.length && list[0].at < c.at - CLAIM_WINDOW) list.shift();
       }, "jarvis_claude_claim")
       .then((unsub) => (this._claimUnsub = unsub))
       .catch(() => {});
@@ -781,7 +794,6 @@ class HubbubbRingCard extends LitElement {
      still speaks because it is the only claimant. */
   async _electAndSpeak(msg) {
     const mine = { idle: Date.now() - (this._lastTouch || 0), tie: Math.random() };
-    this._claims = [];
     try {
       await this._hass.connection.sendMessagePromise({
         type: "fire_event",
@@ -789,15 +801,15 @@ class HubbubbRingCard extends LitElement {
         event_data: mine,
       });
     } catch {
-      this._claims = null;
       return this._speakHere(msg); // can't claim — better twice than never
     }
-    /* ponytail: fixed 400ms claim window; announcements landing closer
-       together than that share one election, and screens touched the same
-       instant tie-break on random */
+    /* ponytail: 400ms for the other claims to land, judged against the full
+       rolling window; a screen whose message arrives more than CLAIM_WINDOW
+       behind the rest still elects itself and doubles up. Server-side
+       election if that ever happens in practice. */
     await new Promise((r) => setTimeout(r, 400));
-    const claims = this._claims || [];
-    this._claims = null;
+    const cut = Date.now() - CLAIM_WINDOW;
+    const claims = (this._claims || []).filter((c) => c.at >= cut);
     // seed with mine: my own claim should echo back off the bus, but if it
     // doesn't, losing my own election means nothing speaks anywhere
     const best = claims.reduce(
