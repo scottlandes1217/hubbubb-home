@@ -1930,14 +1930,58 @@ class HubbubbRingCard extends LitElement {
      the ring through listening/processing/responding locally. Needs a
      secure context (https) for the mic; on plain http we fall back. */
 
+  /* A bare getUserMedia lets macOS route to a nearby iPhone's Continuity
+     microphone: spinning up that link stalls the page for a beat, and it
+     drops the moment the phone locks. Prefer an input that isn't a phone
+     whenever device labels let us tell them apart (labels only show once
+     mic permission has been granted before — first run takes the default). */
+  async _openMic() {
+    try {
+      const devs = await navigator.mediaDevices.enumerateDevices();
+      const local = devs.find(
+        (d) =>
+          d.kind === "audioinput" &&
+          d.label &&
+          !/iphone|ipad|continuity/i.test(d.label)
+      );
+      if (local)
+        return await navigator.mediaDevices.getUserMedia({
+          audio: { deviceId: { exact: local.deviceId } },
+        });
+    } catch {
+      /* device list refused or the picked device vanished — default mic */
+    }
+    return navigator.mediaDevices.getUserMedia({ audio: true });
+  }
+
   async _startLocalVoice(mode = "converse") {
-    if (this._voice) return true;
+    if (this._voice || this._micOpening) return true;
+    this._micOpening = true;
+    /* Flip the ring before the mic prompt so the tap answers instantly —
+       device spin-up (Bluetooth, Continuity) can hold getUserMedia for a
+       noticeable moment. */
+    if (mode === "converse") this._voiceState = "listening";
+    else this._dictating = true;
     let stream;
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream = await this._openMic();
     } catch {
+      this._voiceState = null;
+      this._dictating = false;
       return "microphone permission denied";
+    } finally {
+      this._micOpening = false;
     }
+    /* A Continuity/Bluetooth mic can vanish mid-capture (the phone locks,
+       the headset sleeps); without this we keep streaming a dead track and
+       he listens to silence. stop() doesn't fire ended, only real loss does. */
+    const track = stream.getAudioTracks()[0];
+    if (track)
+      track.onended = () => {
+        if (this._voice?.stream !== stream) return;
+        this._toast("The microphone disconnected.");
+        this._stopLocalVoice();
+      };
     const Ctx = window.AudioContext || window.webkitAudioContext;
     let ctx;
     try {
@@ -1966,9 +2010,6 @@ class HubbubbRingCard extends LitElement {
       handlerId: null,
       unsub: null,
     });
-    if (mode === "converse") this._voiceState = "listening";
-    else this._dictating = true;
-
     /* Without this every tap is a fresh conversation and he has no idea what
        you just said to him. HA drops a conversation after about five minutes
        of silence, so an older id is not worth sending — the agent would
