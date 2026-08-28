@@ -319,6 +319,11 @@ const POP_TIME = 0.62;
    previous election's. */
 const CLAIM_WINDOW = 3000;
 
+/* The idle a screen claims when it has never been touched since load. A
+   shared constant, so untouched screens tie exactly and the random
+   tie-break picks one — instead of comparing their wall clocks. */
+const NEVER_TOUCHED = 1e12;
+
 /* The same tile again, as a CSS background.
 
    The honeycomb used to live inside the ring's own SVG, which meant it could
@@ -794,7 +799,15 @@ class HubbubbRingCard extends LitElement {
      the panel nobody has tapped in hours stays quiet, and a lone open screen
      still speaks because it is the only claimant. */
   async _electAndSpeak(msg) {
-    const mine = { idle: Date.now() - (this._lastTouch || 0), tie: Math.random() };
+    /* Never-touched screens must all claim the SAME idle, not their wall
+       clocks: `now - 0` puts each device's epoch clock into the comparison,
+       and two untouched screens 350ms of clock skew apart both won — one
+       legitimately, one because skew made it "less idle". A touched screen's
+       idle is a difference of two local readings, so skew cancels there. */
+    const mine = {
+      idle: this._lastTouch ? Date.now() - this._lastTouch : NEVER_TOUCHED,
+      tie: Math.random(),
+    };
     try {
       await this._hass.connection.sendMessagePromise({
         type: "fire_event",
@@ -804,11 +817,12 @@ class HubbubbRingCard extends LitElement {
     } catch {
       return this._speakHere(msg); // can't claim — better twice than never
     }
-    /* ponytail: 400ms for the other claims to land, judged against the full
-       rolling window; a screen whose message arrives more than CLAIM_WINDOW
-       behind the rest still elects itself and doubles up. Server-side
-       election if that ever happens in practice. */
-    await new Promise((r) => setTimeout(r, 400));
+    /* ponytail: 1200ms for the other claims to land, judged against the full
+       rolling window. Measured: announcements reach screens ~350ms apart and
+       a claim can ride the Nabu Casa relay, so 400ms judged before the other
+       screen's claim arrived. A screen more than CLAIM_WINDOW behind still
+       doubles up; server-side election if that ever happens in practice. */
+    await new Promise((r) => setTimeout(r, 1200));
     const cut = Date.now() - CLAIM_WINDOW;
     const claims = (this._claims || []).filter((c) => c.at >= cut);
     // seed with mine: my own claim should echo back off the bus, but if it
