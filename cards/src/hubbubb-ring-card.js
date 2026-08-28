@@ -1281,18 +1281,24 @@ class HubbubbRingCard extends LitElement {
         // lock must not survive the round trip.
         if (this._ask && this._ask.multi) this._askSent = null;
 
-        // A dispatched message is done once the transcript records it.
+        // A dispatched message is done once the transcript records it. The
+        // transcript caps long messages, so exact equality left a long chip
+        // stuck at the bottom until the timeout — compare on a shared prefix
+        // instead. And once the send was accepted, a chip that never matches
+        // is furniture: two minutes is time enough for the turn to record it.
         if (this._queue?.length) {
-          const seen = new Set(
-            (this._msgs || [])
-              .filter((m) => m.role === "user")
-              .map((m) => this._collapse(m.text))
-          );
+          const seen = (this._msgs || [])
+            .filter((m) => m.role === "user")
+            .map((m) => this._collapse(m.text).slice(0, 200));
+          const recorded = (q) => {
+            const cq = this._collapse(q.text).slice(0, 200);
+            return cq && seen.includes(cq);
+          };
           const before = this._queue.length;
           this._queue = this._queue.filter(
             (q) =>
               q.state !== "sent" ||
-              (!seen.has(this._collapse(q.text)) && Date.now() - q.at < 600000)
+              (!recorded(q) && Date.now() - q.at < 120000)
           );
           if (this._queue.length !== before) this._saveQueue();
         }
@@ -1338,6 +1344,9 @@ class HubbubbRingCard extends LitElement {
     this._askSig = undefined;
     this._activity = null;
     this._permission = null;
+    // A model picked by hand belongs to the session it was picked in; the
+    // next session's picker shows what its own transcript reports.
+    this._model = null;
     this._startPolling();
     this._confirmKill = null;
     this._details = false;
@@ -1582,6 +1591,10 @@ class HubbubbRingCard extends LitElement {
     if (this._pending) return;
     this._pending = true;
     item.state = "sent";
+    // The sent-chip lifetime counts from the SEND, not the enqueue — a message
+    // held through a long turn was aging the whole time and either vanished
+    // instantly or overstayed, depending on which way the clock had drifted.
+    item.at = Date.now();
     this._queue = [...this._queue];
     this._saveQueue();
     try {
@@ -1807,6 +1820,7 @@ class HubbubbRingCard extends LitElement {
      so a model released next month appears here on its own. */
   _renderRunControls() {
     const models = this._models || [];
+    const s = (this._sessions || []).find((x) => x.id === this._sel);
     // null means the listener could not read the status line. Say so rather
     // than printing a mode that might be wrong in the permissive direction.
     const mode = this._permission || "";
@@ -1815,16 +1829,27 @@ class HubbubbRingCard extends LitElement {
     // unless the session was launched in it, and offering a mode that cannot be
     // reached is offering a control that does nothing.
     const modes =
-      (this._sessions || []).find((s) => s.id === this._sel)?.modes ||
-      this._modes ||
-      ["auto", "manual", "accept edits", "plan"];
+      s?.modes || this._modes || ["auto", "manual", "accept edits", "plan"];
+    // A local pick wins until the transcript confirms it; otherwise the model
+    // the session last replied with, read by the listener — so a fresh console
+    // shows the real model instead of the placeholder.
+    const model = this._model || s?.model || "";
     return html`<div class="runbar">
+      ${s?.busy
+        ? html`<button
+            type="button"
+            class="hbtn stop"
+            data-ai="interrupt-turn"
+            title="Interrupt this turn (sends Escape)"
+            @click=${() => this._sendKey("Escape", { keepOpen: true })}
+          >Stop</button>`
+        : nothing}
       <select
         class="runsel ${this._modelBusy && this._modelBusy !== "perm" ? "busy" : ""}"
         ?disabled=${!!this._modelBusy || !models.length}
         data-ai="pick-model"
         title="Model for this session"
-        .value=${live(this._model || "")}
+        .value=${live(model)}
         @change=${(e) => this._setModel(e.target.value)}
       >
         <option value="" disabled>${models.length ? "Model" : "…"}</option>
@@ -5020,13 +5045,30 @@ class HubbubbRingCard extends LitElement {
       gap: 6px;
       padding: 6px 6px 2px;
     }
-    /* Sits inside the composer's button row, immediately left of attach, so the
-       whole row reads as one group at the right-hand end. */
+    /* On a narrow phone the selects give way; the buttons never do. */
+    .cbtns > .hbtn {
+      flex: 0 0 auto;
+    }
+    /* Sits inside the composer's button row, left of attach, with a beat of
+       air before the attach/mic/send cluster so the two groups read apart.
+       One line always: the selects shrink and ellipsize on a phone rather
+       than wrapping under each other and pushing the input down. */
     .runbar {
       display: flex;
       align-items: center;
       gap: 5px;
-      flex-wrap: wrap;
+      flex-wrap: nowrap;
+      min-width: 0;
+      margin-right: 10px;
+    }
+    .hbtn.stop {
+      border-color: rgba(255, 92, 92, 0.6);
+      color: #ff9d9d;
+      flex: 0 0 auto;
+    }
+    .hbtn.stop:hover {
+      border-color: #ff5c5c;
+      color: #ffc4c4;
     }
     .runsel {
       border: 1px solid rgba(255, 255, 255, 0.14);
@@ -5046,7 +5088,10 @@ class HubbubbRingCard extends LitElement {
       background-position: right 9px center, right 5px center;
       background-size: 4px 4px, 4px 4px;
       background-repeat: no-repeat;
-      max-width: 46vw;
+      max-width: 26vw;
+      min-width: 0;
+      overflow: hidden;
+      white-space: nowrap;
       text-overflow: ellipsis;
     }
     /* The list itself is drawn by the OS, which uses the page's colours, not
