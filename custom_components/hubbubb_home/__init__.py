@@ -68,6 +68,7 @@ from .const import (
     PLATFORMS,
     WEBHOOK_MESSAGE,
 )
+from . import appletv
 from .hubbubb import HubbubbClient, HubbubbError
 from .intents import ALL_INTENTS, async_register_all
 from .llm_api import HubbubbAPI
@@ -185,10 +186,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     await _async_serve_cards(hass)
     await _async_install_sentences(
-        hass, entry.options.get(CONF_SENTENCES, True)
+        hass,
+        entry.options.get(CONF_SENTENCES, True),
+        appletv.sentence_yaml(hass, runtime),
     )
 
     async_register_all(hass, runtime)
+    appletv.async_register_all(hass, runtime)
     runtime.unsubscribe.append(llm.async_register_api(hass, HubbubbAPI(hass, runtime)))
 
     _async_register_services(hass, runtime)
@@ -214,7 +218,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     runtime.timers.cancel_all()
     for unsub in runtime.unsubscribe:
         unsub()
-    for intent_type in ALL_INTENTS:
+    for intent_type in (*ALL_INTENTS, *appletv.ATV_INTENTS):
         intent_helper.async_remove(hass, intent_type)
     for service in (*AGENT_SERVICES, *SERVICE_SCHEMAS):
         hass.services.async_remove(DOMAIN, service)
@@ -293,7 +297,9 @@ async def _async_serve_cards(hass: HomeAssistant) -> None:
                 await resources.async_delete_item(item_id)
 
 
-async def _async_install_sentences(hass: HomeAssistant, install: bool) -> None:
+async def _async_install_sentences(
+    hass: HomeAssistant, install: bool, atv_yaml: str | None = None
+) -> None:
     """Put the sentence files where the conversation agent looks for them.
 
     custom_sentences is read from the configuration directory at startup and
@@ -323,6 +329,18 @@ async def _async_install_sentences(hass: HomeAssistant, install: bool) -> None:
             if dest.exists() and dest.read_bytes() == path.read_bytes():
                 continue
             shutil.copyfile(path, dest)
+            changed = True
+        # The Apple TV file is generated, not copied - it carries this
+        # house's room names - and exists only while Apple TVs are
+        # configured: its bare "play {ma_query}" wildcard must not sit on a
+        # house with nothing to play on.
+        atv_dest = target / f"{DOMAIN}_apple_tv.yaml"
+        if atv_yaml is None:
+            if atv_dest.exists():
+                atv_dest.unlink()
+                changed = True
+        elif not atv_dest.exists() or atv_dest.read_text() != atv_yaml:
+            atv_dest.write_text(atv_yaml)
             changed = True
         return changed
 

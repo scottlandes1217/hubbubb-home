@@ -127,6 +127,27 @@ and paying for one makes the house feel slower than the speaker it replaced.
 
 Everything else falls through to your conversation agent.
 
+### Apple TV, including music
+
+Pick your Apple TVs in the options (they come from Home Assistant's own
+`apple_tv` integration) and four more spoken things start working, answered
+locally like the rest:
+
+> "Play Hello by Adele" · "Play a Fleetwood Mac station"
+> "Watch something on Netflix" · "Open YouTube on the bedroom apple tv"
+> "Pause the apple tv"
+
+Music plays **natively in the tvOS Music app** — an iTunes catalog search
+resolves what you said to a music.apple.com link, the Apple TV opens it, and
+a few remote keypresses handle what tvOS will not autoplay. The result is a
+real Music-app session: the physical remote controls it and Apple Music
+autoplay carries on when the song ends. Needs an Apple Music subscription on
+the Apple TV.
+
+Each box's spoken room name is its Home Assistant area ("…on the bedroom
+apple tv"); with one Apple TV you never need to say a room. The sentence
+file is generated from your list, so changing it needs the usual restart.
+
 ### Memory
 
 One short sentence per fact, in SQLite FTS5 next to your configuration. Recall

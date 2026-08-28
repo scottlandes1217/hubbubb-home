@@ -80,6 +80,13 @@
               "tts_entity": "Only needed if you chose a speaker \u2014 a satellite has its own voice, a speaker needs one picking."
             }
           },
+          "apple_tv": {
+            "name": "Apple TV",
+            "description": "Pick your Apple TVs and the assistant answers \"play …\", \"open netflix\", \"pause the apple tv\" itself — music plays natively in the tvOS Music app. Each box's room name comes from its Home Assistant area. Takes effect after a restart (the voice sentences are generated from this list).",
+            "data": {
+              "apple_tvs": "Apple TVs"
+            }
+          },
           "hubbubb": {
             "name": "Hubbubb",
             "data": {

@@ -34,6 +34,8 @@ from homeassistant.helpers.selector import (
 from .companion import CompanionClient, CompanionError
 from .const import (
     CONF_ASSISTANT_NAME,
+    CONF_ATV,
+    CONF_ATV_ENTITIES,
     CONF_BRIEFING_ENABLED,
     CONF_BRIEFING_TARGET,
     CONF_BRIEFING_TIME,
@@ -252,6 +254,20 @@ class HubbubbHomeOptionsFlow(OptionsFlow):
                             vol.Optional(CONF_CALENDARS): EntitySelector(
                                 EntitySelectorConfig(
                                     domain="calendar", multiple=True
+                                )
+                            ),
+                        }
+                    ),
+                    {"collapsed": True},
+                ),
+                vol.Required(CONF_ATV): section(
+                    vol.Schema(
+                        {
+                            vol.Optional(CONF_ATV_ENTITIES): EntitySelector(
+                                EntitySelectorConfig(
+                                    domain="media_player",
+                                    integration="apple_tv",
+                                    multiple=True,
                                 )
                             ),
                         }

@@ -56,8 +56,33 @@ _stub(
     ServiceResponse=object,
     SupportsResponse=object,
 )
-_stub("homeassistant.helpers")
+class _IntentHandler:
+    pass
+
+
+try:  # slot schemas are built at class-definition time, but never run here
+    import voluptuous  # noqa: F401
+except ImportError:
+    _stub(
+        "voluptuous",
+        Required=lambda key, **k: ("req", key),
+        Optional=lambda key, **k: ("opt", key),
+        In=lambda values: values,
+        Coerce=lambda kind: kind,
+        Schema=lambda *a, **k: None,
+    )
+
+_helpers = _stub("homeassistant.helpers")
 _stub("homeassistant.helpers.event", async_track_point_in_time=_track_point_in_time)
+for _name, _attrs in {
+    "area_registry": {},
+    "device_registry": {},
+    "entity_registry": {},
+    "config_validation": {"string": str},
+    "intent": {"IntentHandler": _IntentHandler, "async_register": lambda *a: None},
+    "aiohttp_client": {"async_get_clientsession": lambda hass: None},
+}.items():
+    setattr(_helpers, _name, _stub(f"homeassistant.helpers.{_name}", **_attrs))
 
 
 class _Store:
@@ -97,6 +122,7 @@ sys.modules["hubbubb_home"] = _pkg
 from hubbubb_home.memory import Memory  # noqa: E402
 from hubbubb_home.timers import TimerPool  # noqa: E402
 from hubbubb_home.nightly import FindingsReport, _days  # noqa: E402
+from hubbubb_home.appletv import _TEMPLATE, _match_source, decide_plan  # noqa: E402
 
 
 # --- memory: spoken question -> FTS5 query -----------------------------------
@@ -310,6 +336,69 @@ def test_days_reads_as_speech_not_as_a_clock():
     assert _days(0.25) == "6 hours"
     assert _days(1) == "1 day"
     assert _days(3.4) == "3 days"
+
+
+# --- apple tv: which music plan a query becomes ------------------------------
+
+_ADELE = {"artistName": "Adele", "artistId": 262836961,
+          "artistLinkUrl": "https://music.apple.com/us/artist/adele/262836961"}
+_HELLO = {"trackName": "Hello", "trackId": 1051394215, "trackNumber": 1,
+          "trackViewUrl": "https://music.apple.com/us/album/hello/1?i=2"}
+
+
+def test_bare_artist_query_shuffles_the_artist_page():
+    plan = decide_plan(_ADELE, _HELLO, "adele", song_said=False, station=False)
+    assert plan["kind"] == "artist" and "adele" in plan["url"]
+
+
+def test_famous_song_beats_obscure_artist_of_the_same_name():
+    # An artist literally named "Thriller" exists; the song must win.
+    thriller_artist = {"artistName": "Thriller", "artistId": 1}
+    thriller_song = {"trackName": "Thriller", "trackId": 2, "trackNumber": 4,
+                     "trackViewUrl": "https://music.apple.com/x?i=4"}
+    plan = decide_plan(
+        thriller_artist, thriller_song, "thriller",
+        song_said=False, station=False,
+    )
+    assert plan["kind"] == "song" and plan["row"] == 4
+
+
+def test_explicit_song_by_artist_never_becomes_the_artist_page():
+    plan = decide_plan(_ADELE, _HELLO, "hello adele", song_said=True, station=False)
+    assert plan["kind"] == "song"
+
+
+def test_station_request_seeds_from_the_artist_when_it_is_one():
+    plan = decide_plan(_ADELE, _HELLO, "adele", song_said=False, station=True)
+    assert plan["kind"] == "radio" and str(_ADELE["artistId"]) in plan["url"]
+
+
+def test_station_request_seeds_from_the_song_otherwise():
+    plan = decide_plan(None, _HELLO, "hello", song_said=False, station=True)
+    assert plan["kind"] == "radio" and str(_HELLO["trackId"]) in plan["url"]
+
+
+def test_no_hits_is_a_spoken_apology_not_a_crash():
+    assert decide_plan(None, None, "xyzzy", song_said=False, station=False) is None
+    assert decide_plan(None, None, "xyzzy", song_said=False, station=True) is None
+
+
+def test_app_matching_forgives_spacing_case_and_plus():
+    apps = ["Netflix", "Disney+", "Prime Video", "YouTube"]
+    assert _match_source("disney plus", apps) == "Disney+"
+    assert _match_source("NETFLIX", apps) == "Netflix"
+    assert _match_source("prime", apps) == "Prime Video"
+    assert _match_source("plex", apps) is None
+
+
+def test_sentence_template_takes_the_room_list():
+    rooms = '      - "den"\n      - "loft"\n'
+    out = _TEMPLATE.replace("__ROOMS__\n", rooms)
+    assert "__ROOMS__" not in out
+    assert '- "den"' in out and '- "loft"' in out
+    # The greedy wildcards stay declared, or hassil refuses the whole file.
+    for wildcard in ("ma_query", "ma_song", "ma_artist", "atv_app", "atv_show"):
+        assert f"{wildcard}:\n    wildcard: true" in out, wildcard
 
 
 if __name__ == "__main__":
