@@ -1843,15 +1843,6 @@ class HubbubbRingCard extends LitElement {
     // shows the real model instead of the placeholder.
     const model = this._model || s?.model || "";
     return html`<div class="runbar">
-      ${s?.busy
-        ? html`<button
-            type="button"
-            class="hbtn stop"
-            data-ai="interrupt-turn"
-            title="Interrupt this turn (sends Escape)"
-            @click=${() => this._sendKey("Escape", { keepOpen: true })}
-          >Stop</button>`
-        : nothing}
       <select
         class="runsel ${this._modelBusy && this._modelBusy !== "perm" ? "busy" : ""}"
         ?disabled=${!!this._modelBusy || !models.length}
@@ -1876,6 +1867,15 @@ class HubbubbRingCard extends LitElement {
         <option value="" disabled>mode ?</option>
         ${modes.map((m) => html`<option value=${m}>${m}</option>`)}
       </select>
+      ${s?.busy
+        ? html`<button
+            type="button"
+            class="hbtn stop"
+            data-ai="interrupt-turn"
+            title="Interrupt this turn (sends Escape)"
+            @click=${() => this._sendKey("Escape", { keepOpen: true })}
+          >Stop</button>`
+        : nothing}
     </div>`;
   }
 
