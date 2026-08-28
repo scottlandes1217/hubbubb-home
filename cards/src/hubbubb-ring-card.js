@@ -5800,6 +5800,12 @@ const EDITOR_SCHEMA = [
         name: "panel_height",
         selector: { number: { min: 0, max: 1400, step: 20, mode: "box" } },
       },
+      {
+        /* Writes plain strings. The YAML {project, label} form still works,
+           but round-tripping it through this editor flattens it to strings. */
+        name: "build_projects",
+        selector: { text: { multiple: true } },
+      },
       { name: "build_dashboard", selector: { text: {} } },
       { name: "build_page", selector: { boolean: {} } },
       { name: "build_return", selector: { text: {} } },
@@ -5873,6 +5879,7 @@ const EDITOR_LABELS = {
   messages_entity: "Hubbubb message toggle",
   panel_fullscreen: "Full screen (floats over the dashboard)",
   panel_height: "Panel height in px (0 = match the ring)",
+  build_projects: "Projects offered by + New (blank = all the companion has)",
   build_dashboard: "Open this dashboard instead",
   build_page: "This card IS the build dashboard",
   build_return: "Exit goes back to",

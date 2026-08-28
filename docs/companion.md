@@ -43,6 +43,20 @@ Answer with JSON. A non-2xx status, or a body carrying `{"ok": false,
 "detail": "..."}`, is surfaced to the card as an error rather than a blank
 screen. Anything that is not JSON comes back as `{"content": "<the body>"}`.
 
+## Projects
+
+`/status` answers `{"sessions": [...], "projects": [...]}`. `projects` is the
+list of project names a session may be started in — the folders on your
+machine you are willing to have an agent work in. It is the companion's to
+decide (a config file next to the daemon, a scan of a projects directory,
+whatever suits), because only the companion knows what is on that disk.
+
+The card shows every project the companion offers as a chip under **+ New**.
+To show only some of them on a particular dashboard — the wall tablet gets
+two, your desk gets everything — set `build_projects` on the card (in the
+visual editor, or YAML), which narrows the companion's list without touching
+it. `/session` receives the chosen name back as `project`.
+
 ## Spoken announcements
 
 When an agent turn finishes and should be spoken aloud, POST it to Home
