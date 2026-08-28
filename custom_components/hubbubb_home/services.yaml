@@ -83,3 +83,12 @@ agent_key:
 agent_kill:
   fields:
     window: { selector: { text: } }
+agent_model:
+  fields:
+    id: { required: true, selector: { text: } }
+    model: { required: true, selector: { text: } }
+agent_permission:
+  fields:
+    id: { required: true, selector: { text: } }
+    mode: { selector: { text: } }
+agent_models:

@@ -88,6 +88,9 @@ AGENT_SERVICES = {
     "agent_upload": ("upload", "POST"),
     "agent_key": ("key", "POST"),
     "agent_kill": ("kill", "POST"),
+    "agent_model": ("model", "POST"),
+    "agent_permission": ("permission", "POST"),
+    "agent_models": ("models", "GET"),
 }
 
 
