@@ -5,8 +5,11 @@ import { LitElement, css, html, nothing } from "lit";
    running the bundle it loaded, and HA restarting does not re-fetch it — so a
    fix can be live on disk, served correctly, and still not be the code in the
    page. Check with HubbubbRingCard.build or the line this logs. */
+/* import.meta lowers to `{}` when esbuild's target predates es2020, which
+   made `.url.match` throw and take the whole module down — guard it so a
+   target regression costs the version log, not the card. */
 const BUILD =
-  (import.meta.url.match(/\/(\d+\.\d+\.\d+)\//) || [])[1] || "dev";
+  ((import.meta.url || "").match(/\/(\d+\.\d+\.\d+)\//) || [])[1] || "dev";
 console.info(`hubbubb-ring-card ${BUILD}`);
 // A select's DOM value drifts from the template the moment someone picks an
 // option, so plain binding cannot pull it back. live() compares against the
@@ -689,6 +692,10 @@ class HubbubbRingCard extends LitElement {
     // One tap anywhere buys the right to play audio later.
     this._onFirstTap = () => this._unlockSpeech();
     this.addEventListener?.("pointerdown", this._onFirstTap, { once: true });
+    // How recently this screen was touched decides who speaks announcements.
+    this._onActivity = () => (this._lastTouch = Date.now());
+    window.addEventListener?.("pointerdown", this._onActivity, true);
+    window.addEventListener?.("keydown", this._onActivity, true);
     this._restoreQueue();
     if (this._build) this._setBuild(true, false); // resume polling after re-attach
   }
@@ -698,6 +705,15 @@ class HubbubbRingCard extends LitElement {
       try { this._speechUnsub(); } catch (e) {}
       this._speechUnsub = null;
       this._speechSub = false;
+    }
+    if (this._claimUnsub) {
+      try { this._claimUnsub(); } catch (e) {}
+      this._claimUnsub = null;
+    }
+    if (this._onActivity) {
+      window.removeEventListener?.("pointerdown", this._onActivity, true);
+      window.removeEventListener?.("keydown", this._onActivity, true);
+      this._onActivity = null;
     }
     if (this._onFirstTap) {
       this.removeEventListener?.("pointerdown", this._onFirstTap);
@@ -744,10 +760,51 @@ class HubbubbRingCard extends LitElement {
     hass.connection
       .subscribeEvents((ev) => {
         const msg = ev?.data?.message;
-        if (msg) this._speakHere(msg);
+        if (msg) this._electAndSpeak(msg);
       }, "jarvis_claude_message")
       .then((unsub) => (this._speechUnsub = unsub))
       .catch(() => (this._speechSub = false));
+    hass.connection
+      .subscribeEvents((ev) => {
+        this._claims?.push(ev?.data || {});
+      }, "jarvis_claude_claim")
+      .then((unsub) => (this._claimUnsub = unsub))
+      .catch(() => {});
+  }
+
+  /* Every open dashboard hears jarvis_claude_message, so without a winner the
+     same sentence comes out of every screen in the house at once — in the
+     pipeline's own voice, which makes the wall panel a convincing puck
+     impersonator. Each card claims with how long since its screen was last
+     touched and the least-idle one speaks: the machine being worked at wins,
+     the panel nobody has tapped in hours stays quiet, and a lone open screen
+     still speaks because it is the only claimant. */
+  async _electAndSpeak(msg) {
+    const mine = { idle: Date.now() - (this._lastTouch || 0), tie: Math.random() };
+    this._claims = [];
+    try {
+      await this._hass.connection.sendMessagePromise({
+        type: "fire_event",
+        event_type: "jarvis_claude_claim",
+        event_data: mine,
+      });
+    } catch {
+      this._claims = null;
+      return this._speakHere(msg); // can't claim — better twice than never
+    }
+    /* ponytail: fixed 400ms claim window; announcements landing closer
+       together than that share one election, and screens touched the same
+       instant tie-break on random */
+    await new Promise((r) => setTimeout(r, 400));
+    const claims = this._claims || [];
+    this._claims = null;
+    // seed with mine: my own claim should echo back off the bus, but if it
+    // doesn't, losing my own election means nothing speaks anywhere
+    const best = claims.reduce(
+      (a, b) => (b.idle < a.idle || (b.idle === a.idle && b.tie < a.tie) ? b : a),
+      mine
+    );
+    if (best.tie === mine.tie) this._speakHere(msg);
   }
 
   /* Browsers refuse audio no gesture asked for. The card is tapped constantly,

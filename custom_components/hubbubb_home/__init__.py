@@ -19,7 +19,9 @@ from typing import Any
 
 import voluptuous as vol
 from homeassistant.components import frontend
-from homeassistant.components.http import StaticPathConfig
+from aiohttp import web
+
+from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import (
     HomeAssistant,
@@ -219,6 +221,34 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 # --- frontend ----------------------------------------------------------------
 
 
+class _CardsView(HomeAssistantView):
+    """Serve the card bundles under ANY version segment.
+
+    The version in the URL is cache-busting for freshly served frontends, but
+    an app with a cached shell keeps asking for the version it was served —
+    possibly weeks old. Answering 404 there bricks that screen's cards until
+    someone clears the app cache (measured: a wall tablet stuck on "custom
+    element doesn't exist" after an update, while every other device was
+    fine). So the version segment is accepted and ignored: every version
+    serves the current file, with no-cache so a bumped bundle is picked up on
+    the next load rather than pinned for a year by immutable headers.
+    """
+
+    requires_auth = False
+    url = f"{URL_BASE}/{{version}}/{{filename}}"
+    name = f"{DOMAIN}:cards"
+
+    async def get(
+        self, request: web.Request, version: str, filename: str
+    ) -> web.StreamResponse:
+        if filename not in CARDS:  # also forecloses path traversal
+            raise web.HTTPNotFound
+        return web.FileResponse(
+            Path(__file__).parent / "www" / filename,
+            headers={"Cache-Control": "no-cache"},
+        )
+
+
 async def _async_serve_cards(hass: HomeAssistant) -> None:
     """Publish the cards and load them, so nobody registers a resource by hand."""
     if hass.data.get(f"{DOMAIN}_cards"):
@@ -227,11 +257,8 @@ async def _async_serve_cards(hass: HomeAssistant) -> None:
 
     integration = await async_get_integration(hass, DOMAIN)
     base = f"{URL_BASE}/{integration.version or 'dev'}"
-    www = Path(__file__).parent / "www"
 
-    await hass.http.async_register_static_paths(
-        [StaticPathConfig(base, str(www), cache_headers=True)]
-    )
+    hass.http.register_view(_CardsView())
     for card in CARDS:
         frontend.add_extra_js_url(hass, f"{base}/{card}")
 
