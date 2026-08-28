@@ -5,6 +5,9 @@
     "@scottlandes1217"
   ],
   "config_flow": true,
+  "after_dependencies": [
+    "lovelace"
+  ],
   "dependencies": [
     "conversation",
     "http",
@@ -16,5 +19,5 @@
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/scottlandes1217/hubbubb-home/issues",
   "requirements": [],
-  "version": "0.14.11"
+  "version": "0.14.12"
 }

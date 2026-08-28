@@ -250,7 +250,13 @@ class _CardsView(HomeAssistantView):
 
 
 async def _async_serve_cards(hass: HomeAssistant) -> None:
-    """Publish the cards and load them, so nobody registers a resource by hand."""
+    """Publish the cards and register them as Lovelace resources.
+
+    add_extra_js_url is fire-and-forget: the frontend does not wait for it
+    before rendering, so a slow device can paint the dashboard first and show
+    "custom element doesn't exist" - a coin flip on every load of the wall
+    tablet. Registered resources are awaited before the first card renders.
+    """
     if hass.data.get(f"{DOMAIN}_cards"):
         return
     hass.data[f"{DOMAIN}_cards"] = True
@@ -259,8 +265,29 @@ async def _async_serve_cards(hass: HomeAssistant) -> None:
     base = f"{URL_BASE}/{integration.version or 'dev'}"
 
     hass.http.register_view(_CardsView())
+
+    resources = getattr(hass.data.get("lovelace"), "resources", None)
+    if resources is None or not hasattr(resources, "async_create_item"):
+        # YAML-mode dashboards keep their own resource list; the unawaited
+        # load is all there is.
+        for card in CARDS:
+            frontend.add_extra_js_url(hass, f"{base}/{card}")
+        return
+
+    if not resources.loaded:
+        await resources.async_load()
+        resources.loaded = True
+
+    have = {item["url"]: item["id"] for item in resources.async_items()}
     for card in CARDS:
-        frontend.add_extra_js_url(hass, f"{base}/{card}")
+        url = f"{base}/{card}"
+        if url not in have:
+            await resources.async_create_item({"res_type": "module", "url": url})
+        # An entry left at an older version would import stale code next to
+        # the current bundle; drop any that are not this release's URL.
+        for old_url, item_id in have.items():
+            if old_url.endswith(f"/{card}") and old_url != url:
+                await resources.async_delete_item(item_id)
 
 
 async def _async_install_sentences(hass: HomeAssistant, install: bool) -> None:
