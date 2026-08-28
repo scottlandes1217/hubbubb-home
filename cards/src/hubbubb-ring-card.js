@@ -5,11 +5,12 @@ import { LitElement, css, html, nothing } from "lit";
    running the bundle it loaded, and HA restarting does not re-fetch it — so a
    fix can be live on disk, served correctly, and still not be the code in the
    page. Check with HubbubbRingCard.build or the line this logs. */
-/* import.meta lowers to `{}` when esbuild's target predates es2020, which
-   made `.url.match` throw and take the whole module down — guard it so a
-   target regression costs the version log, not the card. */
+/* Not import.meta.url: the build targets es2017 for the wall tablet's old
+   webview, and esbuild lowers import.meta to `{}` below es2020 — the 0.14.6
+   bundle died on exactly that. An Error's stack names this file's URL in
+   every engine, at any target. */
 const BUILD =
-  ((import.meta.url || "").match(/\/(\d+\.\d+\.\d+)\//) || [])[1] || "dev";
+  ((new Error().stack || "").match(/\/(\d+\.\d+\.\d+)\//) || [])[1] || "dev";
 console.info(`hubbubb-ring-card ${BUILD}`);
 // A select's DOM value drifts from the template the moment someone picks an
 // option, so plain binding cannot pull it back. live() compares against the
