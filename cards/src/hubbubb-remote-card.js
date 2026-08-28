@@ -6,17 +6,17 @@
  *          remote: remote.YOUR_APPLE_TV   # optional, found via device
  *          volume_entity: media_player.YOUR_TV   # optional
  *
- * Volume up/down go through custom_components/apple_tv_hid, which presses the
- * same Companion HID key the Siri Remote does — core's volume_up waits on a
- * volume level the Apple TV never reports over HDMI. There is no HID mute key
- * (the remote's mute button is CEC/IR straight to the TV), so the mute button
- * only appears when volume_entity names something that can actually mute.
+ * Volume up/down prefer the apple_tv_hid custom component (a separate install:
+ * it presses the same Companion HID key the Siri Remote does, because core's
+ * volume_up waits on a volume level the Apple TV never reports over HDMI).
+ * Without it, volume falls back to media_player volume on volume_entity — most
+ * TVs take that fine; it is only the Apple TV itself that cannot. There is no
+ * HID mute key (the remote's mute button is CEC/IR straight to the TV), so the
+ * mute button only appears when volume_entity names something that can mute.
  *
- * Buttons go through remote.send_command, volume through media_player, and the
- * text field through apple_tv.set_keyboard_text — which targets a config entry
- * rather than an entity, looked up once from the entity registry.
- *
- * Deploy like the other cards: copy here, bump ?v= in the lovelace resource.
+ * Buttons go through remote.send_command, and the text field through
+ * apple_tv.set_keyboard_text — which targets a config entry rather than an
+ * entity, looked up once from the entity registry.
  */
 
 const PAD = [
@@ -103,11 +103,18 @@ class HubbubbRemoteCard extends HTMLElement {
     });
   }
 
-  _hid(command) {
-    // The Siri Remote's volume keys — see custom_components/apple_tv_hid.
-    this._hass.callService("apple_tv_hid", "press", {
-      entity_id: this._config.entity,
-      command,
+  _volume(direction) {
+    // The Siri Remote's volume keys, when apple_tv_hid is installed (see the
+    // header); otherwise plain media_player volume on whatever will take it.
+    if (this._hass.services?.apple_tv_hid) {
+      this._hass.callService("apple_tv_hid", "press", {
+        entity_id: this._config.entity,
+        command: `volume_${direction}`,
+      });
+      return;
+    }
+    this._hass.callService("media_player", `volume_${direction}`, {
+      entity_id: this._config.volume_entity || this._config.entity,
     });
   }
 
@@ -266,7 +273,7 @@ class HubbubbRemoteCard extends HTMLElement {
 
     const vol = this.querySelector(".vol");
     vol.append(
-      this._button("mdi:minus", "Volume down", () => this._hid("volume_down"), "", true)
+      this._button("mdi:minus", "Volume down", () => this._volume("down"), "", true)
     );
     if (this._config.volume_entity) {
       vol.append(
@@ -274,7 +281,7 @@ class HubbubbRemoteCard extends HTMLElement {
       );
     }
     vol.append(
-      this._button("mdi:plus", "Volume up", () => this._hid("volume_up"), "", true)
+      this._button("mdi:plus", "Volume up", () => this._volume("up"), "", true)
     );
 
     const bottom = this.querySelector(".bottom");

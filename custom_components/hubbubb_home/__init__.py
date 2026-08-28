@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import voluptuous as vol
-from homeassistant.components import frontend
+from homeassistant.components import frontend, webhook
 from aiohttp import web
 
 from homeassistant.components.http import HomeAssistantView
@@ -64,7 +64,9 @@ from .const import (
     DEFAULT_NIGHTLY_TIME,
     DEFAULT_PROMPT,
     DOMAIN,
+    EVENT_MESSAGE,
     PLATFORMS,
+    WEBHOOK_MESSAGE,
 )
 from .hubbubb import HubbubbClient, HubbubbError
 from .intents import ALL_INTENTS, async_register_all
@@ -190,6 +192,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     runtime.unsubscribe.append(llm.async_register_api(hass, HubbubbAPI(hass, runtime)))
 
     _async_register_services(hass, runtime)
+    _async_register_webhook(hass, runtime)
     _async_schedule(hass, runtime)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
@@ -477,6 +480,44 @@ def _async_register_services(hass: HomeAssistant, runtime: Runtime) -> None:
             _make(endpoint, method),
             supports_response=SupportsResponse.ONLY,
         )
+
+
+def _async_register_webhook(hass: HomeAssistant, runtime: Runtime) -> None:
+    """The inbound half of spoken announcements.
+
+    A companion has no Home Assistant credentials, so it cannot fire a bus
+    event itself. It POSTs {"message": "..."} to
+    /api/webhook/hubbubb_home_message instead, and this relays it onto the bus
+    as the event the ring cards listen for - each open dashboard then elects
+    one screen to speak it. Local-only: the poster is a machine on the LAN,
+    and an unauthenticated path that makes the house talk should not face the
+    internet.
+    """
+
+    async def _handle(
+        hass: HomeAssistant, webhook_id: str, request: web.Request
+    ) -> None:
+        try:
+            data = await request.json()
+        except ValueError:
+            data = {"message": (await request.text()).strip()}
+        if not isinstance(data, dict):
+            data = {"message": str(data)}
+        if data.get("message"):
+            hass.bus.async_fire(EVENT_MESSAGE, data)
+
+    webhook.async_register(
+        hass,
+        DOMAIN,
+        f"{runtime.name} announcements",
+        WEBHOOK_MESSAGE,
+        _handle,
+        local_only=True,
+        allowed_methods=["POST"],
+    )
+    runtime.unsubscribe.append(
+        lambda: webhook.async_unregister(hass, WEBHOOK_MESSAGE)
+    )
 
 
 def _since(finding: dict) -> str:

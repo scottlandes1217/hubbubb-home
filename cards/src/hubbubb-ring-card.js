@@ -713,15 +713,11 @@ class HubbubbRingCard extends LitElement {
   }
 
   disconnectedCallback() {
-    if (this._speechUnsub) {
-      try { this._speechUnsub(); } catch (e) {}
-      this._speechUnsub = null;
-      this._speechSub = false;
+    for (const unsub of this._speechUnsubs || []) {
+      try { unsub(); } catch (e) {}
     }
-    if (this._claimUnsub) {
-      try { this._claimUnsub(); } catch (e) {}
-      this._claimUnsub = null;
-    }
+    this._speechUnsubs = [];
+    this._speechSub = false;
     if (this._onActivity) {
       window.removeEventListener?.("pointerdown", this._onActivity, true);
       window.removeEventListener?.("keydown", this._onActivity, true);
@@ -763,21 +759,34 @@ class HubbubbRingCard extends LitElement {
      fails the mirror in `set hass` puts it back. */
 
   /* Agent finishes are spoken HERE, by this device, rather than on a puck in
-     another room or pushed to a phone in a pocket. The automation fires
-     jarvis_claude_message only while the bell is on, so the toggle means simply
-     "does it speak" and the answer comes out of whatever screen you are at. */
+     another room or pushed to a phone in a pocket. The integration's
+     hubbubb_home_message webhook fires the event of the same name (only while
+     the bell is on - the companion honours the switch), so the toggle means
+     simply "does it speak" and the answer comes out of whatever screen you
+     are at. */
   _listenForSpeech(hass) {
     if (this._speechSub || !hass?.connection) return;
     this._speechSub = true; // set first: subscribeEvents is async and hass churns
-    hass.connection
-      .subscribeEvents((ev) => {
-        const msg = ev?.data?.message;
-        if (msg) this._electAndSpeak(msg);
-      }, "jarvis_claude_message")
-      .then((unsub) => (this._speechUnsub = unsub))
-      .catch(() => (this._speechSub = false));
-    hass.connection
-      .subscribeEvents((ev) => {
+    const track = (p) =>
+      p.then((unsub) => (this._speechUnsubs ||= []).push(unsub)).catch(() => {
+        // retry on the next hass tick - but never with survivors attached,
+        // or the retry doubles them up and everything speaks twice
+        for (const unsub of this._speechUnsubs || []) {
+          try { unsub(); } catch (e) {}
+        }
+        this._speechUnsubs = [];
+        this._speechSub = false;
+      });
+    const speak = (ev) => {
+      const msg = ev?.data?.message;
+      if (msg) this._electAndSpeak(msg);
+    };
+    track(hass.connection.subscribeEvents(speak, "hubbubb_home_message"));
+    /* ponytail: legacy event name from before the integration owned the
+       webhook; drop once no hand-rolled automation fires it any more. */
+    track(hass.connection.subscribeEvents(speak, "jarvis_claude_message"));
+    track(
+      hass.connection.subscribeEvents((ev) => {
         /* Always collecting, into a rolling window. Gating this on "my
            election is open" dropped every claim that arrived before this
            screen had even received the message — a wall panel a beat behind
@@ -786,12 +795,11 @@ class HubbubbRingCard extends LitElement {
         const list = (this._claims ||= []);
         list.push(c);
         while (list.length && list[0].at < c.at - CLAIM_WINDOW) list.shift();
-      }, "jarvis_claude_claim")
-      .then((unsub) => (this._claimUnsub = unsub))
-      .catch(() => {});
+      }, "hubbubb_home_claim")
+    );
   }
 
-  /* Every open dashboard hears jarvis_claude_message, so without a winner the
+  /* Every open dashboard hears hubbubb_home_message, so without a winner the
      same sentence comes out of every screen in the house at once — in the
      pipeline's own voice, which makes the wall panel a convincing puck
      impersonator. Each card claims with how long since its screen was last
@@ -811,7 +819,7 @@ class HubbubbRingCard extends LitElement {
     try {
       await this._hass.connection.sendMessagePromise({
         type: "fire_event",
-        event_type: "jarvis_claude_claim",
+        event_type: "hubbubb_home_claim",
         event_data: mine,
       });
     } catch {
@@ -4494,7 +4502,12 @@ class HubbubbRingCard extends LitElement {
       height: auto;
       z-index: 8;
       background: var(--jr-panel-bg, rgba(3, 7, 9, 0.97));
-      backdrop-filter: blur(3px);
+      /* No backdrop-filter here, ever: a filtered element becomes the
+         containing block for fixed descendants, so the phone rules that pin
+         .panel to the visual viewport measured from THIS box instead - the
+         panel started below the header but kept full-viewport height, and
+         the composer hung 56px off the bottom of the screen. The background
+         is 97% opaque; the blur was invisible anyway. */
     }
     .wrap.build .ring {
       order: 1;

@@ -40,6 +40,12 @@ TIMER_SLOTS = 5
 # --- storage / runtime -------------------------------------------------------
 MEMORY_DB = "hubbubb_home_memory.db"
 
+# POST {"message": "..."} to /api/webhook/hubbubb_home_message and every open
+# dashboard hears the event of the same name; the ring cards elect one screen
+# to speak it. This is how a companion announces a finished agent turn.
+WEBHOOK_MESSAGE = f"{DOMAIN}_message"
+EVENT_MESSAGE = f"{DOMAIN}_message"
+
 CARDS = (
     "hubbubb-ring-card.js",
     "hubbubb-remote-card.js",

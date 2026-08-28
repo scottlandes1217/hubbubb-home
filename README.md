@@ -68,6 +68,12 @@ Entity IDs take the name you chose, so an assistant called Athena gets
 |---|---|
 | Animated listening ring, with the build screen | `custom:hubbubb-ring-card` |
 | Apple TV / Siri Remote | `custom:hubbubb-remote-card` |
+
+The remote card's volume keys use plain `media_player` volume on its
+`volume_entity` (usually your TV). Point them at the Apple TV itself and
+you will want the separate `apple_tv_hid` custom component, which the card
+prefers automatically when installed — the Apple TV ignores core's volume
+services over HDMI.
 | Voice timer countdowns | `custom:hubbubb-timers-card` |
 
 Add the ring card from the dashboard editor and it wires itself up: it finds
