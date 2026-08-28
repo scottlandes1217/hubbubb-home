@@ -1,4 +1,17 @@
 import { LitElement, css, html, nothing } from "lit";
+
+/* The integration serves this file from a path carrying its version, so the
+   build identifies itself. Worth the three lines: a dashboard left open keeps
+   running the bundle it loaded, and HA restarting does not re-fetch it — so a
+   fix can be live on disk, served correctly, and still not be the code in the
+   page. Check with HubbubbRingCard.build or the line this logs. */
+const BUILD =
+  (import.meta.url.match(/\/(\d+\.\d+\.\d+)\//) || [])[1] || "dev";
+console.info(`hubbubb-ring-card ${BUILD}`);
+// A select's DOM value drifts from the template the moment someone picks an
+// option, so plain binding cannot pull it back. live() compares against the
+// live DOM value instead of the last rendered one.
+import { live } from "lit/directives/live.js";
 import { rmsEnvelope } from "./envelope.js";
 import {
   clearCore,
@@ -40,6 +53,11 @@ const DEFAULTS = {
   /* Build mode: the ring docks to the side and a Claude-session console
      appears, driven by the optional companion (see docs/companion.md). */
   build_entity: "", // input_boolean mirrored by the voice intents
+  // Who a build-mode switch applies to. "device" (default) keeps it on the
+  // screen you touched - opening the console on the Mac used to drag every
+  // other screen along with it. "global" opts a screen back into the shared
+  // helper, which is what a wall panel wants so voice can move it.
+  build_scope: "device",
   build_dashboard: "", // when set, build mode navigates to this path instead
   build_page: false, // this card IS the dedicated build dashboard
   build_return: "/", // where the build page's exit button goes back to
@@ -328,6 +346,8 @@ const parseColor = (c) => {
 };
 
 class HubbubbRingCard extends LitElement {
+  static build = BUILD;
+
   static properties = {
     _config: { state: true },
     _state: { state: true },
@@ -340,6 +360,11 @@ class HubbubbRingCard extends LitElement {
     _ask: { state: true },
     _askSent: { state: true },
     _activity: { state: true },
+    _permission: { state: true },
+    _modelBusy: { state: true },
+    _models: { state: true },
+    _modes: { state: true },
+    _model: { state: true },
     _queue: { state: true },
     _swipe: { state: true },
     _details: { state: true },
@@ -368,7 +393,7 @@ class HubbubbRingCard extends LitElement {
 
     // Build mode follows the helper when one is configured, so "<name>, turn
     // on build mode" and the on-card toggle stay in sync.
-    if (this._config.build_entity) {
+    if (this._config.build_entity && this._config.build_scope === "global") {
       const on = hass?.states?.[this._config.build_entity]?.state === "on";
       if (this._config.build_page) {
         // The dedicated page: console is always up; helper off = leave.
@@ -384,6 +409,7 @@ class HubbubbRingCard extends LitElement {
        tapping it looked like nothing happened. Also the confirmation that
        lands after an optimistic tap, and how a toggle from anywhere else
        (the more-info dialog, an automation) reaches the ring. */
+    this._listenForSpeech(hass);
     const speaker = hass?.states?.[this._config.announce_entity];
     const announce = speaker ? speaker.state === "on" : null;
     if (announce !== this._announce) this._announce = announce;
@@ -437,16 +463,31 @@ class HubbubbRingCard extends LitElement {
     }
     for (const id of [...this._unread]) if (!live.has(id)) this._unread.delete(id);
     for (const id of [...this._wasBusy.keys()]) if (!live.has(id)) this._wasBusy.delete(id);
-    this._store("unread", [...this._unread]);
+    // Writing this on every poll meant a synchronous localStorage write twice a
+    // second, on the same thread as typing and the ring animation.
+    const key = [...this._unread].sort().join(",");
+    if (key !== this._unreadKey) {
+      this._unreadKey = key;
+      this._store("unread", [...this._unread]);
+    }
     return list;
+  }
+
+  /* A poll that changes nothing must cost nothing. Reassigning these arrays
+     marks the card dirty and re-renders the ring, its plates and the session
+     list — every poll, whether or not anything moved. That churn is what made
+     typing stutter and the ring drop frames; comparing three small objects is
+     far cheaper than the render it avoids. */
+  _settle(key, next) {
+    if (JSON.stringify(next) !== JSON.stringify(this[key])) this[key] = next;
   }
 
   async _pollSessions() {
     if (this._build || this._onScreen === false || !this._hass) return;
     try {
       const st = await this._api("agent_status");
-      this._sessions = this._trackDone(st.sessions || []);
-      if (st.projects) this._projects = st.projects;
+      this._settle("_sessions", this._trackDone(st.sessions || []));
+      if (st.projects) this._settle("_projects", st.projects);
     } catch {
       /* no listener reachable: the ambient animation keeps the ring alive */
     }
@@ -569,8 +610,11 @@ class HubbubbRingCard extends LitElement {
   }
 
   getGridOptions() {
-    const rows = Math.max(2, Math.ceil(Number(this._config?.size ?? 240) / 56));
-    return { rows, columns: 12, min_rows: 2, min_columns: 6 };
+    // Let the grid size the row span to what the card actually renders.
+    // Deriving rows from `size` over-allocated: a section row is 56px but rows
+    // are separated by an 8px gap, so ceil(size / 56) rows come out taller than
+    // `size` by up to a whole row — 104px of dead space under a 400px ring.
+    return { rows: "auto", columns: 12, min_rows: 2, min_columns: 6 };
   }
 
   /* Every user-settable colour and size, as custom properties. Kept in one
@@ -642,11 +686,23 @@ class HubbubbRingCard extends LitElement {
       this._saveQueue();
     };
     window.addEventListener?.("pagehide", this._onHide);
+    // One tap anywhere buys the right to play audio later.
+    this._onFirstTap = () => this._unlockSpeech();
+    this.addEventListener?.("pointerdown", this._onFirstTap, { once: true });
     this._restoreQueue();
     if (this._build) this._setBuild(true, false); // resume polling after re-attach
   }
 
   disconnectedCallback() {
+    if (this._speechUnsub) {
+      try { this._speechUnsub(); } catch (e) {}
+      this._speechUnsub = null;
+      this._speechSub = false;
+    }
+    if (this._onFirstTap) {
+      this.removeEventListener?.("pointerdown", this._onFirstTap);
+      this._onFirstTap = null;
+    }
     super.disconnectedCallback();
     this._saveDraft();
     this._saveQueue();
@@ -677,6 +733,95 @@ class HubbubbRingCard extends LitElement {
      next hass tick. A wall panel over wifi takes a beat to round-trip, and a
      toggle that does nothing for half a second reads as broken. If the call
      fails the mirror in `set hass` puts it back. */
+
+  /* Agent finishes are spoken HERE, by this device, rather than on a puck in
+     another room or pushed to a phone in a pocket. The automation fires
+     jarvis_claude_message only while the bell is on, so the toggle means simply
+     "does it speak" and the answer comes out of whatever screen you are at. */
+  _listenForSpeech(hass) {
+    if (this._speechSub || !hass?.connection) return;
+    this._speechSub = true; // set first: subscribeEvents is async and hass churns
+    hass.connection
+      .subscribeEvents((ev) => {
+        const msg = ev?.data?.message;
+        if (msg) this._speakHere(msg);
+      }, "jarvis_claude_message")
+      .then((unsub) => (this._speechUnsub = unsub))
+      .catch(() => (this._speechSub = false));
+  }
+
+  /* Browsers refuse audio no gesture asked for. The card is tapped constantly,
+     so borrow the first of those taps to unlock a silent clip. */
+  _unlockSpeech() {
+    if (this._speechAudio) return;
+    const el = new Audio(
+      "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA="
+    );
+    el.play().catch(() => {});
+    this._speechAudio = el;
+  }
+
+  async _speakHere(text) {
+    const hass = this._hass;
+    if (!hass || !text) return;
+    try {
+      /* The same voice the pipeline uses, so a finish sounds like the assistant
+         rather than whatever engine happens to be first in the list. */
+      if (!this._ttsCfg) {
+        const list = await hass.callWS({ type: "assist_pipeline/pipeline/list" });
+        const pipes = list?.pipelines || [];
+        const pick =
+          pipes.find((p) => p.id === list.preferred_pipeline) || pipes[0];
+        if (!pick?.tts_engine) return;
+        this._ttsCfg = {
+          engine_id: pick.tts_engine,
+          language: pick.tts_language,
+          voice: pick.tts_voice,
+        };
+      }
+      const cfg = this._ttsCfg;
+      const res = await hass.callApi("POST", "tts_get_url", {
+        engine_id: cfg.engine_id,
+        message: text,
+        language: cfg.language,
+        ...(cfg.voice ? { options: { voice: cfg.voice } } : {}),
+      });
+      const url = res?.url || res?.path;
+      if (!url) return;
+
+      /* Fetch the bytes and play a blob rather than pointing the element at the
+         proxy URL. Measured: fetching that URL returns 200 audio/mpeg, but an
+         <audio> element pointed at it sits at readyState 0 forever - the
+         response is chunked with no Content-Length and the media stack will not
+         start on it. The bytes are a few KB. */
+      const el = this._speechAudio || (this._speechAudio = new Audio());
+      if (this._speechBlob) {
+        URL.revokeObjectURL(this._speechBlob);
+        this._speechBlob = null;
+      }
+      try {
+        const audioRes = await fetch(url);
+        const buf = await audioRes.arrayBuffer();
+        this._speechBlob = URL.createObjectURL(new Blob([buf], { type: "audio/mpeg" }));
+        el.src = this._speechBlob;
+      } catch (e) {
+        el.src = url; // better a stalled element than no attempt at all
+      }
+      el.onended = () => {
+        if (this._speechBlob) {
+          URL.revokeObjectURL(this._speechBlob);
+          this._speechBlob = null;
+        }
+      };
+      await el.play().catch(() => {
+        this._toast("Tap anywhere to let it speak here.");
+      });
+    } catch (e) {
+      /* A missing TTS engine or a revoked token is not worth interrupting the
+         session over - the message is already on screen. */
+    }
+  }
+
   _toggleAnnounce() {
     this._toggleHelper(
       this._config.announce_entity,
@@ -706,7 +851,10 @@ class HubbubbRingCard extends LitElement {
   }
 
   _setBuild(on, pushToHass = true) {
-    if (pushToHass && this._config.build_entity && this._hass) {
+    // Only a screen that opted into the shared helper writes to it; otherwise
+    // one tap here drags every other device along.
+    if (pushToHass && this._config.build_entity && this._hass &&
+        this._config.build_scope === "global") {
       this._hass.callService("homeassistant", on ? "turn_on" : "turn_off", {
         entity_id: this._config.build_entity,
       });
@@ -730,7 +878,8 @@ class HubbubbRingCard extends LitElement {
     this._build = on;
     if (on) {
       this._err = "";
-      this._poll();
+      this._loadModels();
+      this._poll(true);
       this._startPolling();
       if (!this._vvHandler && window.visualViewport) {
         this._vvHandler = () => this._vvSync();
@@ -746,6 +895,7 @@ class HubbubbRingCard extends LitElement {
       this._msgs = null;
       this._ask = null;
       this._activity = null;
+      this._permission = null;
       this._confirmKill = null;
       this._picking = false;
       this._details = false;
@@ -861,12 +1011,7 @@ class HubbubbRingCard extends LitElement {
       this._lastCap = cap;
       this._autoGrow(this._composerEl());
     }
-    if (this._stick) {
-      requestAnimationFrame(() => {
-        const log = this.renderRoot?.querySelector(".log");
-        if (log) log.scrollTop = log.scrollHeight;
-      });
-    }
+    if (this._stick) this._toBottom();
   }
 
   /* Put the document back at the top and re-read the viewport offset, a few
@@ -909,7 +1054,11 @@ class HubbubbRingCard extends LitElement {
   /* Inside a session the panel is showing live spinner text, a dialog and
      queued messages, so it polls harder than the session list does. */
   _startPolling() {
-    const ms = this._sel ? 1200 : 2500;
+    // A poll was ~900ms of round trip when these numbers were picked; it is
+    // now well under 200ms and both calls go out together, so the panel can
+    // keep much closer to the terminal without working the listener harder
+    // than it was already being worked.
+    const ms = this._sel ? 600 : 1500;
     if (this._pollTimer && this._pollMs === ms) return;
     if (this._pollTimer) clearInterval(this._pollTimer);
     this._pollMs = ms;
@@ -955,7 +1104,7 @@ class HubbubbRingCard extends LitElement {
     return content || {};
   }
 
-  async _poll() {
+  async _poll(force = false) {
     if (!this._build || !this._hass) return;
     // A poll asked for mid-flight runs straight after, so a tap never waits
     // out a whole interval for its result.
@@ -965,9 +1114,33 @@ class HubbubbRingCard extends LitElement {
     }
     this._polling = true;
     try {
-      const status = await this._api("agent_status");
-      this._sessions = this._trackDone(status.sessions || []);
-      this._projects = status.projects || [];
+      // Status and transcript are independent, so they go out together: back
+      // when a status call cost most of a second, running them in series put
+      // the round trips end to end and the panel moved a beat behind the
+      // terminal. `sel` is captured up front so the transcript that comes back
+      // is the one we asked for, even if the selection changes mid-flight.
+      const sel = this._sel;
+      // The two halves cost very different amounts. agent_transcript is ~47ms
+      // and 0.3KB once the listener sees `have` is unchanged. agent_status is
+      // ~150ms and makes the listener scan every process on the Mac to find
+      // which panes still hold a live Claude — ~600 processes, about 30ms of
+      // CPU, and it was running on every single poll. The session list barely
+      // changes, so it runs on one poll in five while the transcript, which is
+      // what you actually watch move, keeps the fast cadence.
+      this._tick = (this._tick || 0) + 1;
+      const wantStatus = force || this._tick % 5 === 1;
+      const [status, t] = await Promise.all([
+        wantStatus ? this._api("agent_status") : null,
+        sel
+          ? this._api("agent_transcript", {
+              id: sel,
+              have: this._msgs == null ? 0 : this._tbytes || 0,
+            })
+          : null,
+      ]);
+      if (status) {
+      this._settle("_sessions", this._trackDone(status.sessions || []));
+      this._settle("_projects", status.projects || []);
       if (this._sel && !this._sessions.some((s) => s.id === this._sel)) {
         this._sel = null; // it ended underneath us
         this._msgs = null;
@@ -983,16 +1156,23 @@ class HubbubbRingCard extends LitElement {
           this._select(saved);
         }
       }
-      if (this._sel) {
-        // The transcript carries every tool call and its output now, which is
-        // tens of KB — far too much to pull down twice a second. `have` is the
-        // transcript size we already rendered; unchanged, the listener sends
-        // messages: null and we keep what we have. Dialog and spinner still
-        // come back on every poll.
-        const t = await this._api("agent_transcript", {
+      }
+      // The transcript came back alongside the status above. `have` is the
+      // size we already rendered: unchanged, the listener sends messages: null
+      // and we keep what we have, because the transcript carries every tool
+      // call and its output and is far too big to pull down twice a second.
+      // On the pass that restores a saved session, _sel was set after the
+      // request went out, so fetch it now rather than leaving the panel blank
+      // until the next poll.
+      let trans = sel && sel === this._sel ? t : null;
+      if (this._sel && !trans) {
+        trans = await this._api("agent_transcript", {
           id: this._sel,
           have: this._msgs == null ? 0 : this._tbytes || 0,
         });
+      }
+      if (this._sel && trans) {
+        const t = trans;
         this._tbytes = t.bytes || 0;
         // Reassigning an identical transcript re-renders the log and yanks it
         // back to the bottom every poll, which reads as the view twitching
@@ -1000,6 +1180,7 @@ class HubbubbRingCard extends LitElement {
         const next = t.messages;
         if (next != null && !this._sameMsgs(next, this._msgs)) this._msgs = next;
         this._activity = t.activity || null;
+        this._permission = t.permission || null;
         // Only a genuinely different dialog clears the "you picked this"
         // marker — the same one lingering for a poll or two is just the
         // terminal not having repainted yet, and blanking it there is the
@@ -1011,7 +1192,10 @@ class HubbubbRingCard extends LitElement {
           this._askSig = sig;
           this._askSent = null;
         }
-        this._ask = t.ask || null;
+        this._settle("_ask", t.ask || null);
+        // A multi-select dialog stays open while you tick, so the "sending"
+        // lock must not survive the round trip.
+        if (this._ask && this._ask.multi) this._askSent = null;
 
         // A dispatched message is done once the transcript records it.
         if (this._queue?.length) {
@@ -1069,12 +1253,13 @@ class HubbubbRingCard extends LitElement {
     this._askSent = null;
     this._askSig = undefined;
     this._activity = null;
+    this._permission = null;
     this._startPolling();
     this._confirmKill = null;
     this._details = false;
     this._swipe = null;
     this._stick = true;
-    this._poll();
+    this._poll(true);
     // Opening a session makes it the voice target: while build mode is up,
     // whatever you say to the assistant lands in the session you're looking at.
     if (id) this._api("agent_target_window", { id }).catch(() => {});
@@ -1113,7 +1298,26 @@ class HubbubbRingCard extends LitElement {
 
   /* Terminal-ish output gets one element per line so each can be coloured;
      prose gets its inline code and bold picked out. */
+  /* Every render re-parsed all ~110 messages: a regex sweep per assistant
+     message and a div per line of every tool output, thousands of template
+     objects rebuilt to produce identical DOM. Message text never changes once
+     written, so the parse is cached by it; only a genuinely new or still
+     growing message does any work. Bounded so a long-lived panel cannot grow
+     the cache without limit. */
   _body(m) {
+    const key = `${m.role}\u0000${m.text}`;
+    const hit = this._bodyCache?.get(key);
+    if (hit) return hit;
+    const made = this._bodyParse(m);
+    if (!this._bodyCache) this._bodyCache = new Map();
+    // Oldest first out: the top of the transcript is what stops being asked for.
+    if (this._bodyCache.size > 400)
+      this._bodyCache.delete(this._bodyCache.keys().next().value);
+    this._bodyCache.set(key, made);
+    return made;
+  }
+
+  _bodyParse(m) {
     if (MONO_ROLES.has(m.role))
       return m.text
         .split("\n")
@@ -1144,6 +1348,44 @@ class HubbubbRingCard extends LitElement {
      has to compare the collapsed form. */
   _collapse(text) {
     return text.split(/\s+/).join(" ");
+  }
+
+  /* Messages that have never been on screen only have an estimated height, so
+     one jump can land short of the end. Each pass renders what it scrolled to,
+     which firms up the estimate for the next — three frames is enough to settle
+     and is still invisible. */
+  _toBottom() {
+    let n = 0;
+    const go = () => {
+      const log = this.renderRoot?.querySelector(".log");
+      if (log) {
+        // scrollHeight is only an estimate while off-screen messages are still
+        // unrendered, and on a fresh load every message below the fold is, so
+        // aiming at it alone lands short. Asking for the last child forces it
+        // to render and puts us on the real bottom.
+        log.lastElementChild?.scrollIntoView({ block: "end" });
+        log.scrollTop = log.scrollHeight;
+        // scrollIntoView will happily scroll our ancestors too; the panel owns
+        // the screen in build mode, so put them back.
+        this._unscroll();
+      }
+      // Keep going even when the log is not in the DOM yet. Returning on that
+      // first frame abandoned the whole settle, and on a fresh load the
+      // transcript can land a frame before the panel that displays it — which
+      // is exactly when opening a session left you at the top.
+      if (++n < 6) requestAnimationFrame(go);
+    };
+    requestAnimationFrame(go);
+    // rAF does not fire in a backgrounded tab, and the companion app
+    // backgrounds freely, so a timer gets the last word.
+    clearTimeout(this._bottomT);
+    this._bottomT = setTimeout(() => {
+      const log = this.renderRoot?.querySelector(".log");
+      if (!log) return;
+      log.lastElementChild?.scrollIntoView({ block: "end" });
+      log.scrollTop = log.scrollHeight;
+      this._unscroll();
+    }, 250);
   }
 
   _composerEl() {
@@ -1177,7 +1419,16 @@ class HubbubbRingCard extends LitElement {
     return next !== target;
   }
 
+  /* A draft is crash insurance, not state anything reads live, so it does not
+     need writing on every keypress — two localStorage writes per character is
+     felt while typing on a phone. Every other caller still saves immediately. */
+  _draftSoon() {
+    clearTimeout(this._draftT);
+    this._draftT = setTimeout(() => this._saveDraft(), 400);
+  }
+
   _saveDraft(id = this._sel) {
+    clearTimeout(this._draftT);
     if (!id) return;
     const box = this._composerEl();
     if (box) this._store(`draft:${id}`, box.value || null);
@@ -1259,7 +1510,7 @@ class HubbubbRingCard extends LitElement {
       this._saveQueue();
     }
     this._pending = false;
-    this._poll();
+    this._poll(true);
   }
 
   _editQueued(item) {
@@ -1355,11 +1606,66 @@ class HubbubbRingCard extends LitElement {
     this._saveDraft();
   }
 
-  async _sendKey(key) {
+
+  /* The question box.
+
+     Two different dialogs wear the same face in a terminal, and that is what
+     made answering feel arbitrary: in a single-choice dialog the digit IS the
+     answer, but in a multi-select one digits only tick boxes and Enter submits.
+     The listener now reads the question out of the session transcript rather
+     than scraping the screen, so it can say which kind this is (ask.multi),
+     carry the full wording, the header, the real option help, and "1 of 2" when
+     one call asks several questions. Everything here is that payload. */
+  _renderAsk(ask) {
+    const multi = !!ask.multi;
+    const locked = !multi && !!this._askSent;
+    return html`<div class="askbox ${locked ? "answered" : ""}">
+      ${ask.header || ask.total > 1 || multi
+        ? html`<div class="askhead">
+            ${ask.header ? html`<span class="askchip">${ask.header}</span>` : nothing}
+            ${ask.total > 1
+              ? html`<span class="askstep">Question ${ask.index} of ${ask.total}</span>`
+              : nothing}
+            ${multi ? html`<span class="askmulti">Pick any</span>` : nothing}
+          </div>`
+        : nothing}
+      ${ask.text ? html`<div class="asktext">${ask.text}</div>` : nothing}
+      <div class="askopts">
+        ${ask.options.map(
+          (o) => html`<button
+            class="askopt ${this._askSent === o.key ? "picked" : ""} ${o.on ? "on" : ""}"
+            data-ai="pick-option"
+            ?disabled=${locked}
+            @click=${() => this._sendKey(o.key, { keepOpen: multi })}
+          >
+            <span class="asknum">${multi ? (o.on ? "☑" : "☐") : o.key}</span>
+            <span class="asklabel"
+              >${o.label}
+              ${o.desc ? html`<span class="askdesc">${o.desc}</span>` : nothing}</span
+            >
+            ${!multi && this._askSent === o.key
+              ? html`<span class="asktick">✓</span>`
+              : nothing}
+          </button>`
+        )}
+      </div>
+      <div class="askrow">
+        ${locked ? html`<span class="dim">sending…</span>` : nothing}
+        ${multi
+          ? html`<button class="asksubmit" data-ai="submit-answer"
+                   @click=${() => this._sendKey("Enter")}>Submit</button>`
+          : nothing}
+        <button class="askmini" @click=${() => this._sendKey("Escape")}>esc</button>
+      </div>
+    </div>`;
+  }
+
+  async _sendKey(key, { keepOpen = false } = {}) {
     if (!this._sel) return;
     // Mark the choice instead of blanking the dialog: the terminal takes a
-    // beat to repaint, and clearing early makes it flash back.
-    this._askSent = key;
+    // beat to repaint, and clearing early makes it flash back. A multi-select
+    // tick keeps the box live instead - only Submit ends it.
+    if (!keepOpen) this._askSent = key;
     try {
       await this._api("agent_key", { id: this._sel, key });
       this._err = "";
@@ -1369,6 +1675,104 @@ class HubbubbRingCard extends LitElement {
       return;
     }
     this._poll();
+  }
+
+  async _setModel(model) {
+    if (!this._sel || this._modelBusy || !model) return;
+    // Take the choice now, not after the round trip. Setting _modelBusy
+    // re-renders, and the value binding would put the picker back to the
+    // placeholder for as long as the request took — which reads as the model
+    // you picked refusing to stick. Claude Code owns the meaning of the name
+    // and the status line never reports it back, so this is the only record.
+    const had = this._model;
+    this._model = model;
+    this._modelBusy = model;
+    try {
+      await this._api("agent_model", { id: this._sel, model });
+      this._err = "";
+    } catch (e) {
+      this._model = had; // it did not take; do not claim it did
+      this._err = this._errText(e);
+    }
+    this._modelBusy = null;
+    this._poll();
+  }
+
+  /* Shift-tab is the only way Claude Code changes permission mode. The listener
+     presses it until the status line reads the mode you picked, then reports
+     what that line actually says rather than what we aimed for. */
+  async _setPermission(mode) {
+    if (!this._sel || this._modelBusy || !mode) return;
+    this._modelBusy = "perm";
+    try {
+      const res = await this._api("agent_permission", { id: this._sel, mode });
+      const got = res && (res.mode || res.detail);
+      if (got) this._permission = got;
+      this._err = "";
+    } catch (e) {
+      this._err = this._errText(e);
+    }
+    this._modelBusy = null;
+    this._poll();
+  }
+
+  /* Model and permission live in the composer bar rather than a menu: they are
+     the two things worth changing mid-session. Native selects, so one tap picks
+     a value outright — cycling chips made choosing the fourth mode four taps.
+     The model list comes from the listener, which reads it off the Models API,
+     so a model released next month appears here on its own. */
+  _renderRunControls() {
+    const models = this._models || [];
+    // null means the listener could not read the status line. Say so rather
+    // than printing a mode that might be wrong in the permissive direction.
+    const mode = this._permission || "";
+    // Which modes this session can reach is a property of how it was started,
+    // so it comes from the session itself. Shift-tab will not cycle into bypass
+    // unless the session was launched in it, and offering a mode that cannot be
+    // reached is offering a control that does nothing.
+    const modes =
+      (this._sessions || []).find((s) => s.id === this._sel)?.modes ||
+      this._modes ||
+      ["auto", "manual", "accept edits", "plan"];
+    return html`<div class="runbar">
+      <select
+        class="runsel ${this._modelBusy && this._modelBusy !== "perm" ? "busy" : ""}"
+        ?disabled=${!!this._modelBusy || !models.length}
+        data-ai="pick-model"
+        title="Model for this session"
+        .value=${live(this._model || "")}
+        @change=${(e) => this._setModel(e.target.value)}
+      >
+        <option value="" disabled>${models.length ? "Model" : "…"}</option>
+        ${models.map(
+          (m) => html`<option value=${m.id}>${m.name}</option>`
+        )}
+      </select>
+      <select
+        class="runsel perm mode-${(mode || "unknown").replace(/\s+/g, "-")} ${this._modelBusy === "perm" ? "busy" : ""}"
+        ?disabled=${!!this._modelBusy}
+        data-ai="pick-permission"
+        title="Permission mode"
+        .value=${live(mode)}
+        @change=${(e) => this._setPermission(e.target.value)}
+      >
+        <option value="" disabled>mode ?</option>
+        ${modes.map((m) => html`<option value=${m}>${m}</option>`)}
+      </select>
+    </div>`;
+  }
+
+  /* The list is small and changes about as often as a model ships, so it is
+     fetched once per build-mode session rather than on every poll. */
+  async _loadModels() {
+    if (this._models) return;
+    try {
+      const res = await this._api("agent_models");
+      this._models = res.models || [];
+      this._modes = res.modes || null;
+    } catch {
+      /* leave the picker disabled rather than inventing a list */
+    }
   }
 
   /* Ending is destructive and there is no undo, so the first press only arms
@@ -1395,7 +1799,7 @@ class HubbubbRingCard extends LitElement {
         this._msgs = null;
         this._store("sel", null);
       }
-      this._poll();
+      this._poll(true);
     } catch (e) {
       this._err = this._errText(e);
     }
@@ -1454,15 +1858,20 @@ class HubbubbRingCard extends LitElement {
     this._picking = false;
     this._pending = true;
     try {
-      await this._api("agent_start_session", { project });
+      const started = await this._api("agent_start_session", { project });
       this._err = "";
       // Claude takes a beat to boot and the listener only lists windows with a
       // live Claude in them, so the new session isn't in the very next status.
-      // Starting it moved the voice target onto it, so wait for the session
-      // wearing the target and open that.
+      // Wait for the exact window the listener says it made. Waiting on "the
+      // one wearing the target" instead can open somebody else's session: until
+      // Claude boots there is no live Claude in the new window, so the target
+      // falls back to whatever else is already on screen.
+      const want = started?.id;
       for (let i = 0; i < 20; i++) {
-        await this._poll();
-        const fresh = (this._sessions || []).find((s) => s.target);
+        await this._poll(true);
+        const fresh = (this._sessions || []).find((s) =>
+          want ? s.id === want : s.target
+        );
         if (fresh) {
           this._select(fresh.id);
           break;
@@ -1793,10 +2202,7 @@ class HubbubbRingCard extends LitElement {
   updated(changed) {
     this._setupCanvas();
     if (changed.has("_sel") && this._sel) this._restoreDraft();
-    if (changed.has("_msgs") && this._stick) {
-      const log = this.renderRoot.querySelector(".log");
-      if (log) log.scrollTop = log.scrollHeight;
-    }
+    if (changed.has("_msgs") && this._stick) this._toBottom();
   }
 
   _setupCanvas() {
@@ -3556,34 +3962,7 @@ class HubbubbRingCard extends LitElement {
         ${this._activity && s?.busy
           ? html`<div class="activity">${this._activity}</div>`
           : nothing}
-        ${this._ask
-          ? html`<div class="askbox ${this._askSent ? "answered" : ""}">
-              ${this._ask.text
-                ? html`<div class="asktext">${this._ask.text}</div>`
-                : nothing}
-              ${this._ask.options.map(
-                (o) => html`<button
-                  class="askopt ${this._askSent === o.key ? "picked" : ""}"
-                  data-ai="pick-option"
-                  ?disabled=${!!this._askSent}
-                  @click=${() => this._sendKey(o.key)}
-                >
-                  <span class="asknum">${o.key}</span>
-                  <span class="asklabel">${o.label}</span>
-                  ${this._askSent === o.key
-                    ? html`<span class="asktick">✓</span>`
-                    : nothing}
-                </button>`
-              )}
-              <div class="askrow">
-                ${this._askSent
-                  ? html`<span class="dim">sending…</span>`
-                  : nothing}
-                <button class="askmini" @click=${() => this._sendKey("Enter")}>⏎ confirm</button>
-                <button class="askmini" @click=${() => this._sendKey("Escape")}>esc</button>
-              </div>
-            </div>`
-          : nothing}
+        ${this._ask ? this._renderAsk(this._ask) : nothing}
         ${(this._queue || [])
           .filter((q) => q.id === this._sel)
           .map(
@@ -3658,12 +4037,13 @@ class HubbubbRingCard extends LitElement {
           @pointerdown=${(e) => {
             // The button row and the box's padding are dead space otherwise.
             // Tapping anywhere in the box should put the cursor in the input.
-            if (e.target.closest("button, input, textarea")) return;
+            if (e.target.closest("button, input, textarea, select")) return;
             e.preventDefault(); // keep the tap from blurring what we focus
             this._composerEl()?.focus();
           }}
         >
         <div class="cbtns">
+          ${this._sel ? this._renderRunControls() : nothing}
           <input
             class="filepick"
             type="file"
@@ -3711,7 +4091,7 @@ class HubbubbRingCard extends LitElement {
           @focus=${() => this._settlePin()}
           @input=${(e) => {
             this._autoGrow(e.target);
-            this._saveDraft();
+            this._draftSoon();
           }}
         ></textarea>
         </div>
@@ -4331,6 +4711,7 @@ class HubbubbRingCard extends LitElement {
       font-size: 16px;
     }
     .log {
+      contain: layout;
       flex: 1;
       overflow-y: auto;
       min-height: 0;
@@ -4356,6 +4737,16 @@ class HubbubbRingCard extends LitElement {
       line-height: 1.5;
       white-space: pre-wrap;
       overflow-wrap: break-word;
+      /* A full transcript is ~110 messages and, because every line of tool
+         output is its own div, ~840 elements of pre-wrap text. Laying all of
+         that out is what made opening build mode stall and what every forced
+         reflow while typing had to repeat — the composer's auto-grow measures
+         itself on each keystroke, and that measurement is only cheap if the
+         log above it is not in the same layout pass. Off-screen messages now
+         skip layout and paint entirely, and the auto keyword keeps each
+         one's real height once rendered, so scrolling does not jump. */
+      content-visibility: auto;
+      contain-intrinsic-size: auto 44px;
     }
     .msg.assistant {
       align-self: flex-start;
@@ -4503,6 +4894,78 @@ class HubbubbRingCard extends LitElement {
       justify-content: flex-end;
       gap: 6px;
       padding: 6px 6px 2px;
+    }
+    /* Sits inside the composer's button row, immediately left of attach, so the
+       whole row reads as one group at the right-hand end. */
+    .runbar {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      flex-wrap: wrap;
+    }
+    .runsel {
+      border: 1px solid rgba(255, 255, 255, 0.14);
+      background: transparent;
+      color: rgba(255, 255, 255, 0.6);
+      border-radius: 999px;
+      padding: 2px 22px 2px 10px;
+      font-size: 10px;
+      letter-spacing: 0.05em;
+      cursor: pointer;
+      /* The native arrow is a different size and colour on every platform, so
+         it is drawn here instead — the select still opens the OS picker. */
+      appearance: none;
+      -webkit-appearance: none;
+      background-image: linear-gradient(45deg, transparent 50%, currentColor 50%),
+        linear-gradient(135deg, currentColor 50%, transparent 50%);
+      background-position: right 9px center, right 5px center;
+      background-size: 4px 4px, 4px 4px;
+      background-repeat: no-repeat;
+      max-width: 46vw;
+      text-overflow: ellipsis;
+    }
+    /* The list itself is drawn by the OS, which uses the page's colours, not
+       the chip's — without this the options are dark text on dark. */
+    .runsel option {
+      background: #16181d;
+      color: #e8eaed;
+    }
+    .runsel:hover:not(:disabled) {
+      border-color: rgba(46, 157, 245, 0.7);
+      color: #cfe9ff;
+    }
+    .runsel:disabled {
+      opacity: 0.45;
+      cursor: default;
+    }
+    .runsel.busy {
+      border-color: #ffaa33;
+      color: #ffaa33;
+    }
+    /* The permission picker is the one place a wrong assumption is expensive,
+       so it is colour-coded by how much it lets through. */
+    .runsel.perm {
+      text-transform: lowercase;
+    }
+    .runsel.mode-manual {
+      border-color: rgba(46, 157, 245, 0.55);
+      color: #9fd4ff;
+    }
+    .runsel.mode-auto {
+      border-color: rgba(255, 140, 60, 0.65);
+      color: #ffb37a;
+    }
+    .runsel.mode-plan {
+      border-color: rgba(126, 231, 199, 0.6);
+      color: #7ee7c7;
+    }
+    .runsel.mode-accept-edits {
+      border-color: rgba(255, 170, 51, 0.6);
+      color: #ffcc80;
+    }
+    .runsel.mode-bypass {
+      border-color: rgba(255, 92, 92, 0.7);
+      color: #ff9d9d;
     }
     .filepick {
       display: none;
@@ -4664,8 +5127,85 @@ class HubbubbRingCard extends LitElement {
       flex-direction: column;
       gap: 6px;
       border: 1px solid rgba(255, 170, 51, 0.45);
-      background: rgba(255, 170, 51, 0.06);
+      /* Opaque: it sits ON TOP of the transcript rather than in the flow. */
+      background: #241d12;
       padding: 10px;
+      /* Pinned to the bottom of the log. A question you have to scroll to find
+         gets missed, and a long multi-select used to push its own Submit button
+         below the fold - the button was there and unreachable. The box always
+         fits; the option list scrolls inside it. */
+      position: sticky;
+      bottom: 0;
+      z-index: 3;
+      max-height: 62%;
+      box-shadow: 0 -10px 22px rgba(0, 0, 0, 0.55);
+    }
+    .askopts {
+      flex: 1 1 auto;
+      min-height: 0;
+      overflow-y: auto;
+      overscroll-behavior: contain;
+      /* Its own column, or the options shrink-wrap their text and the list
+         comes out ragged down the right edge. */
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+    .askopts .askopt {
+      align-self: stretch;
+      width: 100%;
+    }
+    .askhead {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      flex-wrap: wrap;
+    }
+    .askchip {
+      font-size: 9px;
+      letter-spacing: 0.09em;
+      text-transform: uppercase;
+      padding: 2px 7px;
+      border-radius: 999px;
+      background: rgba(46, 157, 245, 0.18);
+      color: #9fd4ff;
+    }
+    .askstep,
+    .askmulti {
+      font-size: 10px;
+      letter-spacing: 0.05em;
+      color: rgba(255, 255, 255, 0.45);
+    }
+    .askmulti {
+      color: #7ee7c7;
+    }
+    .askdesc {
+      display: block;
+      margin-top: 2px;
+      font-size: 10px;
+      line-height: 1.35;
+      color: rgba(255, 255, 255, 0.55);
+      white-space: normal;
+    }
+    .askopt.on {
+      border-color: rgba(0, 229, 255, 0.55);
+      background: rgba(0, 229, 255, 0.1);
+    }
+    .asksubmit {
+      margin-left: auto;
+      border: 0;
+      border-radius: 7px;
+      padding: 5px 14px;
+      font-family: inherit;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      color: #04121b;
+      background: #00e5ff;
+      cursor: pointer;
+    }
+    .asksubmit:hover {
+      filter: brightness(1.1);
     }
     .asktext {
       font-size: 12px;
