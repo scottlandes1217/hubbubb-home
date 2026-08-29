@@ -318,20 +318,24 @@ async def _async_install_sentences(
 
     def _sync() -> bool:
         changed = False
-        if not install:
-            for dest in target.glob(f"{DOMAIN}_*.yaml"):
-                dest.unlink()
-                changed = True
-            return changed
         target.mkdir(parents=True, exist_ok=True)
         for path in sorted(source.glob("*.yaml")):
             dest = target / f"{DOMAIN}_{path.name}"
+            if not install:
+                if dest.exists():
+                    dest.unlink()
+                    changed = True
+                continue
             if dest.exists() and dest.read_bytes() == path.read_bytes():
                 continue
             shutil.copyfile(path, dest)
             changed = True
         # The Apple TV file is generated, not copied - it carries this
-        # house's room names - and exists only while Apple TVs are
+        # house's room names - and follows its own switch: picking Apple TVs
+        # in the options IS the opt-in, so it installs even when the general
+        # sentence toggle is off (that toggle exists for houses whose own
+        # intents already answer "remember that..." - which says nothing
+        # about their Apple TVs). It exists only while Apple TVs are
         # configured: its bare "play {ma_query}" wildcard must not sit on a
         # house with nothing to play on.
         atv_dest = target / f"{DOMAIN}_apple_tv.yaml"
