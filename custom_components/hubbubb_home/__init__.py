@@ -62,10 +62,14 @@ from .const import (
     DEFAULT_BRIEFING_TIME,
     DEFAULT_NAME,
     DEFAULT_NIGHTLY_TIME,
+    CONF_ANNOUNCE,
+    CONF_NOTIFY,
+    CONF_SENTENCES_SECTION,
     DEFAULT_PROMPT,
     DOMAIN,
     EVENT_MESSAGE,
     PLATFORMS,
+    SENTENCE_FILES,
     WEBHOOK_MESSAGE,
 )
 from . import appletv
@@ -187,7 +191,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     await _async_serve_cards(hass)
     await _async_install_sentences(
         hass,
-        entry.options.get(CONF_SENTENCES, True),
+        _wanted_sentences(entry),
         appletv.sentence_yaml(hass, runtime),
     )
 
@@ -297,8 +301,19 @@ async def _async_serve_cards(hass: HomeAssistant) -> None:
                 await resources.async_delete_item(item_id)
 
 
+def _wanted_sentences(entry: ConfigEntry) -> dict[str, bool]:
+    """Which built-in sentence files this house wants, by name.
+
+    The pre-0.17 single toggle is the default for every file, so an old
+    "off" stays all-off until the per-file switches are touched.
+    """
+    legacy = entry.options.get(CONF_SENTENCES, True)
+    section = entry.options.get(CONF_SENTENCES_SECTION) or {}
+    return {name: section.get(name, legacy) for name in SENTENCE_FILES}
+
+
 async def _async_install_sentences(
-    hass: HomeAssistant, install: bool, atv_yaml: str | None = None
+    hass: HomeAssistant, wanted: dict[str, bool], atv_yaml: str | None = None
 ) -> None:
     """Put the sentence files where the conversation agent looks for them.
 
@@ -321,7 +336,7 @@ async def _async_install_sentences(
         target.mkdir(parents=True, exist_ok=True)
         for path in sorted(source.glob("*.yaml")):
             dest = target / f"{DOMAIN}_{path.name}"
-            if not install:
+            if not wanted.get(path.stem, True):
                 if dest.exists():
                     dest.unlink()
                     changed = True
@@ -359,13 +374,9 @@ async def _async_install_sentences(
 
         persistent_notification.async_create(
             hass,
-            (
-                "Hubbubb Home installed its voice sentences. Restart Home "
-                "Assistant to start using them - everything else already works."
-                if install
-                else "Hubbubb Home removed its voice sentences. They stop "
-                "being matched after the next restart."
-            ),
+            "Hubbubb Home changed its voice sentence files. Restart Home "
+            "Assistant for the change to be heard - everything else already "
+            "works.",
             title="Hubbubb Home: restart to finish",
             notification_id=f"{DOMAIN}_sentences",
         )
@@ -509,11 +520,20 @@ def _async_register_webhook(hass: HomeAssistant, runtime: Runtime) -> None:
 
     A companion has no Home Assistant credentials, so it cannot fire a bus
     event itself. It POSTs {"message": "..."} to
-    /api/webhook/hubbubb_home_message instead, and this relays it onto the bus
-    as the event the ring cards listen for - each open dashboard then elects
-    one screen to speak it. Local-only: the poster is a machine on the LAN,
-    and an unauthenticated path that makes the house talk should not face the
-    internet.
+    /api/webhook/hubbubb_home_message instead. Local-only: the poster is a
+    machine on the LAN, and an unauthenticated path that makes the house talk
+    should not face the internet.
+
+    Where the message goes is the announcement policy, learned the hard way:
+
+    - "ask": true - a question asked of a voice satellite is answered on the
+      satellites, because that is where you were standing when you asked.
+      This is the one case that ignores the switch.
+    - Announcement switch on - the event goes on the bus, every open
+      dashboard hears it, and the ring cards elect the screen you are
+      actually working at to speak it.
+    - Switch off - a quiet push through the configured notify service, so
+      "off" means the house is silent, not that the message is lost.
     """
 
     async def _handle(
@@ -525,8 +545,39 @@ def _async_register_webhook(hass: HomeAssistant, runtime: Runtime) -> None:
             data = {"message": (await request.text()).strip()}
         if not isinstance(data, dict):
             data = {"message": str(data)}
-        if data.get("message"):
+        message = data.get("message")
+        if not message:
+            return
+
+        if data.get("ask"):
+            await _announce(runtime, message)
+            return
+
+        switch = runtime.entity_id("agent_announcements")
+        state = hass.states.get(switch) if switch else None
+        if state is None or state.state == "on":
             hass.bus.async_fire(EVENT_MESSAGE, data)
+            return
+
+        notify = runtime.option(CONF_ANNOUNCE, CONF_NOTIFY)
+        if not notify or "." not in notify:
+            _LOGGER.debug("announcements off and no notify service: %s", message)
+            return
+        domain, service = notify.split(".", 1)
+        try:
+            await hass.services.async_call(
+                domain, service,
+                {
+                    "title": runtime.name,
+                    "message": message,
+                    # Passive: the phone should not buzz for a finished turn
+                    # the user chose not to hear out loud.
+                    "data": {"push": {"interruption-level": "passive"}},
+                },
+                blocking=False,
+            )
+        except HomeAssistantError as err:
+            _LOGGER.warning("could not push %r via %s: %s", message, notify, err)
 
     webhook.async_register(
         hass,

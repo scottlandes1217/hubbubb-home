@@ -33,6 +33,8 @@ from homeassistant.helpers.selector import (
 
 from .companion import CompanionClient, CompanionError
 from .const import (
+    CONF_ACK,
+    CONF_ANNOUNCE,
     CONF_ASSISTANT_NAME,
     CONF_ATV,
     CONF_ATV_ENTITIES,
@@ -50,15 +52,19 @@ from .const import (
     CONF_IGNORE,
     CONF_NIGHTLY_ENABLED,
     CONF_NIGHTLY_TIME,
+    CONF_NOTIFY,
     CONF_PROMPT,
     CONF_SENTENCES,
+    CONF_SENTENCES_SECTION,
     CONF_TTS,
     CONF_WEATHER,
+    DEFAULT_ACK,
     DEFAULT_BRIEFING_TIME,
     DEFAULT_NAME,
     DEFAULT_NIGHTLY_TIME,
     DEFAULT_PROMPT,
     DOMAIN,
+    SENTENCE_FILES,
 )
 from .hubbubb import HubbubbClient, HubbubbError
 
@@ -205,13 +211,40 @@ class HubbubbHomeOptionsFlow(OptionsFlow):
                 return self.async_create_entry(data=user_input)
 
         current = {**entry.data, **entry.options}
+        # Pre-0.17 single toggle seeds all three per-file switches.
+        legacy = current.get(CONF_SENTENCES, True)
+        stored_sentences = current.get(CONF_SENTENCES_SECTION) or {}
+        current = {
+            **current,
+            CONF_SENTENCES_SECTION: {
+                name: stored_sentences.get(name, legacy)
+                for name in SENTENCE_FILES
+            },
+        }
         schema = vol.Schema(
             {
                 vol.Required(CONF_ASSISTANT_NAME): str,
                 vol.Optional(CONF_PROMPT, default=DEFAULT_PROMPT): TextSelector(
                     TextSelectorConfig(type=TextSelectorType.TEXT, multiline=True)
                 ),
-                vol.Optional(CONF_SENTENCES, default=True): BooleanSelector(),
+                vol.Required(CONF_SENTENCES_SECTION): section(
+                    vol.Schema(
+                        {
+                            vol.Optional(name, default=True): BooleanSelector()
+                            for name in SENTENCE_FILES
+                        }
+                    ),
+                    {"collapsed": True},
+                ),
+                vol.Required(CONF_ANNOUNCE): section(
+                    vol.Schema(
+                        {
+                            vol.Optional(CONF_NOTIFY): str,
+                            vol.Optional(CONF_ACK, default=DEFAULT_ACK): str,
+                        }
+                    ),
+                    {"collapsed": True},
+                ),
                 vol.Required("overnight"): section(
                     vol.Schema(
                         {

@@ -16,8 +16,24 @@ CONF_HUBBUBB_SECRET = "hubbubb_client_secret"
 CONF_COMPANION = "companion"
 CONF_COMPANION_URL = "companion_url"
 CONF_COMPANION_TOKEN = "companion_token"
+# Options section for how agent turns reach people (distinct from the
+# companion section, whose credentials live on entry data, not options).
+CONF_ANNOUNCE = "announcements"
+# Where a finished agent turn goes when the announcement switch is off: a
+# notify service ("notify.mobile_app_...") for a quiet phone push. Blank = drop.
+CONF_NOTIFY = "notify_service"
+# Spoken the moment a prompt is handed to the companion; the real answer
+# arrives later through the message webhook. "" = silent handoff.
+CONF_ACK = "ack"
+DEFAULT_ACK = "On it."
 
+# Legacy single toggle (pre-0.17); read as the default for all three below.
 CONF_SENTENCES = "install_sentences"
+# Per-file opt-outs, so a house whose own intents already answer "remember
+# that..." can still take the timer or house sentences (section "sentences").
+CONF_SENTENCES_SECTION = "sentences"
+SENTENCE_FILES = ("house", "memory", "timers")
+
 CONF_ATV = "apple_tv"
 CONF_ATV_ENTITIES = "apple_tvs"
 CONF_NIGHTLY_TIME = "nightly_time"
@@ -54,7 +70,7 @@ CARDS = (
     "hubbubb-timers-card.js",
 )
 
-PLATFORMS = ["switch", "sensor"]
+PLATFORMS = ["switch", "sensor", "conversation"]
 
 # Injected into whichever language model the user has pointed at the house, as
 # the Hubbubb Home half of its instructions. It carries the assistant's name,

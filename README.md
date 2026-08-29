@@ -186,7 +186,13 @@ Assistant cannot host. If you run the companion daemon on the machine where
 that agent lives, put its URL in the options and the build screen lights up.
 
 Without one, everything else works exactly the same. See
-[`docs/companion.md`](docs/companion.md) for the protocol.
+[`docs/companion.md`](docs/companion.md) for the protocol, and
+[`companion/`](companion/README.md) for a complete reference daemon
+(Claude Code over tmux). With a companion configured the integration also
+registers a **conversation agent** named after your assistant: point a
+voice pipeline at it and anything Home Assistant cannot answer itself is
+typed straight into your coding agent, with the reply spoken when the turn
+actually finishes.
 
 ---
 

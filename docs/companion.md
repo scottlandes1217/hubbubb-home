@@ -1,5 +1,8 @@
 # The companion protocol
 
+*A complete reference implementation — Claude Code over tmux on a Mac —
+lives in [`companion/`](../companion/README.md).*
+
 The build screen shows a real coding-agent session — a terminal transcript,
 the tool calls, a prompt box, screenshot upload. Home Assistant cannot host
 that: it drives a terminal on a developer's machine. So it lives behind a
@@ -59,24 +62,38 @@ it. `/session` receives the chosen name back as `project`.
 
 ## Spoken announcements
 
-When an agent turn finishes and should be spoken aloud, POST it to Home
-Assistant:
+When an agent turn finishes, POST it to Home Assistant:
 
     POST http://<home-assistant>/api/webhook/hubbubb_home_message
     {"message": "The build finished. Tests pass."}
+    {"message": "Should I delete the old table?", "ask": true}
 
 No token needed — webhooks are unauthenticated, which is why the integration
-registers this one **local-only**. The integration relays it onto the event
-bus and every open dashboard hears it; the ring cards elect exactly one
-screen (the least-idle one) to speak, so the same sentence does not come out
-of every panel in the house at once.
+registers this one **local-only**. Post every finished turn; the integration
+owns the routing:
 
-## The announcement toggle
+- **`ask: true`** — the turn is the answer to a question somebody asked a
+  voice satellite, so it is announced on the satellites: that is where they
+  were standing when they asked. This is the one case that ignores the
+  announcement switch. Mark only a prompt that opened its own session as an
+  ask — in a spoken working session every turn is dictated, and marking
+  those narrates the whole afternoon.
+- **`switch.<name>_agent_announcements` on** — the message goes to every
+  open dashboard and the ring cards elect exactly one screen (the least-idle
+  one) to speak it, so the same sentence does not come out of every panel in
+  the house at once.
+- **Switch off** — a quiet push through the notify service configured in
+  the options, so silence in the house does not mean the message was lost.
 
-`switch.<name>_agent_announcements` is owned by the integration but enforced by
-the companion — Hubbubb Home never sees an agent turn finish, so it cannot
-decide whether to speak one. Read the switch and honour it: post to the
-webhook only while it is on.
+## The conversation agent
+
+The integration also registers a conversation agent (named after the
+assistant) whenever a companion URL is configured. Point a voice pipeline at
+it — with "prefer handling commands locally" on — and whatever Home
+Assistant's own intent engine cannot parse is POSTed to `/prompt` as
+`{"text": ...}`. Answer 2xx quickly and type the sentence into the agent;
+the spoken reply is whatever short acknowledgement is configured, and the
+real answer arrives later through the webhook above.
 
 Two things should override it, both learned the hard way:
 
