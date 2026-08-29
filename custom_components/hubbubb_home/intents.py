@@ -143,11 +143,20 @@ class TimerStartHandler(_Handler):
 
 class TimerCancelHandler(_Handler):
     intent_type = INTENT_TIMER_CANCEL
-    slot_schema = {vol.Optional("name"): cv.string}
-    description = "Cancel a running countdown"
+    slot_schema = {
+        vol.Optional("name"): cv.string,
+        vol.Optional("all"): vol.Coerce(bool),
+    }
+    description = "Cancel a running countdown, or all of them"
 
     async def async_handle(self, intent_obj: intent.Intent):
         slots = self.async_validate_slots(intent_obj.slots)
+        if slots.get("all", {}).get("value"):
+            count = self._runtime.timers.cancel_all()
+            if not count:
+                return self._say(intent_obj, "No timers are running.")
+            plural = "s" if count != 1 else ""
+            return self._say(intent_obj, f"Cancelled {count} timer{plural}.")
         name = str(slots.get("name", {}).get("value", "") or "").strip()
         timer = self._runtime.timers.find(name or None)
         if timer is None:
@@ -160,6 +169,7 @@ class TimerAddHandler(_Handler):
     intent_type = INTENT_TIMER_ADD
     slot_schema = {
         vol.Optional("name"): cv.string,
+        vol.Optional("hours"): vol.Coerce(int),
         vol.Optional("minutes"): vol.Coerce(int),
         vol.Optional("seconds"): vol.Coerce(int),
     }
@@ -167,7 +177,11 @@ class TimerAddHandler(_Handler):
 
     async def async_handle(self, intent_obj: intent.Intent):
         slots = self.async_validate_slots(intent_obj.slots)
-        extra = _slot(slots, "minutes") * 60 + _slot(slots, "seconds")
+        extra = (
+            _slot(slots, "hours") * 3600
+            + _slot(slots, "minutes") * 60
+            + _slot(slots, "seconds")
+        )
         name = str(slots.get("name", {}).get("value", "") or "").strip()
         timer = self._runtime.timers.find(name or None)
         if timer is None:

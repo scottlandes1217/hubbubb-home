@@ -1,49 +1,104 @@
+# Named kitchen timers ("set a 10 minute timer for the pasta"). These
+# deliberately SHADOW the built-in Assist timer intents (custom sentences win
+# over built-ins): built-in voice timers live only inside the satellite and
+# are invisible to dashboards, so these route to the integration's timer pool
+# instead. A phrasing that slips past this grammar still falls through to the
+# built-in device timer - it rings on the satellite but won't show on the
+# dashboard. Timer names are wildcards; durations are hassil ranges. This
+# grammar is lifted from a long-lived production setup, hassil-verified.
 language: en
-intents:
-  HubbubbTimerStatus:
-    data:
-      - sentences:
-          - "(what|how much) time (is left|remains)"
-          - "(check|what about) (my|the) timers"
-          - "how (long|much longer) (on|for) (my|the) timer"
-          - "timer status"
-  HubbubbTimerCancel:
-    data:
-      # Bare form before the named form, or the wildcard swallows "the".
-      - sentences:
-          - "(cancel|stop|clear) (the|my|) timer"
-          - "(cancel|stop) all (the|my|) timers"
-      - sentences:
-          - "(cancel|stop) the {name} timer"
-  HubbubbTimerAdd:
-    data:
-      - sentences:
-          - "add {minutes} (minute|minutes) to (the|my|) timer"
-          - "(give me|add) another {minutes} (minute|minutes)"
-          - "add {seconds} (second|seconds) to (the|my|) timer"
-  HubbubbTimerStart:
-    data:
-      - sentences:
-          - "(set|start) a timer for {minutes} (minute|minutes)"
-          - "(set|start) a timer for {seconds} (second|seconds)"
-          - "(set|start) a timer for {hours} (hour|hours)"
-          - "(set|start) a {minutes} minute timer"
-          - "time {minutes} (minute|minutes)"
-      - sentences:
-          - "(set|start) a timer for {name} for {minutes} (minute|minutes)"
-          - "(set|start) a {minutes} minute timer for {name}"
 lists:
-  name:
-    wildcard: true
-  seconds:
+  hours:
     range:
-      from: 5
-      to: 59
+      from: 1
+      to: 24
   minutes:
     range:
       from: 1
       to: 180
-  hours:
+  seconds:
     range:
-      from: 1
-      to: 12
+      from: 5
+      to: 300
+  name:
+    wildcard: true
+# Each unit as "10 minute", "10-minute" (cloud STT hyphenates compound
+# modifiers) or "ten minute" - the [-] and plain forms must be separate
+# alternatives because a bare {slot}[-]unit stops matching word numbers.
+expansion_rules:
+  min_u: "({minutes} minute[s]|{minutes}[-]minute[s])"
+  hr_u: "({hours} hour[s]|{hours}[-]hour[s])"
+  sec_u: "({seconds} second[s]|{seconds}[-]second[s])"
+intents:
+  HubbubbTimerStart:
+    data:
+      # "half an hour" / "an hour" have no digits for the range lists, so
+      # they get their own blocks with fixed slots.
+      - sentences:
+          - "(set|start|create|make) [me] [a] [new] timer for half an hour [for [the] {name}]"
+          - "(set|start|create|make) [me] [a] [new] half [an] hour timer [for [the] {name}]"
+          - "(set|start|create|make) [me] [a] [new] half[-]hour timer [for [the] {name}]"
+        slots:
+          minutes: 30
+      - sentences:
+          - "(set|start|create|make) [me] [a] [new] timer for (an|one) hour [for [the] {name}]"
+          - "(set|start|create|make) [me] [a] [new] one[-]hour timer [for [the] {name}]"
+        slots:
+          hours: 1
+      - sentences:
+          - "(set|start|create|make) [me] [a] [new] <hr_u> and <min_u> timer [for [the] {name}]"
+          - "(set|start|create|make) [me] [a] [new] <min_u> and <sec_u> timer [for [the] {name}]"
+          - "(set|start|create|make) [me] [a] [new] <min_u> timer [for [the] {name}]"
+          - "(set|start|create|make) [me] [a] [new] <hr_u> timer [for [the] {name}]"
+          - "(set|start|create|make) [me] [a] [new] <sec_u> timer [for [the] {name}]"
+          - "(set|start|create|make) [me] [a] [new] timer for <hr_u> and <min_u> [for [the] {name}]"
+          - "(set|start|create|make) [me] [a] [new] timer for <min_u> [for [the] {name}]"
+          - "(set|start|create|make) [me] [a] [new] timer for <hr_u> [for [the] {name}]"
+          - "(set|start|create|make) [me] [a] [new] timer for <sec_u> [for [the] {name}]"
+          - "(set|start|create|make) [me] [a] [new] {name} timer for <hr_u> and <min_u>"
+          - "(set|start|create|make) [me] [a] [new] {name} timer for <min_u>"
+          - "(set|start|create|make) [me] [a] [new] {name} timer for <hr_u>"
+          - "(set|start|create|make) [me] [a] [new] {name} timer for <sec_u>"
+
+  HubbubbTimerCancel:
+    data:
+      # "all" first so the {name} wildcard can never swallow it.
+      - sentences:
+          - "(cancel|stop|clear|remove|delete|end|kill) all [(the|my|of the|of my)] timers"
+        slots:
+          all: true
+      # Bare form BEFORE the named form, or the {name} wildcard eats the
+      # article ("cancel the timer" -> name='the') - verified with hassil.
+      - sentences:
+          - "(cancel|stop|clear|remove|delete|end|kill) (the|my|that) timer"
+      - sentences:
+          - "(cancel|stop|clear|remove|delete|end|kill) [the|my] {name} timer"
+          - "(cancel|stop|clear|remove|delete|end|kill) [the] timer (for|called|named) [the] {name}"
+
+  HubbubbTimerAdd:
+    data:
+      # Bare forms first - see the cancel note about wildcard article-eating.
+      - sentences:
+          - "add {minutes} [(more|extra)] minute[s] to (the|my) timer"
+          - "add {hours} [(more|extra)] hour[s] to (the|my) timer"
+          - "add {seconds} [(more|extra)] second[s] to (the|my) timer"
+          - "(give|put) (the|my) timer another {minutes} minute[s]"
+      - sentences:
+          - "add {minutes} [(more|extra)] minute[s] to [the|my] {name} timer"
+          - "add {hours} [(more|extra)] hour[s] to [the|my] {name} timer"
+          - "add {seconds} [(more|extra)] second[s] to [the|my] {name} timer"
+          - "(give|put) [the|my] {name} timer another {minutes} minute[s]"
+
+  HubbubbTimerStatus:
+    data:
+      # Bare forms first - see the cancel note about wildcard article-eating.
+      - sentences:
+          - "how (much time|long) [is] (left|remaining) on (the|my) timer"
+          - "(what|which) timers (are|do I have) (running|active|set|going)"
+          - "(what's|what is|check) [the] (status of|time [left] on) (the|my) timer[s]"
+          - "(list|check) [my|the] [active|running] timers"
+          - "do I have any timers [(running|active|going|set)]"
+      - sentences:
+          - "how (much time|long) [is] (left|remaining) on [the|my] {name} timer"
+          - "how (much time|long) does [the|my] {name} timer have (left|remaining)"
+          - "(what's|what is|check) [the] (status of|time [left] on) [the|my] {name} timer"
