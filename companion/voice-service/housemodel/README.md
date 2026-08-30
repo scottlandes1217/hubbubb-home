@@ -9,7 +9,9 @@ stock model fumbles — and installs the result in ollama as
     .venv/bin/python train_house.py           # the real run
 
 `--smoke` runs the entire chain — dataset from the live registries, a
-~20-iteration adapter, fuse + dequantize, GGUF export, `ollama create`,
+~20-iteration adapter, fuse + dequantize, `ollama create` straight from
+the fused safetensors (mlx's GGUF export refuses dequantized weights, so
+ollama's native safetensors import + `--quantize q4_K_M` is the path),
 one answered chat — so every moving part is proven before you spend an
 hour on a real run. A full run (600 iterations over a few hundred
 house-generated conversations) is roughly **45–90 minutes** on an

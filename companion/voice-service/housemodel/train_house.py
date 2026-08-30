@@ -68,6 +68,13 @@ def main():
 
     run([PYTHON, HERE / "dataset.py"] + (["--smoke"] if args.smoke else []))
 
+    # mlx_lm's training download skips cosmetic files (.gitattributes,
+    # README), but fuse re-resolves the snapshot offline and newer
+    # huggingface_hub refuses an "incomplete" cache. Complete it up front.
+    run([PYTHON, "-c",
+         "from huggingface_hub import snapshot_download; "
+         f"snapshot_download('{BASE}')"])
+
     for path in (ADAPTER, FUSED):
         shutil.rmtree(path, ignore_errors=True)
     run([PYTHON, "-m", "mlx_lm", "lora",
@@ -80,15 +87,16 @@ def main():
          "--steps-per-report", "10",
          "--save-every", str(iters)])
 
-    gguf = "ggml-model-f16.gguf"
+    # No --export-gguf: mlx's save_gguf refuses the dequantized weights
+    # ("can only serialize row-major arrays"). ollama imports llama-family
+    # safetensors directly, so the fused directory is the model.
     run([PYTHON, "-m", "mlx_lm", "fuse",
          "--model", BASE, "--adapter-path", ADAPTER,
-         "--save-path", FUSED, "--dequantize",
-         "--export-gguf", "--gguf-path", gguf])
+         "--save-path", FUSED, "--dequantize"])
 
     modelfile = WORK / "Modelfile"
     modelfile.write_text(
-        f"FROM {FUSED / gguf}\n" + stock_modelfile_tail() + "\n")
+        f"FROM {FUSED}\n" + stock_modelfile_tail() + "\n")
     # fp16 import; quantize back down so it serves at llama3.2:3b speeds.
     try:
         run([OLLAMA, "create", "jarvis-house", "-f", modelfile,
