@@ -26,6 +26,24 @@ CONF_NOTIFY = "notify_service"
 # arrives later through the message webhook. "" = silent handoff.
 CONF_ACK = "ack"
 DEFAULT_ACK = "On it."
+# Quiet hours: between these times, webhook announcements are never spoken or
+# put on the bus - they fall through to the passive phone push instead. Timers
+# and the scheduled briefing are unaffected: a 3am timer was set on purpose.
+CONF_QUIET_START = "quiet_start"
+CONF_QUIET_END = "quiet_end"
+DEFAULT_QUIET_START = "22:00:00"
+DEFAULT_QUIET_END = "08:00:00"
+
+
+def in_quiet_window(minute: int, start: tuple, end: tuple) -> bool:
+    """Is minute-of-day inside the (h, m, s) window? It may cross midnight."""
+    begin = start[0] * 60 + start[1]
+    finish = end[0] * 60 + end[1]
+    if begin == finish:  # a zero-length window means quiet hours are off
+        return False
+    if begin < finish:
+        return begin <= minute < finish
+    return minute >= begin or minute < finish
 
 # Legacy single toggle (pre-0.17); read as the default for all three below.
 CONF_SENTENCES = "install_sentences"

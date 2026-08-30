@@ -549,6 +549,19 @@ def test_sentence_template_takes_the_room_list():
         assert f"{wildcard}:\n    wildcard: true" in out, wildcard
 
 
+def test_quiet_window_crosses_midnight():
+    from hubbubb_home.const import in_quiet_window
+    ten_pm, eight_am = (22, 0, 0), (8, 0, 0)
+    assert in_quiet_window(23 * 60, ten_pm, eight_am)           # 11pm
+    assert in_quiet_window(3 * 60, ten_pm, eight_am)            # 3am
+    assert not in_quiet_window(12 * 60, ten_pm, eight_am)       # noon
+    assert not in_quiet_window(8 * 60, ten_pm, eight_am)        # 8am sharp: morning
+    assert in_quiet_window(22 * 60, ten_pm, eight_am)           # 10pm sharp: quiet
+    # A daytime window works too, and equal times mean "off".
+    assert in_quiet_window(13 * 60, (12, 0, 0), (14, 0, 0))
+    assert not in_quiet_window(3 * 60, (8, 0, 0), (8, 0, 0))
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

@@ -54,6 +54,10 @@ from .const import (
     CONF_NIGHTLY_TIME,
     CONF_NOTIFY,
     CONF_PROMPT,
+    CONF_QUIET_END,
+    CONF_QUIET_START,
+    DEFAULT_QUIET_END,
+    DEFAULT_QUIET_START,
     CONF_SENTENCES,
     CONF_SENTENCES_SECTION,
     CONF_SPEAKER_MAP,
@@ -244,6 +248,12 @@ class HubbubbHomeOptionsFlow(OptionsFlow):
                         {
                             vol.Optional(CONF_NOTIFY): str,
                             vol.Optional(CONF_ACK, default=DEFAULT_ACK): str,
+                            vol.Optional(
+                                CONF_QUIET_START, default=DEFAULT_QUIET_START
+                            ): TimeSelector(),
+                            vol.Optional(
+                                CONF_QUIET_END, default=DEFAULT_QUIET_END
+                            ): TimeSelector(),
                         }
                     ),
                     {"collapsed": True},

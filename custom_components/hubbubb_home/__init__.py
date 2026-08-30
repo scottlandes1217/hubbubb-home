@@ -64,7 +64,12 @@ from .const import (
     DEFAULT_NIGHTLY_TIME,
     CONF_ANNOUNCE,
     CONF_NOTIFY,
+    CONF_QUIET_END,
+    CONF_QUIET_START,
     CONF_SENTENCES_SECTION,
+    DEFAULT_QUIET_END,
+    DEFAULT_QUIET_START,
+    in_quiet_window,
     CONF_SPEAKER_MAP,
     CONF_VOICE,
     CONF_VOICE_URL,
@@ -563,15 +568,19 @@ def _async_register_webhook(hass: HomeAssistant, runtime: Runtime) -> None:
         if not message:
             return
 
-        if data.get("ask"):
-            await _announce(runtime, message)
-            return
+        # Quiet hours: nothing audible, nothing on screens - only the passive
+        # push below. "ask" answers included: the question was asked hours
+        # ago if its answer is arriving at 3am.
+        if not _quiet_now(runtime):
+            if data.get("ask"):
+                await _announce(runtime, message)
+                return
 
-        switch = runtime.entity_id("agent_announcements")
-        state = hass.states.get(switch) if switch else None
-        if state is None or state.state == "on":
-            hass.bus.async_fire(EVENT_MESSAGE, data)
-            return
+            switch = runtime.entity_id("agent_announcements")
+            state = hass.states.get(switch) if switch else None
+            if state is None or state.state == "on":
+                hass.bus.async_fire(EVENT_MESSAGE, data)
+                return
 
         notify = runtime.option(CONF_ANNOUNCE, CONF_NOTIFY)
         if not notify or "." not in notify:
@@ -667,6 +676,18 @@ def _hms(value: str) -> tuple[int, int, int]:
         return tuple(int(p) for p in parts)  # type: ignore[return-value]
     except ValueError:
         return (3, 30, 0)
+
+
+def _quiet_now(runtime: Runtime) -> bool:
+    """Inside the announcement quiet hours? The window crosses midnight."""
+    now = dt_util.now()
+    return in_quiet_window(
+        now.hour * 60 + now.minute,
+        _hms(runtime.option(CONF_ANNOUNCE, CONF_QUIET_START,
+                            DEFAULT_QUIET_START)),
+        _hms(runtime.option(CONF_ANNOUNCE, CONF_QUIET_END,
+                            DEFAULT_QUIET_END)),
+    )
 
 
 async def _sweep(runtime: Runtime) -> None:

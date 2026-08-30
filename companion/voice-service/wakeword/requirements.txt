@@ -1,0 +1,10 @@
+# Python 3.12 via uv; system 3.14 has no tensorflow wheels yet.
+# microwakeword itself is installed editable from a clone (its wheel misses
+# the microwakeword.audio subpackage):
+#   git clone https://github.com/kahrendt/microWakeWord ~/.hubbubb-voice/wakewords/cache/microWakeWord
+#   uv pip install -e ~/.hubbubb-voice/wakewords/cache/microWakeWord
+torch
+torchaudio
+piper-phonemize-cross==1.2.1
+pyyaml
+tensorboard

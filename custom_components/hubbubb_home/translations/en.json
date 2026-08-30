@@ -67,11 +67,14 @@
             "description": "How a finished coding-agent turn reaches you.",
             "data": {
               "notify_service": "Phone push when the announcement switch is off",
-              "ack": "Spoken when speech is handed to the coding agent"
+              "ack": "Spoken when speech is handed to the coding agent",
+              "quiet_start": "Quiet hours start",
+              "quiet_end": "Quiet hours end"
             },
             "data_description": {
               "notify_service": "A notify service like notify.mobile_app_your_phone. Blank means switched-off announcements are simply dropped.",
-              "ack": "The real answer is announced later, when the turn actually finishes. Blank for a silent handoff."
+              "ack": "The real answer is announced later, when the turn actually finishes. Blank for a silent handoff.",
+              "quiet_start": "Between these times, announcements are pushed silently to the phone instead of spoken. Set both the same to disable."
             }
           },
           "overnight": {

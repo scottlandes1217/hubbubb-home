@@ -61,3 +61,12 @@ expect a tuning pass. "Hey Hubbubb" has the opposite problem: "Hubbubb" is
 not a word Piper's voices know, so listen to a few generated samples in the
 notebook and spell it phonetically ("hubbub", "huh bub") if the
 pronunciation comes out wrong.
+
+## Training locally on the Mac
+
+The whole notebook recipe also runs on this machine as one command — no
+Colab, no hand-holding: see [wakeword/README.md](wakeword/README.md).
+`train.py "<phrase>" --smoke` proves the pipeline in minutes;
+without `--smoke` it produces a real model (hours, ~3 GB of cached
+downloads) and prints `TRAINED <manifest>` when the tflite + manifest pair
+is ready for the puck.
