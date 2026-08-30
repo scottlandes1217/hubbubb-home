@@ -83,6 +83,23 @@ class _RuntimeTool(llm.Tool):
         )
         return person
 
+    def _guest(self, llm_context) -> bool:
+        """Speaker ID is on and heard nobody it knows - a guest, not a blank.
+
+        Without speaker ID configured there are no guests, only a house that
+        never knows who speaks; everything keeps its old open behavior.
+        """
+        return (
+            self._runtime.speakers.configured
+            and self._speaker(llm_context) is None
+        )
+
+
+_GUEST_ERROR = (
+    "The speaker is not recognized, so this stays closed to guests. Ask who "
+    "is speaking; once they say (identify_speaker), try again."
+)
+
 
 class RememberTool(_RuntimeTool):
     name = "remember"
@@ -105,6 +122,10 @@ class RememberTool(_RuntimeTool):
     async def async_call(
         self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context
     ) -> JsonObjectType:
+        # A guest must not write to the house's memory - household facts
+        # included, or "the wifi password is hunter2" from a stranger sticks.
+        if self._guest(llm_context):
+            return {"error": _GUEST_ERROR}
         person = self._speaker(llm_context) or ""
         if not tool_input.tool_args.get("personal", True):
             person = ""
@@ -220,6 +241,9 @@ class EscalateTool(_RuntimeTool):
     async def async_call(
         self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context
     ) -> JsonObjectType:
+        # Guests don't drive the coding agent.
+        if self._guest(llm_context):
+            return {"error": _GUEST_ERROR}
         text = tool_input.tool_args["request"]
         if person := self._speaker(llm_context):
             text = f"[{person}] {text}"

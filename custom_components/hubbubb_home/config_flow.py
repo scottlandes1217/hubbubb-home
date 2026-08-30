@@ -42,6 +42,7 @@ from .const import (
     CONF_BRIEFING_TARGET,
     CONF_BRIEFING_TIME,
     CONF_CALENDARS,
+    CONF_PERSON_CALENDARS,
     CONF_COMPANION,
     CONF_COMPANION_TOKEN,
     CONF_COMPANION_URL,
@@ -303,6 +304,13 @@ class HubbubbHomeOptionsFlow(OptionsFlow):
                             vol.Optional(CONF_CALENDARS): EntitySelector(
                                 EntitySelectorConfig(
                                     domain="calendar", multiple=True
+                                )
+                            ),
+                            vol.Optional(
+                                CONF_PERSON_CALENDARS, default=""
+                            ): TextSelector(
+                                TextSelectorConfig(
+                                    type=TextSelectorType.TEXT, multiline=True
                                 )
                             ),
                         }

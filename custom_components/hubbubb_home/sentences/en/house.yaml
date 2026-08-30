@@ -1,5 +1,13 @@
 language: en
 intents:
+  # Bare forms first - the wildcard rules further down eat anything.
+  HubbubbMyDay:
+    data:
+      - sentences:
+          - "(what's|what is) (my day|on my calendar) [looking like] [today]"
+          - "(what's|what is) my (day|schedule) today"
+          - "(what do I have|what's) on today"
+          - "(read|what's) my calendar"
   HubbubbBuildOn:
     data:
       - sentences:
@@ -28,6 +36,18 @@ intents:
           - "ask (hubbubb|hubbub|hub bub) {request}"
           - "(check|ask) (hubbubb|hubbub|hub bub) (for|about) {request}"
           - "(hubbubb|hubbub|hub bub) {request}"
+  # Two wildcards, so the literal "that" between them is mandatory - it is
+  # what stops {room} eating the whole sentence. Last in the file.
+  HubbubbIntercom:
+    data:
+      - sentences:
+          - "tell (the |){room} that {message}"
+          - "announce to (the |){room} that {message}"
+          - "(tell|say to) (the |){room} to {message}"
 lists:
   request:
+    wildcard: true
+  room:
+    wildcard: true
+  message:
     wildcard: true

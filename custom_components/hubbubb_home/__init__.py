@@ -13,7 +13,6 @@ from __future__ import annotations
 import logging
 import shutil
 from dataclasses import dataclass, field
-from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +55,7 @@ from .const import (
     CONF_IGNORE,
     CONF_NIGHTLY_ENABLED,
     CONF_NIGHTLY_TIME,
+    CONF_PERSON_CALENDARS,
     CONF_PROMPT,
     CONF_SENTENCES,
     CONF_TTS,
@@ -86,7 +86,12 @@ from .const import (
 from . import appletv
 from .approvals import Approvals
 from .hubbubb import HubbubbClient, HubbubbError, parse_people
-from .intents import ALL_INTENTS, async_register_all
+from .intents import (
+    ALL_INTENTS,
+    async_register_all,
+    async_today_events,
+    parse_calendar_map,
+)
 from .llm_api import HubbubbAPI
 from .memory import Memory
 from .speakers import SpeakerBook, async_register_webhook as _speaker_webhook
@@ -765,34 +770,23 @@ async def _briefing_text(runtime: Runtime) -> str:
 
     calendars = runtime.option("briefing", CONF_CALENDARS) or []
     if calendars:
-        try:
-            events = await hass.services.async_call(
-                "calendar",
-                "get_events",
-                {
-                    "entity_id": calendars,
-                    "start_date_time": dt_util.now().isoformat(),
-                    # End of today, not twenty-four hours out: a duration
-                    # window announces tomorrow morning's dentist as "today".
-                    "end_date_time": (
-                        dt_util.start_of_local_day() + timedelta(days=1)
-                    ).isoformat(),
-                },
-                blocking=True,
-                return_response=True,
-            )
-        except HomeAssistantError as err:
-            _LOGGER.debug("no calendar for the briefing: %s", err)
-            events = {}
-        titles = [
-            e["summary"]
-            for cal in (events or {}).values()
-            for e in cal.get("events", [])
-        ][:4]
+        titles = await async_today_events(hass, calendars)
         if titles:
             parts.append("Today: " + ", then ".join(titles) + ".")
         else:
             parts.append("Nothing in the calendar today.")
+
+    # Each person's own day, by name. People with nothing on stay unmentioned
+    # - "Vega: nothing" read aloud every morning is noise, not a briefing.
+    people = parse_calendar_map(
+        runtime.option("briefing", CONF_PERSON_CALENDARS, "")
+    )
+    for person, theirs in people.items():
+        titles = await async_today_events(hass, theirs)
+        if titles:
+            parts.append(
+                f"{person.title()}: " + ", then ".join(titles) + "."
+            )
 
     parts.append(runtime.findings.spoken(runtime.name))
     return " ".join(parts)

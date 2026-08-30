@@ -78,6 +78,9 @@ CONF_BRIEFING_TARGET = "briefing_target"
 CONF_TTS = "tts_entity"
 CONF_WEATHER = "weather_entity"
 CONF_CALENDARS = "calendars"
+# "Person Name: calendar.a, calendar.b" lines - the briefing reads each
+# person their own day, and "what's my day" answers with theirs.
+CONF_PERSON_CALENDARS = "person_calendars"
 
 # --- defaults ----------------------------------------------------------------
 DEFAULT_NAME = "Hubbubb"

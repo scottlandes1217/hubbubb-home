@@ -146,9 +146,12 @@ replaced.
 > "What do you remember about the pool?"
 > "Set a timer for ten minutes" · "How long's left?" · "Add five minutes"
 > "How's the house?" · "Did anything go quiet?"
-> "This is Scott" · "Who am I?"
+> "This is Scott" · "Who am I?" · "What's my day looking like?"
+> "Tell the bedroom that dinner's ready"
 > "Build mode on"
 
+"Tell the *room* that..." announces on whichever voice satellite sits in that
+Home Assistant area, prefixed with who said it when the house knows.
 Everything else falls through to your conversation agent.
 
 ### Announcements and quiet hours
@@ -165,7 +168,10 @@ purpose.
 
 The **morning briefing** (its own options section) speaks the weather, the
 day's calendar and the overnight sweep's count at a time you pick, through
-the satellites or speakers you pick.
+the satellites or speakers you pick. Give people their own calendars
+(*per-person calendars*, one `Name: calendar.theirs` line each) and the
+briefing adds a line per person with plans today — and "what's my day"
+answers each speaker with *their* diary, once the house knows who's asking.
 
 ### Apple TV, including music
 
@@ -248,6 +254,11 @@ identification* options section and:
 - the language model is told who is speaking (or told to ask, when the house
   isn't sure — "this is Scott" answers it and trains the voice profile);
 - coding-agent handoffs are prefixed with the speaker's name.
+
+A voice it does not recognize is a **guest**: house basics and questions
+work, but memories don't record, the coding agent won't take their requests,
+and the assistant introduces itself and asks who's speaking before anything
+personal. "This is ..." graduates them.
 
 The *device owners* map is the no-ML fallback: an assist device in someone's
 own room probably hears them. Leave the URL blank and all of this is off —

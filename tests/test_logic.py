@@ -51,6 +51,7 @@ except ImportError:
     )
 
 _stub("homeassistant")
+_stub("homeassistant.exceptions", HomeAssistantError=Exception)
 _components = _stub("homeassistant.components")
 _components.webhook = _stub(
     "homeassistant.components.webhook",
@@ -820,6 +821,107 @@ def test_sentence_template_takes_the_room_list():
     # The greedy wildcards stay declared, or hassil refuses the whole file.
     for wildcard in ("ma_query", "ma_song", "ma_artist", "atv_app", "atv_show"):
         assert f"{wildcard}:\n    wildcard: true" in out, wildcard
+
+
+def test_guest_tier_refusal_matrix():
+    import asyncio
+    import time as _time
+
+    from hubbubb_home.llm_api import EscalateTool, RememberTool
+
+    class _Memory:
+        def __init__(self):
+            self.added = []
+
+        async def async_add(self, fact, person=""):
+            self.added.append((fact, person))
+            return fact
+
+    class _Companion:
+        def __init__(self):
+            self.sent = []
+            self.configured = True
+
+        async def async_call(self, endpoint, payload, method="POST"):
+            self.sent.append(payload["text"])
+
+    def runtime(book):
+        return types.SimpleNamespace(
+            memory=_Memory(), companion=_Companion(), speakers=book
+        )
+
+    def remember(rt):
+        return asyncio.run(RememberTool(rt).async_call(
+            None, types.SimpleNamespace(tool_args={"fact": "the gate code is 4"}),
+            None))
+
+    def escalate(rt):
+        return asyncio.run(EscalateTool(rt).async_call(
+            None, types.SimpleNamespace(tool_args={"request": "refactor it"}),
+            None))
+
+    # Speaker ID on, nobody recognized: a guest. Both stay closed, nothing
+    # stored, nothing handed to the coding agent.
+    guest = runtime(SpeakerBook(None, "http://svc:10301", ""))
+    assert "error" in remember(guest) and guest.memory.added == []
+    assert "error" in escalate(guest) and guest.companion.sent == []
+
+    # Speaker ID on and the voice known: both open, escalation attributed.
+    known_book = SpeakerBook(None, "http://svc:10301", "")
+    known_book.record({"person": "Scott", "confidence": 0.9, "ts": _time.time()})
+    known = runtime(known_book)
+    assert remember(known)["stored"]
+    assert escalate(known) == {"handed_off": True}
+    assert known.companion.sent == ["[Scott] refactor it"]
+
+    # Speaker ID off: exactly the old open behavior, household memory.
+    off = runtime(SpeakerBook(None, "", ""))
+    assert remember(off)["for"] == "the household"
+    assert escalate(off) == {"handed_off": True}
+    # And the guest prompt line only exists when speaker ID is on.
+    assert "guest" in SpeakerBook(None, "http://svc:10301", "").prompt_line()
+    assert "guest" not in SpeakerBook(None, "", "").prompt_line()
+
+
+def test_person_calendar_map_parses_lines():
+    from hubbubb_home.intents import parse_calendar_map
+
+    people = parse_calendar_map(
+        "Scott: calendar.scott_work, calendar.family\n"
+        "bad line\n"
+        "Vega: calendar.vega\n"
+    )
+    assert people == {
+        "scott": ["calendar.scott_work", "calendar.family"],
+        "vega": ["calendar.vega"],
+    }
+    assert parse_calendar_map("") == {}
+
+
+def test_intercom_finds_satellites_by_area():
+    from hubbubb_home.intents import satellites_in_area
+
+    areas = [types.SimpleNamespace(id="a1", name="Bedroom"),
+             types.SimpleNamespace(id="a2", name="Living Room")]
+    entities = [
+        # In the area through its device.
+        types.SimpleNamespace(entity_id="assist_satellite.puck",
+                              area_id=None, device_id="d1"),
+        # Pinned to the area directly, overriding its device.
+        types.SimpleNamespace(entity_id="assist_satellite.puck2",
+                              area_id="a2", device_id="d1"),
+        # Right area, wrong domain.
+        types.SimpleNamespace(entity_id="light.bedroom",
+                              area_id="a1", device_id=None),
+    ]
+    devices = {"d1": "a1"}
+    assert satellites_in_area("bedroom", areas, entities, devices) == [
+        "assist_satellite.puck"
+    ]
+    assert satellites_in_area("living  room", areas, entities, devices) == [
+        "assist_satellite.puck2"
+    ]
+    assert satellites_in_area("garage", areas, entities, devices) == []
 
 
 def test_quiet_window_crosses_midnight():

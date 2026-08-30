@@ -103,6 +103,16 @@ class SpeakerBook:
             return f"The person speaking is {person}."
         if person:
             return f"The speaker is probably {person} (not confirmed by voice)."
+        if self.configured:
+            # Speaker ID is on and heard nobody it knows: treat them as a
+            # guest until they say who they are.
+            return (
+                "You do not recognize this speaker - treat them as a guest. "
+                "Introduce yourself when it feels natural, and answer "
+                "questions and house basics freely. Do not store memories, "
+                "touch anything personal, or act on their behalf until they "
+                "say who they are ('this is ...')."
+            )
         return (
             "You do not know who is speaking. That is fine for questions and "
             "commands - answer them normally. Only before storing a personal "

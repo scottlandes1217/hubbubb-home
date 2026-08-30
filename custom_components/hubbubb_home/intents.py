@@ -10,14 +10,17 @@ from __future__ import annotations
 
 import logging
 import re
+from datetime import timedelta
 
 import voluptuous as vol
 from homeassistant.core import HomeAssistant
+from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv, intent
+from homeassistant.util import dt as dt_util
 
-from .const import DOMAIN
+from .const import CONF_PERSON_CALENDARS, DOMAIN
 from .hubbubb import HubbubbError
-from .speakers import CONFIDENT, SpeakerServiceError
+from .speakers import CONFIDENT, SpeakerServiceError, parse_map
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -34,12 +37,15 @@ INTENT_FINDINGS = "HubbubbFindings"
 INTENT_HUBBUBB = "HubbubbAsk"
 INTENT_IDENTIFY = "HubbubbIdentify"
 INTENT_WHO = "HubbubbWhoAmI"
+INTENT_MY_DAY = "HubbubbMyDay"
+INTENT_INTERCOM = "HubbubbIntercom"
 
 ALL_INTENTS = (
     INTENT_REMEMBER, INTENT_RECALL, INTENT_FORGET,
     INTENT_TIMER_START, INTENT_TIMER_CANCEL, INTENT_TIMER_ADD,
     INTENT_TIMER_STATUS, INTENT_BUILD_ON, INTENT_BUILD_OFF,
     INTENT_FINDINGS, INTENT_HUBBUBB, INTENT_IDENTIFY, INTENT_WHO,
+    INTENT_MY_DAY, INTENT_INTERCOM,
 )
 
 
@@ -59,8 +65,63 @@ def async_register_all(hass: HomeAssistant, runtime) -> None:
         AskHubbubbHandler(runtime),
         IdentifyHandler(runtime),
         WhoAmIHandler(runtime),
+        MyDayHandler(runtime),
+        IntercomHandler(runtime),
     ):
         intent.async_register(hass, handler)
+
+
+def parse_calendar_map(text: str) -> dict[str, list[str]]:
+    """'Person: calendar.a, calendar.b' lines -> {person(lower): [entities]}."""
+    return {
+        person.lower(): [c.strip() for c in cals.split(",") if c.strip()]
+        for person, cals in parse_map(text or "").items()
+    }
+
+
+async def async_today_events(hass: HomeAssistant, calendars: list[str]) -> list[str]:
+    """The rest of today's event titles across some calendars, at most four."""
+    try:
+        events = await hass.services.async_call(
+            "calendar",
+            "get_events",
+            {
+                "entity_id": calendars,
+                "start_date_time": dt_util.now().isoformat(),
+                # End of today, not twenty-four hours out: a duration window
+                # announces tomorrow morning's dentist as "today".
+                "end_date_time": (
+                    dt_util.start_of_local_day() + timedelta(days=1)
+                ).isoformat(),
+            },
+            blocking=True,
+            return_response=True,
+        )
+    except HomeAssistantError as err:
+        _LOGGER.debug("no calendar answer: %s", err)
+        events = {}
+    return [
+        e["summary"]
+        for cal in (events or {}).values()
+        for e in cal.get("events", [])
+    ][:4]
+
+
+def satellites_in_area(area_name: str, areas, entities, device_areas) -> list[str]:
+    """assist_satellite entities whose entity or device sits in the named area."""
+    wanted = " ".join(area_name.lower().split())
+    area_id = next(
+        (a.id for a in areas if " ".join(a.name.lower().split()) == wanted),
+        None,
+    )
+    if area_id is None:
+        return []
+    return [
+        e.entity_id
+        for e in entities
+        if e.entity_id.startswith("assist_satellite.")
+        and (e.area_id or device_areas.get(e.device_id)) == area_id
+    ]
 
 
 class _Handler(intent.IntentHandler):
@@ -363,6 +424,81 @@ class WhoAmIHandler(_Handler):
             intent_obj, f"Probably {person}, but I haven't heard enough "
             "of your voice to be sure."
         )
+
+
+class MyDayHandler(_Handler):
+    intent_type = INTENT_MY_DAY
+    slot_schema = {}
+    description = "Read the speaker their own calendar for today"
+
+    async def async_handle(self, intent_obj: intent.Intent):
+        person, _, _ = self._speaker(intent_obj)
+        if person is None:
+            return self._say(
+                intent_obj,
+                "I'm not sure who's asking. Say: this is, and your name, "
+                "and I'll read yours.",
+            )
+        people = parse_calendar_map(
+            self._runtime.option("briefing", CONF_PERSON_CALENDARS, "")
+        )
+        calendars = people.get(person.lower())
+        if not calendars:
+            return self._say(
+                intent_obj, f"I don't have a calendar set up for {person}."
+            )
+        titles = await async_today_events(intent_obj.hass, calendars)
+        if not titles:
+            return self._say(
+                intent_obj, f"Nothing left on your calendar today, {person}."
+            )
+        return self._say(intent_obj, "Today: " + ", then ".join(titles) + ".")
+
+
+class IntercomHandler(_Handler):
+    intent_type = INTENT_INTERCOM
+    # "room", not "area": hassil has a built-in {area} list and a wildcard
+    # of the same name would fight it.
+    slot_schema = {
+        vol.Required("room"): cv.string,
+        vol.Required("message"): cv.string,
+    }
+    description = "Announce a message on another room's voice satellite"
+
+    async def async_handle(self, intent_obj: intent.Intent):
+        from homeassistant.helpers import (
+            area_registry as ar,
+            device_registry as dr,
+            entity_registry as er,
+        )
+
+        slots = self.async_validate_slots(intent_obj.slots)
+        area = str(slots["room"]["value"]).strip()
+        message = str(slots["message"]["value"]).strip()
+        hass = intent_obj.hass
+        satellites = satellites_in_area(
+            area,
+            ar.async_get(hass).async_list_areas(),
+            er.async_get(hass).entities.values(),
+            {d.id: d.area_id for d in dr.async_get(hass).devices.values()},
+        )
+        if not satellites:
+            return self._say(
+                intent_obj, f"There's no voice satellite in the {area}."
+            )
+        person, _, _ = self._speaker(intent_obj)
+        spoken = f"{person} says: {message}" if person else message
+        try:
+            await hass.services.async_call(
+                "assist_satellite",
+                "announce",
+                {"entity_id": satellites, "message": spoken},
+                blocking=False,
+            )
+        except HomeAssistantError as err:
+            _LOGGER.warning("intercom to %s failed: %s", area, err)
+            return self._say(intent_obj, "I couldn't reach that room.")
+        return self._say(intent_obj, "Passed along.")
 
 
 def _slot(slots: dict, key: str) -> int:
