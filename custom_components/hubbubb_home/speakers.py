@@ -86,8 +86,10 @@ class SpeakerBook:
         if person:
             return f"The speaker is probably {person} (not confirmed by voice)."
         return (
-            "You do not know who is speaking. Before storing a personal "
-            "memory or answering a personal question, ask who is speaking."
+            "You do not know who is speaking. That is fine for questions and "
+            "commands - answer them normally. Only before storing a personal "
+            "memory (a preference or fact about the speaker themselves) ask "
+            "who is speaking."
         )
 
     async def async_label(self, person: str) -> None:

@@ -192,6 +192,11 @@ def admin_app(service: Service) -> web.Application:
         person = str(data.get("person") or "").strip()
         if not person:
             raise web.HTTPBadRequest(text="person is required")
+        # A name is a few words; a whole mis-captured transcript is not, and
+        # once enrolled it haunts every later match. Refuse rather than trim -
+        # only the caller knows which words were the name.
+        if len(person) > 40 or len(person.split()) > 3:
+            raise web.HTTPBadRequest(text="that does not look like a name")
         try:
             return web.json_response(service.label(person))
         except ValueError as err:

@@ -9,6 +9,7 @@ falls through to whichever conversation agent is configured.
 from __future__ import annotations
 
 import logging
+import re
 
 import voluptuous as vol
 from homeassistant.core import HomeAssistant
@@ -311,8 +312,12 @@ class IdentifyHandler(_Handler):
 
     async def async_handle(self, intent_obj: intent.Intent):
         slots = self.async_validate_slots(intent_obj.slots)
-        # STT hands names over lowercase; store them like names.
-        person = str(slots["person"]["value"]).strip().title()
+        # STT hands names over lowercase; store them like names. An open mic
+        # appends trailing speech to the wildcard ("scott. i'm very lucky
+        # that..."), and enrolling that as a name haunts every later match -
+        # keep the opening sentence, at most three words.
+        raw = str(slots["person"]["value"])
+        person = " ".join(re.split(r"[.,!?;]", raw)[0].split()[:3]).title()
         if not person:
             return self._say(intent_obj, "I didn't catch the name.")
         self._runtime.speakers.set_override(person)
