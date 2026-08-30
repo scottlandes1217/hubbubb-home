@@ -39,3 +39,25 @@ model speaker-independent. Mixing in real recordings of the household saying
 the phrase (the notebook accepts extra positive samples) biases it toward the
 voices that actually live here — fewer TV-triggered wakes, and it pairs
 naturally with the enrollment clips the speaker-ID service collects.
+
+## Two wake words at once
+
+The Voice PE runs two microWakeWord models side by side — the device page has
+a second **Wake word 2** select (shipped as "no wake word"). Two custom
+models can occupy both slots, so one puck can answer to two names.
+
+## This house's plan: "Jarvis" and "Hey Hubbubb"
+
+Both are custom phrases — neither is in the stock set — so each needs one
+notebook run as above, then both go into the puck's ESPHome config and each
+slot's select picks one.
+
+A caution on bare **"Jarvis"**: single-word wake models false-trigger far
+more than two-word ones, and this particular word comes up constantly in
+ordinary conversation *about* the assistant — every "ask Jarvis to..." said
+across the room becomes a wake. Train it with a high probability cutoff,
+keep the sensitivity select on its less-sensitive setting to start, and
+expect a tuning pass. "Hey Hubbubb" has the opposite problem: "Hubbubb" is
+not a word Piper's voices know, so listen to a few generated samples in the
+notebook and spell it phonetically ("hubbub", "huh bub") if the
+pronunciation comes out wrong.
