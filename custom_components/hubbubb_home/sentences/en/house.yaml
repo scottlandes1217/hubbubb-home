@@ -1,6 +1,18 @@
 language: en
 intents:
   # Bare forms first - the wildcard rules further down eat anything.
+  # Dismissals map to HA's built-in nevermind intent, so a false wake or a
+  # changed mind ends the turn locally instead of handing "nothing, cancel
+  # the request" to a language model that will try to do something with it.
+  HassNevermind:
+    data:
+      - sentences:
+          - "nothing[[,] (cancel|nevermind|never mind|forget) [it|that|the request]]"
+          - "cancel (that|it|the request)"
+          - "(nevermind|never mind|forget it|forget that)"
+          - "(no|nothing) thank you"
+          - "that (was|is) (all|it|nothing)"
+          - "(stop|go away|as you were)"
   HubbubbMyDay:
     data:
       - sentences:
