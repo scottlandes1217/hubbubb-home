@@ -449,7 +449,16 @@ class IdentifyHandler(_Handler):
         # that..."), and enrolling that as a name haunts every later match -
         # keep the opening sentence, at most three words.
         raw = str(slots["person"]["value"])
-        person = " ".join(re.split(r"[.,!?;]", raw)[0].split()[:3]).title()
+        # STT also runs sentences together with no punctuation ("scott how
+        # are you doing"), so stop at the first word no name contains.
+        words = re.split(r"[.,!?;]", raw)[0].split()
+        for stop, w in enumerate(words):
+            if w.lower() in ("how", "are", "is", "the", "and", "what",
+                             "can", "you", "i", "my", "please", "turn",
+                             "set", "hey"):
+                words = words[:stop]
+                break
+        person = " ".join(words[:3]).title()
         if not person:
             return self._say(intent_obj, "I didn't catch the name.")
         # The assistant's own name is what a mis-split wake word turns into
