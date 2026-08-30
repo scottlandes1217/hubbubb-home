@@ -64,3 +64,11 @@ curl -s -X POST localhost:10301/label -d '{"person":"Scott"}' # that was Scott
 
 A handful of utterances per person is enough to start; each person keeps
 their latest 40 fingerprints and the centroid tracks their voice over time.
+
+## A model tuned to the house
+
+`housemodel/` LoRA-tunes the local 3B on this house's own devices, rooms
+and phrasings and installs it in ollama as `jarvis-house` — right tool,
+right names, plain speech, no leaked JSON. `train_house.py --smoke`
+proves the chain in minutes; re-run after renaming devices. Details and
+honest quality notes: [housemodel/README.md](housemodel/README.md).

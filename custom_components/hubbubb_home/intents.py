@@ -381,6 +381,13 @@ class IdentifyHandler(_Handler):
         person = " ".join(re.split(r"[.,!?;]", raw)[0].split()[:3]).title()
         if not person:
             return self._say(intent_obj, "I didn't catch the name.")
+        # The assistant's own name is what a mis-split wake word turns into
+        # ("Jarvis, this is Scott" -> captured name "Jarvis"), and a profile
+        # by that name then swallows everybody's matches. Never enrollable.
+        if person.lower() == self._runtime.name.lower():
+            return self._say(
+                intent_obj, f"{person} is my name - tell me yours."
+            )
         self._runtime.speakers.set_override(person)
         # The override is personalization and stays immediate; the profile is
         # what verification leans on, so a listed person's own device must

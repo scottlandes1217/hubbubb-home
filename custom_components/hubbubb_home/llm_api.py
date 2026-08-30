@@ -200,6 +200,11 @@ class SetSpeakerTool(_RuntimeTool):
         self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context
     ) -> JsonObjectType:
         person = tool_input.tool_args["person"].strip()
+        # A mis-split wake word yields the assistant's own name; a profile by
+        # that name then swallows everybody's matches. Never enrollable.
+        if person.lower() == self._runtime.name.lower():
+            return {"error": f"{person} is the assistant's name, not a "
+                             "person's - ask who is speaking"}
         self._runtime.speakers.set_override(person)
         result: JsonObjectType = {"speaker": person}
         # The override is the personalization tier and stays immediate; the
