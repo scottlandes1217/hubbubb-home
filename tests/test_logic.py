@@ -85,10 +85,27 @@ except ImportError:
         In=lambda values: values,
         Coerce=lambda kind: kind,
         Schema=lambda *a, **k: None,
+        All=lambda *a, **k: None,
+        Length=lambda **k: None,
+        Range=lambda **k: None,
     )
+
+class _LLMAPI:
+    def __init__(self, **kwargs):
+        pass
+
 
 _helpers = _stub("homeassistant.helpers")
 _stub("homeassistant.helpers.event", async_track_point_in_time=_track_point_in_time)
+_stub(
+    "homeassistant.helpers.llm",
+    API=_LLMAPI,
+    Tool=object,
+    APIInstance=object,
+    LLMContext=object,
+    ToolInput=object,
+    async_register_api=lambda *a, **k: (lambda: None),
+)
 for _name, _attrs in {
     "area_registry": {},
     "device_registry": {},
@@ -331,6 +348,179 @@ def test_speaker_map_parses_forgivingly():
     )
     assert book.resolve("a1")[0] == "Scott"
     assert book.resolve("b2")[0] == "Vega"
+
+
+def test_speaker_events_need_the_token_when_one_is_set():
+    import time as _time
+
+    book = SpeakerBook(None, "", "", token="s3cret")
+    book.record({"person": "Mallory", "confidence": 0.99, "ts": _time.time()})
+    book.record({"person": "Mallory", "confidence": 0.99, "ts": _time.time(),
+                 "token": "wrong"})
+    assert book.resolve() == (None, 0.0, None)
+
+    book.record({"person": "Scott", "confidence": 0.9, "ts": _time.time(),
+                 "token": "s3cret"})
+    assert book.resolve()[0] == "Scott"
+    # The secret has no business sitting in the stored event.
+    assert "token" not in book.events[-1]
+
+    # No token configured: open as before, still stripped.
+    open_book = SpeakerBook(None, "", "")
+    open_book.record({"person": "Vega", "confidence": 0.9, "ts": _time.time(),
+                      "token": "anything"})
+    assert open_book.resolve()[0] == "Vega"
+    assert "token" not in open_book.events[-1]
+
+
+# --- approvals: the phone-tap gate -------------------------------------------
+
+class _Bus:
+    def __init__(self):
+        self.handlers = []
+
+    def async_listen(self, event, handler):
+        self.handlers.append(handler)
+        return lambda: self.handlers.remove(handler)
+
+    def fire(self, action):
+        for handler in list(self.handlers):
+            handler(types.SimpleNamespace(data={"action": action}))
+
+
+class _TapHass:
+    """A hass whose notify service is answered by an instant tap (or never)."""
+
+    def __init__(self, answer):
+        self.answer = answer  # True=approve, False=deny, None=no tap
+        self.bus = _Bus()
+        self.sent = []
+        outer = self
+
+        class _Services:
+            async def async_call(self, domain, service, data, blocking=False):
+                outer.sent.append((f"{domain}.{service}", data))
+                if outer.answer is None:
+                    return
+                actions = data["data"]["actions"]
+                outer.bus.fire(actions[0 if outer.answer else 1]["action"])
+
+        self.services = _Services()
+
+
+def test_approver_lookup_is_case_insensitive():
+    from hubbubb_home.approvals import Approvals
+
+    appr = Approvals(None, "Jarvis", "Scott: notify.mobile_app_x\nbad line\n")
+    assert appr.configured
+    assert appr.approver_for("scott") == "notify.mobile_app_x"
+    assert appr.approver_for("Vega") is None
+    assert not Approvals(None, "Jarvis", "").configured
+
+
+def test_approval_tap_deny_timeout_and_cache():
+    import asyncio
+    import time as _time
+
+    from hubbubb_home import approvals as approvals_mod
+    from hubbubb_home.approvals import Approvals
+
+    lines = "Scott: notify.mobile_app_scott"
+
+    # Approve: granted, notification carried both buttons, listener removed.
+    hass = _TapHass(answer=True)
+    appr = Approvals(hass, "Jarvis", lines)
+    assert asyncio.run(appr.async_request("Scott", "Hubbubb request: inbox"))
+    service, payload = hass.sent[0]
+    assert service == "notify.mobile_app_scott"
+    assert [a["title"] for a in payload["data"]["actions"]] == ["Approve", "Deny"]
+    assert hass.bus.handlers == []
+
+    # Cached: a second ask inside the window never rings the phone.
+    hass.answer = False
+    assert asyncio.run(appr.async_request("Scott", "again"))
+    assert len(hass.sent) == 1
+
+    # Expired: the deny now reaches the phone and fails closed.
+    appr._approved["Scott"] -= 601
+    assert not asyncio.run(appr.async_request("Scott", "later"))
+    assert len(hass.sent) == 2
+
+    # Timeout: nobody taps, fails closed.
+    hass2 = _TapHass(answer=None)
+    appr2 = Approvals(hass2, "Jarvis", lines)
+    approvals_mod.REQUEST_TIMEOUT = 0.01
+    try:
+        assert not asyncio.run(appr2.async_request("Scott", "quiet"))
+    finally:
+        approvals_mod.REQUEST_TIMEOUT = 45
+    assert hass2.bus.handlers == []
+
+    # No device configured for the person: fails closed without a call.
+    assert not asyncio.run(appr.async_request("Vega", "who?"))
+
+
+def test_hubbubb_tool_gate_matrix():
+    import asyncio
+    import time as _time
+
+    from hubbubb_home.approvals import Approvals
+    from hubbubb_home.llm_api import AskHubbubbTool
+
+    class _Hubbubb:
+        async def async_ask(self, request):
+            return "42"
+
+    def call(runtime):
+        return asyncio.run(
+            AskHubbubbTool(runtime).async_call(
+                None,
+                types.SimpleNamespace(tool_args={"request": "what's new?"}),
+                None,
+            )
+        )
+
+    book = SpeakerBook(None, "", "")
+    runtime = types.SimpleNamespace(
+        hubbubb=_Hubbubb(),
+        speakers=book,
+        approvals=Approvals(_TapHass(answer=True), "Jarvis",
+                            "Scott: notify.mobile_app_scott"),
+    )
+
+    # Nobody known: refused with ask-who guidance, no notification sent.
+    assert call(runtime)["error"] == "speaker_not_verified"
+
+    # A 0.7 voice match is a lean, not a verification.
+    book.record({"person": "Scott", "confidence": 0.7, "ts": _time.time()})
+    assert call(runtime)["error"] == "speaker_not_verified"
+
+    # 0.92 voice: challenge the device, approved, answered.
+    book.record({"person": "Scott", "confidence": 0.92, "ts": _time.time()})
+    assert call(runtime) == {"answer": "42"}
+
+    # "This is Scott": challenged too (cache makes it instant here).
+    told = SpeakerBook(None, "", "")
+    told.set_override("Scott")
+    runtime.speakers = told
+    assert call(runtime) == {"answer": "42"}
+
+    # Denied from the device: error, and the tool is told not to retry.
+    denied = types.SimpleNamespace(
+        hubbubb=_Hubbubb(),
+        speakers=told,
+        approvals=Approvals(_TapHass(answer=False), "Jarvis",
+                            "Scott: notify.mobile_app_scott"),
+    )
+    assert "did not approve" in call(denied)["error"]
+
+    # Blank approvers map: exactly the old behavior, no identity needed.
+    open_runtime = types.SimpleNamespace(
+        hubbubb=_Hubbubb(),
+        speakers=SpeakerBook(None, "", ""),
+        approvals=Approvals(None, "Jarvis", ""),
+    )
+    assert call(open_runtime) == {"answer": "42"}
 
 
 # --- timers ------------------------------------------------------------------

@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import os
+import secrets
 import time
 from functools import partial
 from pathlib import Path
@@ -71,6 +72,9 @@ class Service:
             "ts": time.time(),
             "text": text,
             "candidates": candidates,
+            # Lets the integration reject speaker events forged by something
+            # else on the LAN; stripped before the event is stored there.
+            "token": self.args.token,
         }
         self.last = event
         self.last_embedding = embedding
@@ -264,6 +268,18 @@ class Trainer:
 
 
 def admin_app(service: Service) -> web.Application:
+    def authorize(req) -> None:
+        """Mutating routes need the shared token; reads stay open.
+
+        Anything on the LAN can reach this port, and enrolling a voice or
+        starting an hours-long training run is not a thing a stray device
+        gets to do. Callers: the integration (token from its options) and
+        the Mac listener (reads the token file beside the profiles).
+        """
+        supplied = req.headers.get("X-Voice-Service-Token", "")
+        if not secrets.compare_digest(supplied, service.args.token):
+            raise web.HTTPUnauthorized(text="bad or missing token")
+
     async def health(_req):
         return web.json_response(
             {"ok": True, "model": service.args.model,
@@ -274,6 +290,7 @@ def admin_app(service: Service) -> web.Application:
         return web.json_response(service.last or {})
 
     async def label(req):
+        authorize(req)
         data = await req.json()
         person = str(data.get("person") or "").strip()
         if not person:
@@ -292,6 +309,7 @@ def admin_app(service: Service) -> web.Application:
         return web.json_response(service.profiles.counts())
 
     async def people_delete(req):
+        authorize(req)
         data = await req.json()
         person = str(data.get("person") or "").strip()
         if not service.profiles.delete(person):
@@ -301,6 +319,7 @@ def admin_app(service: Service) -> web.Application:
     trainer = Trainer(service.args)
 
     async def train(req):
+        authorize(req)
         data = await req.json()
         phrase = " ".join(str(data.get("phrase") or "").split())
         if not phrase or len(phrase) > 40 or len(phrase.split()) > 4 \
@@ -389,6 +408,15 @@ def parse_args(argv=None):
     args = parser.parse_args(argv)
     if not args.message_webhook and args.webhook.endswith("_speaker"):
         args.message_webhook = args.webhook[: -len("_speaker")] + "_message"
+    # The shared secret between this service, the integration and the Mac
+    # listener. Created on first run; paste it into the integration's voice
+    # options. 0600 in a directory only this user reads.
+    token_path = Path(args.data_dir).expanduser() / "token"
+    if not token_path.exists():
+        token_path.parent.mkdir(parents=True, exist_ok=True)
+        token_path.write_text(secrets.token_hex(24))
+        token_path.chmod(0o600)
+    args.token = token_path.read_text().strip()
     return args
 
 

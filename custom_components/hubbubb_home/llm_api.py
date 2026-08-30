@@ -21,6 +21,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers import llm
 from homeassistant.util.json import JsonObjectType
 
+from .approvals import VERIFY_CONFIDENCE
 from .companion import CompanionError
 from .const import DOMAIN
 from .hubbubb import HubbubbError
@@ -180,6 +181,20 @@ class SetSpeakerTool(_RuntimeTool):
         person = tool_input.tool_args["person"].strip()
         self._runtime.speakers.set_override(person)
         result: JsonObjectType = {"speaker": person}
+        # The override is the personalization tier and stays immediate; the
+        # voice profile is what verification later leans on, so a listed
+        # person's device must approve before their profile learns. A person
+        # with no device entry trains directly - they cannot be phone-verified
+        # anyway, and blocking them would make first-time setup impossible.
+        approvals = self._runtime.approvals
+        if approvals.configured and approvals.approver_for(person):
+            if not await approvals.async_request(
+                person, f"Enroll this voice as {person}?"
+            ):
+                result["training"] = (
+                    "not approved from their device; the voice was not enrolled"
+                )
+                return result
         try:
             await self._runtime.speakers.async_label(person)
         except SpeakerServiceError as err:
@@ -329,17 +344,46 @@ class AskHubbubbTool(_RuntimeTool):
         "records, correspondence, the inbox. Hubbubb's own agent plans and "
         "runs it, so ask in ordinary words; you do not need field names. "
         "Answers can take a few seconds, so only call it when the question is "
-        "really about Hubbubb data."
+        "really about Hubbubb data. When verified people are configured this "
+        "may need the speaker to approve on their own device; a denial is "
+        "final for that request - do not retry it."
     )
     parameters = vol.Schema({vol.Required("request"): str})
 
     async def async_call(
         self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context
     ) -> JsonObjectType:
-        try:
-            answer = await self._runtime.hubbubb.async_ask(
-                tool_input.tool_args["request"]
+        request = tool_input.tool_args["request"]
+        approvals = self._runtime.approvals
+        if approvals.configured:
+            person, confidence, source = self._runtime.speakers.resolve(
+                getattr(llm_context, "device_id", None)
             )
+            # Voice picks who to challenge; below the bar the house must ask,
+            # not guess whose device to ring.
+            if not person or (
+                source != "told" and confidence < VERIFY_CONFIDENCE
+            ):
+                return {
+                    "error": "speaker_not_verified",
+                    "detail": (
+                        "You are not sure who is speaking. Ask who is "
+                        "speaking, wait for their answer (identify_speaker), "
+                        "then call this again."
+                    ),
+                }
+            if not await approvals.async_request(
+                person, f"Hubbubb request: {request[:100]}"
+            ):
+                return {
+                    "error": (
+                        f"{person} did not approve this from their device "
+                        "(denied, timed out, or no device is configured for "
+                        "them). Denial is final - do not retry."
+                    )
+                }
+        try:
+            answer = await self._runtime.hubbubb.async_ask(request)
         except HubbubbError as err:
             return {"error": str(err)}
         return {"answer": answer}

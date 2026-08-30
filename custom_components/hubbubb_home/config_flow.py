@@ -58,11 +58,13 @@ from .const import (
     CONF_QUIET_START,
     DEFAULT_QUIET_END,
     DEFAULT_QUIET_START,
+    CONF_APPROVERS,
     CONF_SENTENCES,
     CONF_SENTENCES_SECTION,
     CONF_SPEAKER_MAP,
     CONF_TTS,
     CONF_VOICE,
+    CONF_VOICE_TOKEN,
     CONF_VOICE_URL,
     CONF_WEATHER,
     DEFAULT_ACK,
@@ -315,6 +317,12 @@ class HubbubbHomeOptionsFlow(OptionsFlow):
                                     type=TextSelectorType.TEXT, multiline=True
                                 )
                             ),
+                            vol.Optional(CONF_APPROVERS, default=""): TextSelector(
+                                TextSelectorConfig(
+                                    type=TextSelectorType.TEXT, multiline=True
+                                )
+                            ),
+                            vol.Optional(CONF_VOICE_TOKEN): _PASSWORD,
                         }
                     ),
                     {"collapsed": True},

@@ -213,6 +213,24 @@ The *device owners* map is the no-ML fallback: an assist device in someone's
 own room probably hears them. Leave the URL blank and all of this is off —
 memory is household-wide, exactly as before.
 
+### Verified people (optional)
+
+Voice identification says who is *probably* speaking — a recording, the TV,
+or a good impression can pass it — so by itself it authorizes nothing. Fill
+in the *verified people* map (`Scott: notify.mobile_app_scotts_iphone`, one
+person per line) and anything touching Hubbubb data by voice becomes a
+two-step: voice identifies, a tap on that person's own device authorizes.
+When the house is at least 90% sure who is asking (or they have just said
+who they are), it sends an Approve/Deny notification to their device and
+waits; any less sure and it asks who is speaking instead of guessing whose
+device to ring. Denials, timeouts and unknown devices all fail closed, one
+approval covers follow-ups for ten minutes, and enrolling a listed person's
+voice takes the same tap — so a stranger cannot train themselves into
+someone else's profile. The *shared token* closes the plumbing: speaker
+events that do not carry it are dropped. Roadmap: per-person Hubbubb
+credentials instead of the shared account, so the CRM's own permissions
+become the boundary.
+
 ### A local model as the house brain (optional)
 
 Small local models are enough for most of a house's day. Run one with

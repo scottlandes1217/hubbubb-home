@@ -107,11 +107,15 @@
             "description": "Who is talking. Needs the voice service running on the companion computer — leave the URL blank and everything works exactly as before, with no idea who is speaking.",
             "data": {
               "voice_service_url": "Voice service URL",
-              "speaker_map": "Device owners (one \"device_id: Name\" per line)"
+              "speaker_map": "Device owners (one \"device_id: Name\" per line)",
+              "approvers": "Verified people (one \"Name: notify.mobile_app_x\" per line)",
+              "token": "Voice service shared token"
             },
             "data_description": {
               "voice_service_url": "Where the voice service answers, like http://mac.local:10301. Blank turns speaker identification off.",
-              "speaker_map": "A fallback when the voice is not recognised: the assist device in someone's own room probably hears them. Device IDs are on each device's page."
+              "speaker_map": "A fallback when the voice is not recognised: the assist device in someone's own room probably hears them. Device IDs are on each device's page.",
+              "approvers": "Each person's own device, for tap-to-approve. With any line here, Hubbubb requests by voice need the speaker recognized (90% or a spoken \"this is...\") and then approved on their device. Blank turns the gate off.",
+              "token": "A shared secret between this integration and the voice service. Speaker events without it are dropped, so nothing else on the network can claim to be a voice. Blank skips the check."
             }
           },
           "apple_tv": {

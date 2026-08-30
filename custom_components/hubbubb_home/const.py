@@ -57,6 +57,12 @@ SENTENCE_FILES = ("house", "memory", "timers")
 CONF_VOICE = "voice"
 CONF_VOICE_URL = "voice_service_url"
 CONF_SPEAKER_MAP = "speaker_map"
+# "Person Name: notify.mobile_app_xyz" lines - each person's own device, for
+# tap-to-approve. Blank = the approval gate is off entirely.
+CONF_APPROVERS = "approvers"
+# Shared secret with the voice service: speaker events must carry it, and
+# calls to the service send it back. Blank = no verification.
+CONF_VOICE_TOKEN = "token"
 
 CONF_ATV = "apple_tv"
 CONF_ATV_ENTITIES = "apple_tvs"

@@ -70,8 +70,10 @@ from .const import (
     DEFAULT_QUIET_END,
     DEFAULT_QUIET_START,
     in_quiet_window,
+    CONF_APPROVERS,
     CONF_SPEAKER_MAP,
     CONF_VOICE,
+    CONF_VOICE_TOKEN,
     CONF_VOICE_URL,
     DEFAULT_PROMPT,
     DOMAIN,
@@ -81,6 +83,7 @@ from .const import (
     WEBHOOK_MESSAGE,
 )
 from . import appletv
+from .approvals import Approvals
 from .hubbubb import HubbubbClient, HubbubbError
 from .intents import ALL_INTENTS, async_register_all
 from .llm_api import HubbubbAPI
@@ -125,6 +128,7 @@ class Runtime:
     hubbubb: HubbubbClient | None
     companion: CompanionClient
     speakers: SpeakerBook
+    approvals: Approvals
     unsubscribe: list = field(default_factory=list)
 
     def option(self, section: str, key: str, default: Any = None) -> Any:
@@ -182,7 +186,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         session,
         voice_conf.get(CONF_VOICE_URL),
         voice_conf.get(CONF_SPEAKER_MAP),
+        voice_conf.get(CONF_VOICE_TOKEN),
     )
+    approvals = Approvals(hass, name, voice_conf.get(CONF_APPROVERS))
 
     runtime = Runtime(
         entry=entry,
@@ -194,6 +200,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hubbubb=hubbubb,
         companion=companion,
         speakers=speakers,
+        approvals=approvals,
     )
 
     async def _timer_finished(timer) -> None:
@@ -474,6 +481,9 @@ def _async_register_services(hass: HomeAssistant, runtime: Runtime) -> None:
         return {"timer": timer.as_dict()}
 
     async def ask_hubbubb(call: ServiceCall) -> ServiceResponse:
+        # Deliberately NOT behind the person-approval gate: services and
+        # cards are LAN/dashboard surfaces already behind HA's own login.
+        # The gate covers the voice path, where anyone can talk at a puck.
         if runtime.hubbubb is None:
             raise HomeAssistantError("Hubbubb is not connected")
         try:

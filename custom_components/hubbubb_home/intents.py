@@ -321,6 +321,20 @@ class IdentifyHandler(_Handler):
         if not person:
             return self._say(intent_obj, "I didn't catch the name.")
         self._runtime.speakers.set_override(person)
+        # The override is personalization and stays immediate; the profile is
+        # what verification leans on, so a listed person's own device must
+        # approve before their voice enrolls. No device entry = train
+        # directly, or first-time setup would be impossible.
+        approvals = self._runtime.approvals
+        if approvals.configured and approvals.approver_for(person):
+            if not await approvals.async_request(
+                person, f"Enroll this voice as {person}?"
+            ):
+                return self._say(
+                    intent_obj,
+                    f"Hello {person}. Enrolling your voice needs approval "
+                    "from your device, and it wasn't approved.",
+                )
         try:
             await self._runtime.speakers.async_label(person)
         except SpeakerServiceError as err:

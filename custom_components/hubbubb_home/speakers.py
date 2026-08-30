@@ -12,6 +12,7 @@ idea" rather than to a guess presented as fact.
 from __future__ import annotations
 
 import logging
+import secrets
 import time
 from collections import deque
 
@@ -42,10 +43,17 @@ class SpeakerServiceError(Exception):
 class SpeakerBook:
     """Recent speaker events, one manual override, per-device defaults."""
 
-    def __init__(self, session, url: str | None, device_map: str | None) -> None:
+    def __init__(
+        self,
+        session,
+        url: str | None,
+        device_map: str | None,
+        token: str | None = None,
+    ) -> None:
         self._session = session
         self._url = (url or "").rstrip("/")
-        self._devices = _parse_map(device_map or "")
+        self._devices = parse_map(device_map or "")
+        self._token = token or ""
         self.events: deque[dict] = deque(maxlen=10)
         self._override: tuple[str, float] | None = None
 
@@ -54,6 +62,16 @@ class SpeakerBook:
         return bool(self._url)
 
     def record(self, event: dict) -> None:
+        # The webhook is unauthenticated LAN plumbing; with a shared token
+        # configured, an event that doesn't carry it is a forgery, not a
+        # speaker. Stripped either way - it has no business being stored.
+        supplied = event.pop("token", None)
+        if self._token and not (
+            isinstance(supplied, str)
+            and secrets.compare_digest(supplied, self._token)
+        ):
+            _LOGGER.debug("dropped speaker event with a missing or bad token")
+            return
         self.events.append(event)
 
     def set_override(self, person: str) -> None:
@@ -103,10 +121,14 @@ class SpeakerBook:
     async def _post(self, route: str, body: dict) -> None:
         if not self._url:
             raise SpeakerServiceError("no voice service is configured")
+        headers = (
+            {"X-Voice-Service-Token": self._token} if self._token else None
+        )
         try:
             async with self._session.post(
                 f"{self._url}{route}",
                 json=body,
+                headers=headers,
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 if resp.status >= 400:
@@ -120,8 +142,8 @@ class SpeakerBook:
             ) from err
 
 
-def _parse_map(text: str) -> dict[str, str]:
-    """'device_id: Person Name' lines -> {device_id: name}. Bad lines skipped."""
+def parse_map(text: str) -> dict[str, str]:
+    """'key: value' lines -> dict. Bad lines skipped. Shared with approvals."""
     out: dict[str, str] = {}
     for line in text.splitlines():
         device, sep, person = line.partition(":")
