@@ -21,10 +21,13 @@ intents:
           - "(any|what) findings"
   HubbubbAsk:
     data:
+      # Every spelling speech-to-text has for the name: "hubbub" is a real
+      # English word and is what STT writes, so the canonical spelling alone
+      # never matches and everything falls through to the coding agent.
       - sentences:
-          - "ask hubbubb {request}"
-          - "(check|ask) hubbubb (for|about) {request}"
-          - "hubbubb {request}"
+          - "ask (hubbubb|hubbub|hub bub) {request}"
+          - "(check|ask) (hubbubb|hubbub|hub bub) (for|about) {request}"
+          - "(hubbubb|hubbub|hub bub) {request}"
 lists:
   request:
     wildcard: true
