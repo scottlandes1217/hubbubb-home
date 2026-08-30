@@ -25,6 +25,7 @@ from .approvals import VERIFY_CONFIDENCE
 from .companion import CompanionError
 from .const import DOMAIN
 from .hubbubb import HubbubbError, HubbubbPending
+from .intents import _open_items, resolve_list
 from .speakers import SpeakerServiceError
 
 _LOGGER = logging.getLogger(__name__)
@@ -47,6 +48,8 @@ class HubbubbAPI(llm.API):
             RememberTool(runtime),
             RecallTool(runtime),
             ForgetTool(runtime),
+            AddToListTool(runtime),
+            ReadListTool(runtime),
             SetSpeakerTool(runtime),
             StartTimerTool(runtime),
             CancelTimerTool(runtime),
@@ -182,6 +185,69 @@ class ForgetTool(_RuntimeTool):
         if gone is None:
             return {"forgot": None, "detail": "nothing matched"}
         return {"forgot": gone}
+
+
+class AddToListTool(_RuntimeTool):
+    name = "add_to_list"
+    description = (
+        "Put an item on a to-do or shopping list. personal=true means the "
+        "speaker's own list (falling back to the household list when they "
+        "have none); personal=false means the household list."
+    )
+    parameters = vol.Schema(
+        {
+            vol.Required("item"): vol.All(str, vol.Length(min=1, max=200)),
+            vol.Optional("personal", default=True): bool,
+        }
+    )
+
+    async def async_call(
+        self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context
+    ) -> JsonObjectType:
+        # Same rule as memory: a stranger doesn't write to the house's lists.
+        if self._guest(llm_context):
+            return {"error": _GUEST_ERROR}
+        entity, owner = resolve_list(
+            self._runtime,
+            self._speaker(llm_context),
+            tool_input.tool_args.get("personal", True),
+        )
+        if entity is None:
+            return {"error": "no list is configured in the options"}
+        await hass.services.async_call(
+            "todo", "add_item",
+            {"entity_id": entity, "item": tool_input.tool_args["item"]},
+            blocking=True,
+        )
+        return {
+            "added": tool_input.tool_args["item"],
+            "list": "the speaker's own" if owner == "mine" else "household",
+        }
+
+
+class ReadListTool(_RuntimeTool):
+    name = "read_list"
+    description = (
+        "Read the unfinished items on a list. personal=true is the "
+        "speaker's own list (or the household's when they have none); "
+        "personal=false is the household list."
+    )
+    parameters = vol.Schema({vol.Optional("personal", default=True): bool})
+
+    async def async_call(
+        self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context
+    ) -> JsonObjectType:
+        entity, owner = resolve_list(
+            self._runtime,
+            self._speaker(llm_context),
+            tool_input.tool_args.get("personal", True),
+        )
+        if entity is None:
+            return {"error": "no list is configured in the options"}
+        return {
+            "items": await _open_items(hass, entity),
+            "list": "the speaker's own" if owner == "mine" else "household",
+        }
 
 
 class SetSpeakerTool(_RuntimeTool):

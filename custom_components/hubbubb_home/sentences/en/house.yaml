@@ -39,6 +39,31 @@ intents:
           - "(is|has) anything (broken|wrong|offline|gone quiet)"
           - "what did you find (last night|overnight|)"
           - "(any|what) findings"
+  HubbubbListRead:
+    data:
+      - sentences:
+          - "(what's|what is|what do I have) on my list"
+          - "read [me] my list"
+      - sentences:
+          - "(what's|what is) on the (shopping|house|grocery) list"
+          - "read [me] the (shopping|house|grocery) list"
+        slots:
+          scope: house
+  # The {item} wildcard is fenced by mandatory literals on both sides, so it
+  # cannot eat the sentence the way a bare wildcard would.
+  HubbubbListAdd:
+    data:
+      - sentences:
+          - "(add|put) {item} (to|on) my list"
+      - sentences:
+          - "(add|put) {item} (to|on) the (shopping|house|grocery) list"
+        slots:
+          scope: house
+  HubbubbListDone:
+    data:
+      - sentences:
+          - "(cross|check|tick|take) {item} off [of] (my|the) list"
+          - "mark {item} [as] done on (my|the) list"
   HubbubbAsk:
     data:
       # Every spelling speech-to-text has for the name: "hubbub" is a real
@@ -62,4 +87,6 @@ lists:
   room:
     wildcard: true
   message:
+    wildcard: true
+  item:
     wildcard: true

@@ -46,12 +46,14 @@ from .const import (
     CONF_COMPANION,
     CONF_COMPANION_TOKEN,
     CONF_COMPANION_URL,
+    CONF_HOUSEHOLD_LIST,
     CONF_HUBBUBB,
     CONF_HUBBUBB_ID,
     CONF_HUBBUBB_PEOPLE,
     CONF_HUBBUBB_SECRET,
     CONF_HUBBUBB_URL,
     CONF_IGNORE,
+    CONF_PERSON_LISTS,
     CONF_NIGHTLY_ENABLED,
     CONF_NIGHTLY_TIME,
     CONF_NOTIFY,
@@ -332,6 +334,14 @@ class HubbubbHomeOptionsFlow(OptionsFlow):
                                 )
                             ),
                             vol.Optional(CONF_VOICE_TOKEN): _PASSWORD,
+                            vol.Optional(CONF_PERSON_LISTS, default=""): TextSelector(
+                                TextSelectorConfig(
+                                    type=TextSelectorType.TEXT, multiline=True
+                                )
+                            ),
+                            vol.Optional(CONF_HOUSEHOLD_LIST): EntitySelector(
+                                EntitySelectorConfig(domain="todo")
+                            ),
                         }
                     ),
                     {"collapsed": True},

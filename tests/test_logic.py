@@ -1095,6 +1095,44 @@ def test_quiet_window_crosses_midnight():
     assert not in_quiet_window(3 * 60, (8, 0, 0), (8, 0, 0))
 
 
+def test_list_resolution_precedence():
+    from hubbubb_home.intents import resolve_list
+
+    options = {
+        "voice": {
+            "person_lists": "Scott: todo.scott\nVega: todo.vega",
+            "household_list": "todo.shopping",
+        }
+    }
+    runtime = types.SimpleNamespace(
+        option=lambda s, k, d=None: options.get(s, {}).get(k, d)
+    )
+    # A mapped speaker gets their own list, case-insensitively.
+    assert resolve_list(runtime, "scott") == ("todo.scott", "mine")
+    assert resolve_list(runtime, "Vega") == ("todo.vega", "mine")
+    # Unknown or unmapped speakers fall to the household list.
+    assert resolve_list(runtime, None) == ("todo.shopping", "house")
+    assert resolve_list(runtime, "Guest") == ("todo.shopping", "house")
+    # An explicitly household request ignores the personal mapping.
+    assert resolve_list(runtime, "Scott", personal=False) == (
+        "todo.shopping", "house",
+    )
+    # No household list and nothing mapped: there is no list to land on.
+    bare = types.SimpleNamespace(option=lambda s, k, d=None: "")
+    assert resolve_list(bare, "Scott") == (None, None)
+
+
+def test_list_item_fuzzy_match():
+    from hubbubb_home.intents import match_item
+
+    items = ["Whole milk", "Eggs", "Dish soap"]
+    assert match_item(items, "milk") == "Whole milk"
+    assert match_item(items, "the eggs") == "Eggs"
+    assert match_item(items, "DISH SOAP") == "Dish soap"
+    assert match_item(items, "butter") is None
+    assert match_item([], "milk") is None
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

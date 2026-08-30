@@ -204,6 +204,16 @@ it is a ranked full-text search rather than a substring match.
 Reachable three ways: by voice, as `hubbubb_home.remember` / `.recall` /
 `.forget` services, and as tools your language model can call on its own.
 
+### Lists
+
+"Add milk to my list", "what's on the shopping list", "cross the milk off my
+list." Create the lists themselves with Home Assistant's own **Local To-do**
+integration (Settings → Devices & Services), then map them in the speaker
+identification options: one `Name: todo.entity` line per person, plus one
+household list for shared shopping and for anyone without their own. The
+speaker's voice decides whose list "my list" means; the language models get
+the same lists as `add_to_list` / `read_list` tools.
+
 ### The overnight sweep
 
 At half three each morning, two checks:

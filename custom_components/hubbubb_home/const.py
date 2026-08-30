@@ -66,6 +66,10 @@ CONF_APPROVERS = "approvers"
 # Shared secret with the voice service: speaker events must carry it, and
 # calls to the service send it back. Blank = no verification.
 CONF_VOICE_TOKEN = "token"
+# "Person Name: todo.their_list" lines - "my list" resolves to the speaker's
+# own to-do entity. Anything unresolved falls back to the household list.
+CONF_PERSON_LISTS = "person_lists"
+CONF_HOUSEHOLD_LIST = "household_list"
 
 CONF_ATV = "apple_tv"
 CONF_ATV_ENTITIES = "apple_tvs"

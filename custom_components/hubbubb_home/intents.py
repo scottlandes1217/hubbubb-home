@@ -18,7 +18,13 @@ from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv, intent
 from homeassistant.util import dt as dt_util
 
-from .const import CONF_PERSON_CALENDARS, DOMAIN
+from .const import (
+    CONF_HOUSEHOLD_LIST,
+    CONF_PERSON_CALENDARS,
+    CONF_PERSON_LISTS,
+    CONF_VOICE,
+    DOMAIN,
+)
 from .hubbubb import HubbubbError
 from .speakers import CONFIDENT, SpeakerServiceError, parse_map
 
@@ -39,6 +45,9 @@ INTENT_IDENTIFY = "HubbubbIdentify"
 INTENT_WHO = "HubbubbWhoAmI"
 INTENT_MY_DAY = "HubbubbMyDay"
 INTENT_INTERCOM = "HubbubbIntercom"
+INTENT_LIST_ADD = "HubbubbListAdd"
+INTENT_LIST_READ = "HubbubbListRead"
+INTENT_LIST_DONE = "HubbubbListDone"
 
 ALL_INTENTS = (
     INTENT_REMEMBER, INTENT_RECALL, INTENT_FORGET,
@@ -46,6 +55,7 @@ ALL_INTENTS = (
     INTENT_TIMER_STATUS, INTENT_BUILD_ON, INTENT_BUILD_OFF,
     INTENT_FINDINGS, INTENT_HUBBUBB, INTENT_IDENTIFY, INTENT_WHO,
     INTENT_MY_DAY, INTENT_INTERCOM,
+    INTENT_LIST_ADD, INTENT_LIST_READ, INTENT_LIST_DONE,
 )
 
 
@@ -67,6 +77,9 @@ def async_register_all(hass: HomeAssistant, runtime) -> None:
         WhoAmIHandler(runtime),
         MyDayHandler(runtime),
         IntercomHandler(runtime),
+        ListAddHandler(runtime),
+        ListReadHandler(runtime),
+        ListDoneHandler(runtime),
     ):
         intent.async_register(hass, handler)
 
@@ -105,6 +118,64 @@ async def async_today_events(hass: HomeAssistant, calendars: list[str]) -> list[
         for cal in (events or {}).values()
         for e in cal.get("events", [])
     ][:4]
+
+
+def resolve_list(runtime, person: str | None, personal: bool = True):
+    """Which to-do entity a request lands on.
+
+    -> (entity_id, "mine" | "house") or (None, None). A mapped speaker asking
+    for "my list" gets their own; everything else - unknown speaker, unmapped
+    person, an explicitly household request - falls to the household list.
+    """
+    if personal and person:
+        # parse_map keys keep their case; match the person loosely.
+        lists = {
+            k.lower(): v
+            for k, v in parse_map(
+                runtime.option(CONF_VOICE, CONF_PERSON_LISTS, "") or ""
+            ).items()
+        }
+        if mapped := lists.get(person.lower()):
+            return mapped, "mine"
+    household = (runtime.option(CONF_VOICE, CONF_HOUSEHOLD_LIST, "") or "").strip()
+    if household:
+        return household, "house"
+    return None, None
+
+
+def match_item(summaries: list[str], spoken: str) -> str | None:
+    """The list entry a spoken phrase means, or None.
+
+    ponytail: case-insensitive substring both ways - "milk" finds "Whole
+    milk", "the whole milk" finds it too. Token-set scoring if this ever
+    misses in practice.
+    """
+    want = " ".join(spoken.lower().split())
+    for summary in summaries:
+        have = summary.lower()
+        if want in have or have in want:
+            return summary
+    return None
+
+
+async def _open_items(hass: HomeAssistant, entity_id: str) -> list[str]:
+    """The unfinished entries on one to-do list, as summaries."""
+    try:
+        resp = await hass.services.async_call(
+            "todo",
+            "get_items",
+            {"entity_id": entity_id, "status": "needs_action"},
+            blocking=True,
+            return_response=True,
+        )
+    except HomeAssistantError as err:
+        _LOGGER.warning("could not read %s: %s", entity_id, err)
+        return []
+    return [
+        i.get("summary", "")
+        for i in ((resp or {}).get(entity_id) or {}).get("items", [])
+        if i.get("summary")
+    ]
 
 
 def satellites_in_area(area_name: str, areas, entities, device_areas) -> list[str]:
@@ -506,6 +577,91 @@ class IntercomHandler(_Handler):
             _LOGGER.warning("intercom to %s failed: %s", area, err)
             return self._say(intent_obj, "I couldn't reach that room.")
         return self._say(intent_obj, "Passed along.")
+
+
+class ListAddHandler(_Handler):
+    intent_type = INTENT_LIST_ADD
+    slot_schema = {
+        vol.Required("item"): cv.string,
+        vol.Optional("scope"): cv.string,
+    }
+    description = "Add something to the speaker's or the household's list"
+
+    async def async_handle(self, intent_obj: intent.Intent):
+        slots = self.async_validate_slots(intent_obj.slots)
+        item = str(slots["item"]["value"]).strip()
+        personal = slots.get("scope", {}).get("value") != "house"
+        person, _, _ = self._speaker(intent_obj)
+        entity, owner = resolve_list(self._runtime, person, personal)
+        if entity is None:
+            return self._say(
+                intent_obj,
+                "No list is set up yet - create a local to-do list and map "
+                "it in my options.",
+            )
+        try:
+            await intent_obj.hass.services.async_call(
+                "todo", "add_item",
+                {"entity_id": entity, "item": item},
+                blocking=True,
+            )
+        except HomeAssistantError as err:
+            _LOGGER.warning("could not add to %s: %s", entity, err)
+            return self._say(intent_obj, "I couldn't reach the list.")
+        if personal and owner == "house":
+            # They said "my list" but have none mapped; say where it went.
+            return self._say(intent_obj, f"{item} went on the house list.")
+        where = "your list" if owner == "mine" else "the house list"
+        return self._say(intent_obj, f"{item} is on {where}.")
+
+
+class ListReadHandler(_Handler):
+    intent_type = INTENT_LIST_READ
+    slot_schema = {vol.Optional("scope"): cv.string}
+    description = "Read the speaker's or the household's list"
+
+    async def async_handle(self, intent_obj: intent.Intent):
+        slots = self.async_validate_slots(intent_obj.slots)
+        personal = slots.get("scope", {}).get("value") != "house"
+        person, _, _ = self._speaker(intent_obj)
+        entity, owner = resolve_list(self._runtime, person, personal)
+        if entity is None:
+            return self._say(intent_obj, "No list is set up yet.")
+        items = await _open_items(intent_obj.hass, entity)
+        where = "your list" if owner == "mine" else "the house list"
+        if not items:
+            return self._say(intent_obj, f"Nothing on {where}.")
+        # Spoken: eight items is already a lot to hold in your head.
+        spoken = ", ".join(items[:8])
+        more = f", and {len(items) - 8} more" if len(items) > 8 else ""
+        return self._say(intent_obj, f"On {where}: {spoken}{more}.")
+
+
+class ListDoneHandler(_Handler):
+    intent_type = INTENT_LIST_DONE
+    slot_schema = {vol.Required("item"): cv.string}
+    description = "Cross something off the speaker's list"
+
+    async def async_handle(self, intent_obj: intent.Intent):
+        slots = self.async_validate_slots(intent_obj.slots)
+        spoken = str(slots["item"]["value"]).strip()
+        person, _, _ = self._speaker(intent_obj)
+        entity, _owner = resolve_list(self._runtime, person, True)
+        if entity is None:
+            return self._say(intent_obj, "No list is set up yet.")
+        found = match_item(await _open_items(intent_obj.hass, entity), spoken)
+        if found is None:
+            return self._say(intent_obj, f"I don't see {spoken} on the list.")
+        try:
+            await intent_obj.hass.services.async_call(
+                "todo", "update_item",
+                {"entity_id": entity, "item": found, "status": "completed"},
+                blocking=True,
+            )
+        except HomeAssistantError as err:
+            _LOGGER.warning("could not complete on %s: %s", entity, err)
+            return self._say(intent_obj, "I couldn't reach the list.")
+        return self._say(intent_obj, f"Crossed off {found}.")
 
 
 def _slot(slots: dict, key: str) -> int:
