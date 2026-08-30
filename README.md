@@ -267,9 +267,17 @@ device to ring. Denials, timeouts and unknown devices all fail closed, one
 approval covers follow-ups for ten minutes, and enrolling a listed person's
 voice takes the same tap — so a stranger cannot train themselves into
 someone else's profile. The *shared token* closes the plumbing: speaker
-events that do not carry it are dropped. Roadmap: per-person Hubbubb
-credentials instead of the shared account, so the CRM's own permissions
-become the boundary.
+events that do not carry it are dropped.
+
+And people can act as **themselves** in Hubbubb: give each person their own
+client in the Hubbubb options (one line per person,
+`Name: client_id : client_secret` — each client belongs to that person's own
+Hubbubb user). With any line set, voice requests to Hubbubb run only as the
+verified speaker — someone with no linked account gets a polite no rather
+than the shared client, so the CRM's own permissions are the boundary and a
+reply sent by voice is sent as the person who asked. The dashboard's inbox
+watch and the `ask_hubbubb` service stay on the shared client: they sit
+behind Home Assistant's own login, with no speaker to attribute a call to.
 
 ### A local model as the house brain (optional)
 

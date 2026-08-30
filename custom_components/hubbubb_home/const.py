@@ -12,6 +12,9 @@ CONF_HUBBUBB = "hubbubb"
 CONF_HUBBUBB_URL = "hubbubb_url"
 CONF_HUBBUBB_ID = "hubbubb_client_id"
 CONF_HUBBUBB_SECRET = "hubbubb_client_secret"
+# One line per person: "Person Name: client_id : client_secret". Each maps to
+# that person's own Hubbubb user, so the CRM's permissions are the boundary.
+CONF_HUBBUBB_PEOPLE = "people"
 
 CONF_COMPANION = "companion"
 CONF_COMPANION_URL = "companion_url"

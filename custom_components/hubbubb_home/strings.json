@@ -130,7 +130,11 @@
             "data": {
               "hubbubb_url": "MCP endpoint",
               "hubbubb_client_id": "Client ID",
-              "hubbubb_client_secret": "Client secret"
+              "hubbubb_client_secret": "Client secret",
+              "people": "Per-person clients"
+            },
+            "data_description": {
+              "people": "One line per person: Name: client_id : client_secret. Each maps to that person's own Hubbubb user; when any line is set, voice requests run as the verified speaker and never as the shared client."
             }
           },
           "companion": {

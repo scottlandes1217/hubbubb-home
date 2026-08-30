@@ -47,6 +47,7 @@ from .const import (
     CONF_COMPANION_URL,
     CONF_HUBBUBB,
     CONF_HUBBUBB_ID,
+    CONF_HUBBUBB_PEOPLE,
     CONF_HUBBUBB_SECRET,
     CONF_HUBBUBB_URL,
     CONF_IGNORE,
@@ -347,6 +348,16 @@ class HubbubbHomeOptionsFlow(OptionsFlow):
                             vol.Optional(CONF_HUBBUBB_URL): _URL,
                             vol.Optional(CONF_HUBBUBB_ID): str,
                             vol.Optional(CONF_HUBBUBB_SECRET): _PASSWORD,
+                            # Multiline, so not a password selector; the
+                            # section is collapsed and the values live on
+                            # entry.data with the other credentials.
+                            vol.Optional(
+                                CONF_HUBBUBB_PEOPLE, default=""
+                            ): TextSelector(
+                                TextSelectorConfig(
+                                    type=TextSelectorType.TEXT, multiline=True
+                                )
+                            ),
                         }
                     ),
                     {"collapsed": True},

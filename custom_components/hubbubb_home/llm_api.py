@@ -355,7 +355,11 @@ class AskHubbubbTool(_RuntimeTool):
     ) -> JsonObjectType:
         request = tool_input.tool_args["request"]
         approvals = self._runtime.approvals
-        if approvals.configured:
+        people = self._runtime.hubbubb_people
+        person = None
+        # Per-person credentials need a person even with no approvers set;
+        # otherwise the call would silently fall back to the shared account.
+        if approvals.configured or people:
             person, confidence, source = self._runtime.speakers.resolve(
                 getattr(llm_context, "device_id", None)
             )
@@ -372,6 +376,7 @@ class AskHubbubbTool(_RuntimeTool):
                         "then call this again."
                     ),
                 }
+        if approvals.configured:
             if not await approvals.async_request(
                 person, f"Hubbubb request: {request[:100]}"
             ):
@@ -382,8 +387,23 @@ class AskHubbubbTool(_RuntimeTool):
                         "them). Denial is final - do not retry."
                     )
                 }
+        client = self._runtime.hubbubb
+        if people:
+            # The verified speaker acts as themselves in Hubbubb, so the
+            # CRM's own permissions are the boundary. The shared account is
+            # never a fallback here - "no account" must not become "someone
+            # else's account".
+            client = people.get(person.lower())
+            if client is None:
+                return {
+                    "error": (
+                        f"No Hubbubb account is linked for {person}. Say so; "
+                        "an administrator can add one in the integration's "
+                        "Hubbubb options."
+                    )
+                }
         try:
-            answer = await self._runtime.hubbubb.async_ask(request)
+            answer = await client.async_ask(request)
         except HubbubbError as err:
             return {"error": str(err)}
         return {"answer": answer}

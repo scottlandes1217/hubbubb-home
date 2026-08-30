@@ -132,6 +132,21 @@ class HubbubbClient:
         return _text_of(result)
 
 
+def parse_people(text: str) -> dict[str, tuple[str, str]]:
+    """'Person Name: client_id : client_secret' lines -> {person: (id, secret)}.
+
+    Split at the first two colons only - Hubbubb secrets may themselves
+    contain colons. Names are lowercased for lookup; bad lines are skipped.
+    """
+    out: dict[str, tuple[str, str]] = {}
+    for line in (text or "").splitlines():
+        person, _, rest = line.partition(":")
+        client_id, sep, secret = rest.partition(":")
+        if person.strip() and client_id.strip() and sep and secret.strip():
+            out[person.strip().lower()] = (client_id.strip(), secret.strip())
+    return out
+
+
 def _parse(body: str) -> dict | None:
     """Read a JSON body, or the first data: frame of an SSE response."""
     import json

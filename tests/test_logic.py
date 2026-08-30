@@ -483,6 +483,7 @@ def test_hubbubb_tool_gate_matrix():
     book = SpeakerBook(None, "", "")
     runtime = types.SimpleNamespace(
         hubbubb=_Hubbubb(),
+        hubbubb_people={},
         speakers=book,
         approvals=Approvals(_TapHass(answer=True), "Jarvis",
                             "Scott: notify.mobile_app_scott"),
@@ -508,6 +509,7 @@ def test_hubbubb_tool_gate_matrix():
     # Denied from the device: error, and the tool is told not to retry.
     denied = types.SimpleNamespace(
         hubbubb=_Hubbubb(),
+        hubbubb_people={},
         speakers=told,
         approvals=Approvals(_TapHass(answer=False), "Jarvis",
                             "Scott: notify.mobile_app_scott"),
@@ -517,10 +519,91 @@ def test_hubbubb_tool_gate_matrix():
     # Blank approvers map: exactly the old behavior, no identity needed.
     open_runtime = types.SimpleNamespace(
         hubbubb=_Hubbubb(),
+        hubbubb_people={},
         speakers=SpeakerBook(None, "", ""),
         approvals=Approvals(None, "Jarvis", ""),
     )
     assert call(open_runtime) == {"answer": "42"}
+
+
+def test_people_lines_split_on_the_first_two_colons_only():
+    from hubbubb_home.hubbubb import parse_people
+
+    people = parse_people(
+        "Scott Landes: hbbc_abc : s3cr3t:with:colons\n"
+        "vega:id2:sec2\n"
+        "no secret here: just_an_id\n"
+        "\n",
+    )
+    assert people == {
+        "scott landes": ("hbbc_abc", "s3cr3t:with:colons"),
+        "vega": ("id2", "sec2"),
+    }
+    assert parse_people("") == {}
+
+
+def test_hubbubb_tool_uses_the_verified_persons_own_client():
+    import asyncio
+    import time as _time
+
+    from hubbubb_home.approvals import Approvals
+    from hubbubb_home.llm_api import AskHubbubbTool
+
+    class _Client:
+        def __init__(self, who):
+            self.who = who
+            self.calls = 0
+
+        async def async_ask(self, request):
+            self.calls += 1
+            return f"answered as {self.who}"
+
+    def call(runtime):
+        return asyncio.run(
+            AskHubbubbTool(runtime).async_call(
+                None,
+                types.SimpleNamespace(tool_args={"request": "inbox?"}),
+                None,
+            )
+        )
+
+    shared, scotts = _Client("shared"), _Client("scott")
+    book = SpeakerBook(None, "", "")
+    runtime = types.SimpleNamespace(
+        hubbubb=shared,
+        hubbubb_people={"scott": scotts},
+        speakers=book,
+        approvals=Approvals(_TapHass(answer=True), "Jarvis",
+                            "Scott: notify.mobile_app_scott"),
+    )
+
+    # Verified Scott gets Scott's client, never the shared one.
+    book.record({"person": "Scott", "confidence": 0.95, "ts": _time.time()})
+    assert call(runtime) == {"answer": "answered as scott"}
+    assert (shared.calls, scotts.calls) == (0, 1)
+
+    # A verified person with no linked account: refused, shared NOT used.
+    vega = SpeakerBook(None, "", "")
+    vega.set_override("Vega")
+    runtime.speakers = vega
+    runtime.approvals = Approvals(_TapHass(answer=True), "Jarvis",
+                                  "Vega: notify.mobile_app_vega")
+    result = call(runtime)
+    assert "No Hubbubb account is linked for Vega" in result["error"]
+    assert shared.calls == 0
+
+    # People map set but no approvers: identity is still demanded...
+    lone = types.SimpleNamespace(
+        hubbubb=shared,
+        hubbubb_people={"scott": scotts},
+        speakers=SpeakerBook(None, "", ""),
+        approvals=Approvals(None, "Jarvis", ""),
+    )
+    assert call(lone)["error"] == "speaker_not_verified"
+    # ...and a told identity picks their client without any tap.
+    lone.speakers.set_override("Scott")
+    assert call(lone) == {"answer": "answered as scott"}
+    assert shared.calls == 0
 
 
 # --- timers ------------------------------------------------------------------

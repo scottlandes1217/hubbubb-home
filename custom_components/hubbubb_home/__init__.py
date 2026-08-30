@@ -50,6 +50,7 @@ from .const import (
     CONF_COMPANION_URL,
     CONF_HUBBUBB,
     CONF_HUBBUBB_ID,
+    CONF_HUBBUBB_PEOPLE,
     CONF_HUBBUBB_SECRET,
     CONF_HUBBUBB_URL,
     CONF_IGNORE,
@@ -84,7 +85,7 @@ from .const import (
 )
 from . import appletv
 from .approvals import Approvals
-from .hubbubb import HubbubbClient, HubbubbError
+from .hubbubb import HubbubbClient, HubbubbError, parse_people
 from .intents import ALL_INTENTS, async_register_all
 from .llm_api import HubbubbAPI
 from .memory import Memory
@@ -129,6 +130,9 @@ class Runtime:
     companion: CompanionClient
     speakers: SpeakerBook
     approvals: Approvals
+    # person (lowercased) -> that person's own HubbubbClient. Non-empty means
+    # the voice path must act as the verified speaker, never the shared account.
+    hubbubb_people: dict = field(default_factory=dict)
     unsubscribe: list = field(default_factory=list)
 
     def option(self, section: str, key: str, default: Any = None) -> Any:
@@ -181,6 +185,22 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         companion_conf.get(CONF_COMPANION_TOKEN),
     )
 
+    hubbubb_people = {}
+    if people_conf := (hub_conf.get(CONF_HUBBUBB_PEOPLE) or "").strip():
+        if hub_conf.get(CONF_HUBBUBB_URL):
+            hubbubb_people = {
+                person: HubbubbClient(
+                    session, hub_conf[CONF_HUBBUBB_URL], client_id, secret
+                )
+                for person, (client_id, secret)
+                in parse_people(people_conf).items()
+            }
+        else:
+            _LOGGER.warning(
+                "per-person Hubbubb lines are configured but there is no "
+                "Hubbubb URL; they will be ignored"
+            )
+
     voice_conf = entry.options.get(CONF_VOICE) or {}
     speakers = SpeakerBook(
         session,
@@ -201,6 +221,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         companion=companion,
         speakers=speakers,
         approvals=approvals,
+        hubbubb_people=hubbubb_people,
     )
 
     async def _timer_finished(timer) -> None:
@@ -481,9 +502,12 @@ def _async_register_services(hass: HomeAssistant, runtime: Runtime) -> None:
         return {"timer": timer.as_dict()}
 
     async def ask_hubbubb(call: ServiceCall) -> ServiceResponse:
-        # Deliberately NOT behind the person-approval gate: services and
-        # cards are LAN/dashboard surfaces already behind HA's own login.
-        # The gate covers the voice path, where anyone can talk at a puck.
+        # Deliberately NOT behind the person-approval gate, and deliberately
+        # on the shared account even when per-person credentials exist:
+        # services and cards are LAN/dashboard surfaces already behind HA's
+        # own login, with no speaker to attribute a call to. The gate and the
+        # per-person clients cover the voice path, where anyone can talk at
+        # a puck.
         if runtime.hubbubb is None:
             raise HomeAssistantError("Hubbubb is not connected")
         try:
