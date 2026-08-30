@@ -40,8 +40,23 @@ def _track_point_in_time(hass, action, when):
     return _cancel
 
 
+try:  # speakers.py imports aiohttp; absent here, only names are needed
+    import aiohttp  # noqa: F401
+except ImportError:
+    _stub(
+        "aiohttp",
+        web=types.SimpleNamespace(Request=object),
+        ClientTimeout=lambda **k: None,
+        ClientError=Exception,
+    )
+
 _stub("homeassistant")
-_stub("homeassistant.components")
+_components = _stub("homeassistant.components")
+_components.webhook = _stub(
+    "homeassistant.components.webhook",
+    async_register=lambda *a, **k: None,
+    async_unregister=lambda *a, **k: None,
+)
 _stub(
     "homeassistant.components.recorder",
     get_instance=lambda hass: hass,
@@ -120,6 +135,7 @@ _pkg.__path__ = [str(PKG)]
 sys.modules["hubbubb_home"] = _pkg
 
 from hubbubb_home.memory import Memory  # noqa: E402
+from hubbubb_home.speakers import SpeakerBook  # noqa: E402
 from hubbubb_home.timers import TimerPool  # noqa: E402
 from hubbubb_home.nightly import FindingsReport, _days  # noqa: E402
 from hubbubb_home.appletv import _TEMPLATE, _match_source, decide_plan  # noqa: E402
@@ -183,6 +199,138 @@ def test_memory_round_trip_against_a_real_database():
             assert len(await store.async_all()) == 1
 
         asyncio.run(_run())
+
+
+def test_memory_migrates_a_pre_person_database():
+    """A 0.17 database (no person column) must rebuild, keeping every row
+    as the household's, or the update eats everyone's memories."""
+    import asyncio
+    import sqlite3
+    import tempfile
+
+    class _MemHass:
+        def __init__(self, path):
+            self.config = types.SimpleNamespace(path=lambda *p: path)
+
+        async def async_add_executor_job(self, fn, *args):
+            return fn(*args)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = str(Path(tmp) / "old.db")
+        old = sqlite3.connect(path)
+        old.execute("CREATE VIRTUAL TABLE memories USING fts5(text, created)")
+        old.execute(
+            "INSERT INTO memories VALUES ('the gate code is 4321', '2026-01-01')"
+        )
+        old.commit()
+        old.close()
+
+        store = Memory(_MemHass(path))
+
+        async def _run():
+            await store.async_setup()
+            rows = await store.async_all()
+            assert rows == [("the gate code is 4321", "")], rows
+            # And the rebuilt table still matches like an FTS index.
+            hits = await store.async_search("what's the gate code?")
+            assert hits and "4321" in hits[0], hits
+
+        asyncio.run(_run())
+
+
+def test_memory_person_scoping():
+    """A person sees their own memories plus the household's - never
+    somebody else's - and an unscoped search still sees everything."""
+    import asyncio
+    import tempfile
+
+    class _MemHass:
+        def __init__(self, path):
+            self.config = types.SimpleNamespace(path=lambda *p: path)
+
+        async def async_add_executor_job(self, fn, *args):
+            return fn(*args)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        store = Memory(_MemHass(str(Path(tmp) / "m.db")))
+
+        async def _run():
+            await store.async_setup()
+            await store.async_add("the bins go out on wednesday")  # household
+            await store.async_add("my dentist is doctor lee", "Scott")
+            await store.async_add("my dentist is doctor patel", "Vega")
+
+            scott = await store.async_search("who is my dentist?", person="Scott")
+            assert any("lee" in h for h in scott), scott
+            assert not any("patel" in h for h in scott), scott
+
+            # Household facts reach everyone.
+            assert await store.async_search("bins", person="Vega")
+
+            # Unscoped (service calls, pre-0.18 behaviour) sees the lot.
+            both = await store.async_search("dentist", limit=5)
+            assert len(both) == 2, both
+
+            # Forgetting scoped to Vega cannot delete Scott's row.
+            gone = await store.async_forget("dentist", person="Vega")
+            assert gone and "patel" in gone, gone
+
+        asyncio.run(_run())
+
+
+# --- speakers ----------------------------------------------------------------
+
+def test_speaker_resolution_precedence():
+    import time as _time
+
+    book = SpeakerBook(None, "", "puck-bedroom: Vega")
+    now = _time.time()
+
+    # Nothing known at all.
+    assert book.resolve() == (None, 0.0, None)
+
+    # Device default is a lean, not an identification.
+    assert book.resolve("puck-bedroom") == ("Vega", 0.5, "device")
+    assert book.resolve("puck-unknown") == (None, 0.0, None)
+
+    # A stale voice event explains nothing (the 20 second window).
+    book.record({"person": "Scott", "confidence": 0.9, "ts": now - 25})
+    assert book.resolve("puck-bedroom")[2] == "device"
+
+    # A fresh one beats the device default.
+    book.record({"person": "Scott", "confidence": 0.9, "ts": now - 2})
+    assert book.resolve("puck-bedroom") == ("Scott", 0.9, "voice")
+
+    # A fresh but unsure event (person null) falls through to the device.
+    book.record({"person": None, "confidence": 0.0, "ts": now - 1,
+                 "candidates": {"Scott": 0.6, "Vega": 0.55}})
+    assert book.resolve("puck-bedroom")[2] == "device"
+
+    # Saying who you are beats everything.
+    book.set_override("Dana")
+    assert book.resolve("puck-bedroom") == ("Dana", 1.0, "told")
+
+
+def test_speaker_prompt_line_three_cases():
+    import time as _time
+
+    book = SpeakerBook(None, "", "")
+    line = book.prompt_line()
+    assert "do not know who is speaking" in line, line
+
+    book.record({"person": "Scott", "confidence": 0.5, "ts": _time.time()})
+    assert "probably Scott" in book.prompt_line()
+
+    book.record({"person": "Scott", "confidence": 0.92, "ts": _time.time()})
+    assert book.prompt_line() == "The person speaking is Scott."
+
+
+def test_speaker_map_parses_forgivingly():
+    book = SpeakerBook(
+        None, "", "a1: Scott\n\nnot a mapping line\n b2 :  Vega  \n: nobody\n"
+    )
+    assert book.resolve("a1")[0] == "Scott"
+    assert book.resolve("b2")[0] == "Vega"
 
 
 # --- timers ------------------------------------------------------------------

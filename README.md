@@ -194,6 +194,36 @@ voice pipeline at it and anything Home Assistant cannot answer itself is
 typed straight into your coding agent, with the reply spoken when the turn
 actually finishes.
 
+### Speaker identification (optional)
+
+The voice pipeline hands every agent a transcript with no idea who said it.
+The companion machine's **voice service** (see `companion/voice-service/`)
+does hear the audio: it transcribes locally and compares each utterance to
+the household's enrolled voices, then posts who it heard to the
+`hubbubb_home_speaker` webhook. Put the service's URL in the *Speaker
+identification* options section and:
+
+- memories become **per-person** — "remember that I like the heat at 68"
+  files under whoever said it, house facts stay shared;
+- the language model is told who is speaking (or told to ask, when the house
+  isn't sure — "this is Scott" answers it and trains the voice profile);
+- coding-agent handoffs are prefixed with the speaker's name.
+
+The *device owners* map is the no-ML fallback: an assist device in someone's
+own room probably hears them. Leave the URL blank and all of this is off —
+memory is household-wide, exactly as before.
+
+### A local model as the house brain (optional)
+
+Small local models are enough for most of a house's day. Run one with
+[Ollama](https://ollama.com), add Home Assistant's own Ollama integration,
+and give it both the **Assist** and **Hubbubb Home** APIs: it gets the house,
+the memories, the timers — and a `hand_to_companion` tool, so anything beyond
+it (multi-step work, coding, research) is handed to the coding agent, which
+answers aloud later through the message webhook. Point your voice pipeline at
+the Ollama agent to keep everyday requests fast, private and free, with the
+frontier model as the escape hatch rather than the default.
+
 ---
 
 ## Development

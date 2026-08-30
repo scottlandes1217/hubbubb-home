@@ -35,7 +35,7 @@
       "hubbubb_incomplete": "Hubbubb needs all three: endpoint, client ID and client secret.",
       "hubbubb_auth": "Hubbubb refused those credentials, or could not be reached.",
       "companion_unreachable": "Nothing answered at that address. Check the host and port, and that the companion is running and reachable from Home Assistant.",
-      "companion_refused": "The companion answered but refused the request \u2014 usually a wrong token."
+      "companion_refused": "The companion answered but refused the request — usually a wrong token."
     },
     "abort": {
       "already_configured": "Hubbubb Home is already set up."
@@ -47,14 +47,33 @@
         "title": "Hubbubb Home",
         "data": {
           "assistant_name": "Assistant name",
-          "prompt": "Personality",
-          "install_sentences": "Install voice sentences"
+          "prompt": "Personality"
         },
         "data_description": {
-          "prompt": "Given to your language model alongside Home Assistant's own instructions. Write the assistant's name as a placeholder in curly braces and it will be filled in.",
-          "install_sentences": "Turn this off if your setup already answers phrases like \"remember that\u2026\" with its own intents \u2014 two files claiming one phrase means one of them loses, silently. Takes effect after a restart."
+          "prompt": "Given to your language model alongside Home Assistant's own instructions. Write the assistant's name as a placeholder in curly braces and it will be filled in."
         },
         "sections": {
+          "sentences": {
+            "name": "Voice sentences",
+            "description": "Turn one off if your setup already answers those phrases with its own intents — two files claiming one phrase means one of them loses, silently. The Apple TV sentences are not here: picking Apple TVs below is their own opt-in. Takes effect after a restart.",
+            "data": {
+              "house": "House (\"how's the house\", build mode, ask Hubbubb)",
+              "memory": "Memory (\"remember that…\")",
+              "timers": "Timers (\"set a timer for…\")"
+            }
+          },
+          "announcements": {
+            "name": "Agent announcements",
+            "description": "How a finished coding-agent turn reaches you.",
+            "data": {
+              "notify_service": "Phone push when the announcement switch is off",
+              "ack": "Spoken when speech is handed to the coding agent"
+            },
+            "data_description": {
+              "notify_service": "A notify service like notify.mobile_app_your_phone. Blank means switched-off announcements are simply dropped.",
+              "ack": "The real answer is announced later, when the turn actually finishes. Blank for a silent handoff."
+            }
+          },
           "overnight": {
             "name": "Overnight sweep",
             "description": "Once a night, look for things that have gone offline or stopped changing. It only ever reports.",
@@ -77,7 +96,26 @@
             },
             "data_description": {
               "briefing_target": "One or more voice satellites or speakers. Also where finished timers announce themselves.",
-              "tts_entity": "Only needed if you chose a speaker \u2014 a satellite has its own voice, a speaker needs one picking."
+              "tts_entity": "Only needed if you chose a speaker — a satellite has its own voice, a speaker needs one picking."
+            }
+          },
+          "voice": {
+            "name": "Speaker identification",
+            "description": "Who is talking. Needs the voice service running on the companion computer — leave the URL blank and everything works exactly as before, with no idea who is speaking.",
+            "data": {
+              "voice_service_url": "Voice service URL",
+              "speaker_map": "Device owners (one \"device_id: Name\" per line)"
+            },
+            "data_description": {
+              "voice_service_url": "Where the voice service answers, like http://mac.local:10301. Blank turns speaker identification off.",
+              "speaker_map": "A fallback when the voice is not recognised: the assist device in someone's own room probably hears them. Device IDs are on each device's page."
+            }
+          },
+          "apple_tv": {
+            "name": "Apple TV",
+            "description": "Pick your Apple TVs and the assistant answers \"play …\", \"open netflix\", \"pause the apple tv\" itself — music plays natively in the tvOS Music app. Each box's room name comes from its Home Assistant area. Takes effect after a restart (the voice sentences are generated from this list).",
+            "data": {
+              "apple_tvs": "Apple TVs"
             }
           },
           "hubbubb": {
@@ -102,7 +140,7 @@
       "hubbubb_incomplete": "Hubbubb needs all three: endpoint, client ID and client secret.",
       "hubbubb_auth": "Hubbubb refused those credentials, or could not be reached.",
       "companion_unreachable": "Nothing answered at that address. Check the host and port, and that the companion is running and reachable from Home Assistant.",
-      "companion_refused": "The companion answered but refused the request \u2014 usually a wrong token."
+      "companion_refused": "The companion answered but refused the request — usually a wrong token."
     }
   },
   "services": {

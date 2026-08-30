@@ -65,6 +65,9 @@ from .const import (
     CONF_ANNOUNCE,
     CONF_NOTIFY,
     CONF_SENTENCES_SECTION,
+    CONF_SPEAKER_MAP,
+    CONF_VOICE,
+    CONF_VOICE_URL,
     DEFAULT_PROMPT,
     DOMAIN,
     EVENT_MESSAGE,
@@ -77,6 +80,7 @@ from .hubbubb import HubbubbClient, HubbubbError
 from .intents import ALL_INTENTS, async_register_all
 from .llm_api import HubbubbAPI
 from .memory import Memory
+from .speakers import SpeakerBook, async_register_webhook as _speaker_webhook
 from .nightly import FindingsReport, async_sweep
 from .timers import TimerPool
 
@@ -115,6 +119,7 @@ class Runtime:
     findings: FindingsReport
     hubbubb: HubbubbClient | None
     companion: CompanionClient
+    speakers: SpeakerBook
     unsubscribe: list = field(default_factory=list)
 
     def option(self, section: str, key: str, default: Any = None) -> Any:
@@ -167,6 +172,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         companion_conf.get(CONF_COMPANION_TOKEN),
     )
 
+    voice_conf = entry.options.get(CONF_VOICE) or {}
+    speakers = SpeakerBook(
+        session,
+        voice_conf.get(CONF_VOICE_URL),
+        voice_conf.get(CONF_SPEAKER_MAP),
+    )
+
     runtime = Runtime(
         entry=entry,
         hass=hass,
@@ -176,6 +188,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         findings=findings,
         hubbubb=hubbubb,
         companion=companion,
+        speakers=speakers,
     )
 
     async def _timer_finished(timer) -> None:
@@ -201,6 +214,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     _async_register_services(hass, runtime)
     _async_register_webhook(hass, runtime)
+    _speaker_webhook(hass, runtime)
     _async_schedule(hass, runtime)
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)

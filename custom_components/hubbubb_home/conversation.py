@@ -85,10 +85,12 @@ class CompanionConversationEntity(conversation.ConversationEntity):
             return salvaged
 
         response = IntentResponse(language=user_input.language)
+        # The coding agent gets the speaker's name when the house knows it,
+        # so its sessions and replies can be theirs.
+        person, _, _ = self._runtime.speakers.resolve(user_input.device_id)
+        text = f"[{person}] {user_input.text}" if person else user_input.text
         try:
-            await self._runtime.companion.async_call(
-                "prompt", {"text": user_input.text}
-            )
+            await self._runtime.companion.async_call("prompt", {"text": text})
         except CompanionError as err:
             _LOGGER.warning(
                 "companion refused %r: %s", user_input.text, err

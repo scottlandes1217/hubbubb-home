@@ -56,7 +56,10 @@ from .const import (
     CONF_PROMPT,
     CONF_SENTENCES,
     CONF_SENTENCES_SECTION,
+    CONF_SPEAKER_MAP,
     CONF_TTS,
+    CONF_VOICE,
+    CONF_VOICE_URL,
     CONF_WEATHER,
     DEFAULT_ACK,
     DEFAULT_BRIEFING_TIME,
@@ -287,6 +290,19 @@ class HubbubbHomeOptionsFlow(OptionsFlow):
                             vol.Optional(CONF_CALENDARS): EntitySelector(
                                 EntitySelectorConfig(
                                     domain="calendar", multiple=True
+                                )
+                            ),
+                        }
+                    ),
+                    {"collapsed": True},
+                ),
+                vol.Required(CONF_VOICE): section(
+                    vol.Schema(
+                        {
+                            vol.Optional(CONF_VOICE_URL): _URL,
+                            vol.Optional(CONF_SPEAKER_MAP, default=""): TextSelector(
+                                TextSelectorConfig(
+                                    type=TextSelectorType.TEXT, multiline=True
                                 )
                             ),
                         }

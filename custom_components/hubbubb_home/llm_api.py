@@ -24,6 +24,7 @@ from homeassistant.util.json import JsonObjectType
 from .companion import CompanionError
 from .const import DOMAIN
 from .hubbubb import HubbubbError
+from .speakers import SpeakerServiceError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -45,6 +46,7 @@ class HubbubbAPI(llm.API):
             RememberTool(runtime),
             RecallTool(runtime),
             ForgetTool(runtime),
+            SetSpeakerTool(runtime),
             StartTimerTool(runtime),
             CancelTimerTool(runtime),
             TimerStatusTool(runtime),
@@ -52,10 +54,15 @@ class HubbubbAPI(llm.API):
         ]
         if runtime.hubbubb is not None:
             tools.append(AskHubbubbTool(runtime))
+        if runtime.companion.configured:
+            tools.append(EscalateTool(runtime))
 
+        speaker = runtime.speakers.prompt_line(
+            getattr(llm_context, "device_id", None)
+        )
         return llm.APIInstance(
             api=self,
-            api_prompt=runtime.persona(),
+            api_prompt=f"{runtime.persona()}\n\n{speaker}",
             llm_context=llm_context,
             tools=tools,
         )
@@ -67,6 +74,12 @@ class _RuntimeTool(llm.Tool):
     def __init__(self, runtime) -> None:
         self._runtime = runtime
 
+    def _speaker(self, llm_context) -> str | None:
+        person, _, _ = self._runtime.speakers.resolve(
+            getattr(llm_context, "device_id", None)
+        )
+        return person
+
 
 class RememberTool(_RuntimeTool):
     name = "remember"
@@ -75,22 +88,30 @@ class RememberTool(_RuntimeTool):
         "schedule, a code, a name, a past decision. Use it whenever you are "
         "told something worth knowing next week. Write one short "
         "self-contained sentence; do not store passwords or anything the "
-        "speaker asked you to keep out of memory."
+        "speaker asked you to keep out of memory. personal=true files it "
+        "under whoever is speaking (their preferences, their schedule); "
+        "personal=false makes it a household fact everyone shares."
     )
     parameters = vol.Schema(
-        {vol.Required("fact"): vol.All(str, vol.Length(min=3, max=500))}
+        {
+            vol.Required("fact"): vol.All(str, vol.Length(min=3, max=500)),
+            vol.Optional("personal", default=True): bool,
+        }
     )
 
     async def async_call(
         self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context
     ) -> JsonObjectType:
+        person = self._speaker(llm_context) or ""
+        if not tool_input.tool_args.get("personal", True):
+            person = ""
         try:
             stored = await self._runtime.memory.async_add(
-                tool_input.tool_args["fact"]
+                tool_input.tool_args["fact"], person
             )
         except ValueError as err:
             return {"error": str(err)}
-        return {"stored": stored}
+        return {"stored": stored, "for": person or "the household"}
 
 
 class RecallTool(_RuntimeTool):
@@ -115,6 +136,7 @@ class RecallTool(_RuntimeTool):
         hits = await self._runtime.memory.async_search(
             tool_input.tool_args["query"],
             tool_input.tool_args.get("limit", 3),
+            person=self._speaker(llm_context),
         )
         return {"memories": hits, "found": len(hits)}
 
@@ -136,6 +158,59 @@ class ForgetTool(_RuntimeTool):
         if gone is None:
             return {"forgot": None, "detail": "nothing matched"}
         return {"forgot": gone}
+
+
+class SetSpeakerTool(_RuntimeTool):
+    name = "identify_speaker"
+    description = (
+        "Record who is speaking, when they tell you ('this is Scott') or "
+        "answer your question about who they are. This also teaches the "
+        "house their voice for next time. Use the name they gave, nothing "
+        "invented."
+    )
+    parameters = vol.Schema(
+        {vol.Required("person"): vol.All(str, vol.Length(min=1, max=100))}
+    )
+
+    async def async_call(
+        self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context
+    ) -> JsonObjectType:
+        person = tool_input.tool_args["person"].strip()
+        self._runtime.speakers.set_override(person)
+        result: JsonObjectType = {"speaker": person}
+        try:
+            await self._runtime.speakers.async_label(person)
+        except SpeakerServiceError as err:
+            # The override still holds for this conversation; only the
+            # voice-profile training was missed.
+            result["training"] = f"not recorded: {err}"
+        return result
+
+
+class EscalateTool(_RuntimeTool):
+    name = "hand_to_companion"
+    description = (
+        "Hand a request to the much more capable coding agent on the "
+        "companion computer. Use it when the request is beyond you: "
+        "multi-step jobs, coding, research, anything needing files or the "
+        "web. The agent answers aloud later, so after calling this just "
+        "acknowledge that it's being worked on."
+    )
+    parameters = vol.Schema(
+        {vol.Required("request"): vol.All(str, vol.Length(min=3, max=2000))}
+    )
+
+    async def async_call(
+        self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context
+    ) -> JsonObjectType:
+        text = tool_input.tool_args["request"]
+        if person := self._speaker(llm_context):
+            text = f"[{person}] {text}"
+        try:
+            await self._runtime.companion.async_call("prompt", {"text": text})
+        except CompanionError as err:
+            return {"error": str(err)}
+        return {"handed_off": True}
 
 
 class StartTimerTool(_RuntimeTool):

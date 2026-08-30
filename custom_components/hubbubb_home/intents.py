@@ -16,6 +16,7 @@ from homeassistant.helpers import config_validation as cv, intent
 
 from .const import DOMAIN
 from .hubbubb import HubbubbError
+from .speakers import CONFIDENT, SpeakerServiceError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -30,12 +31,14 @@ INTENT_BUILD_ON = "HubbubbBuildOn"
 INTENT_BUILD_OFF = "HubbubbBuildOff"
 INTENT_FINDINGS = "HubbubbFindings"
 INTENT_HUBBUBB = "HubbubbAsk"
+INTENT_IDENTIFY = "HubbubbIdentify"
+INTENT_WHO = "HubbubbWhoAmI"
 
 ALL_INTENTS = (
     INTENT_REMEMBER, INTENT_RECALL, INTENT_FORGET,
     INTENT_TIMER_START, INTENT_TIMER_CANCEL, INTENT_TIMER_ADD,
     INTENT_TIMER_STATUS, INTENT_BUILD_ON, INTENT_BUILD_OFF,
-    INTENT_FINDINGS, INTENT_HUBBUBB,
+    INTENT_FINDINGS, INTENT_HUBBUBB, INTENT_IDENTIFY, INTENT_WHO,
 )
 
 
@@ -53,6 +56,8 @@ def async_register_all(hass: HomeAssistant, runtime) -> None:
         BuildModeHandler(runtime, INTENT_BUILD_OFF, False),
         FindingsHandler(runtime),
         AskHubbubbHandler(runtime),
+        IdentifyHandler(runtime),
+        WhoAmIHandler(runtime),
     ):
         intent.async_register(hass, handler)
 
@@ -69,6 +74,24 @@ class _Handler(intent.IntentHandler):
         response.async_set_speech(speech)
         return response
 
+    def _speaker(self, intent_obj: intent.Intent):
+        return self._runtime.speakers.resolve(
+            getattr(intent_obj, "device_id", None)
+        )
+
+
+def _sounds_personal(fact: str) -> bool:
+    """Whether a spoken fact is about the speaker rather than the house.
+
+    ponytail: pronoun sniff - "I like...", "my dentist..." reads personal,
+    everything else is the household's. A language-model agent decides this
+    properly; the sentence intent only has the words.
+    """
+    words = fact.lower().split()
+    return bool(words) and (
+        words[0] in ("i", "my", "i'm", "i've") or "my" in words[1:3]
+    )
+
 
 class RememberHandler(_Handler):
     intent_type = INTENT_REMEMBER
@@ -77,8 +100,12 @@ class RememberHandler(_Handler):
 
     async def async_handle(self, intent_obj: intent.Intent):
         slots = self.async_validate_slots(intent_obj.slots)
+        fact = slots["fact"]["value"]
+        person, _, _ = self._speaker(intent_obj)
         try:
-            await self._runtime.memory.async_add(slots["fact"]["value"])
+            await self._runtime.memory.async_add(
+                fact, person if person and _sounds_personal(fact) else ""
+            )
         except ValueError:
             return self._say(intent_obj, "There was nothing to remember.")
         return self._say(intent_obj, "I'll remember that.")
@@ -91,7 +118,10 @@ class RecallHandler(_Handler):
 
     async def async_handle(self, intent_obj: intent.Intent):
         slots = self.async_validate_slots(intent_obj.slots)
-        hits = await self._runtime.memory.async_search(slots["query"]["value"])
+        person, _, _ = self._speaker(intent_obj)
+        hits = await self._runtime.memory.async_search(
+            slots["query"]["value"], person=person
+        )
         if not hits:
             return self._say(
                 intent_obj, "I don't have anything about that."
@@ -272,6 +302,48 @@ class AskHubbubbHandler(_Handler):
             _LOGGER.warning("Hubbubb refused: %s", err)
             return self._say(intent_obj, "Hubbubb didn't answer.")
         return self._say(intent_obj, answer or "Hubbubb had nothing to say.")
+
+
+class IdentifyHandler(_Handler):
+    intent_type = INTENT_IDENTIFY
+    slot_schema = {vol.Required("person"): cv.string}
+    description = "The speaker says who they are"
+
+    async def async_handle(self, intent_obj: intent.Intent):
+        slots = self.async_validate_slots(intent_obj.slots)
+        # STT hands names over lowercase; store them like names.
+        person = str(slots["person"]["value"]).strip().title()
+        if not person:
+            return self._say(intent_obj, "I didn't catch the name.")
+        self._runtime.speakers.set_override(person)
+        try:
+            await self._runtime.speakers.async_label(person)
+        except SpeakerServiceError as err:
+            _LOGGER.debug("could not train the voice profile: %s", err)
+            return self._say(intent_obj, f"Hello {person}.")
+        return self._say(
+            intent_obj, f"Hello {person}. I'll know your voice better now."
+        )
+
+
+class WhoAmIHandler(_Handler):
+    intent_type = INTENT_WHO
+    slot_schema = {}
+    description = "Say who the house thinks is speaking"
+
+    async def async_handle(self, intent_obj: intent.Intent):
+        person, confidence, source = self._speaker(intent_obj)
+        if person is None:
+            return self._say(
+                intent_obj,
+                "I don't know yet. Tell me by saying: this is, and your name.",
+            )
+        if source == "told" or (source == "voice" and confidence >= CONFIDENT):
+            return self._say(intent_obj, f"You're {person}.")
+        return self._say(
+            intent_obj, f"Probably {person}, but I haven't heard enough "
+            "of your voice to be sure."
+        )
 
 
 def _slot(slots: dict, key: str) -> int:

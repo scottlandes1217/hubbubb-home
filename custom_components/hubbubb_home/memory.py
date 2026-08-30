@@ -40,12 +40,27 @@ class Memory:
         self._hass = hass
         self._path = hass.config.path(MEMORY_DB)
 
+    _SCHEMA = (
+        "CREATE VIRTUAL TABLE IF NOT EXISTS memories "
+        "USING fts5(text, created UNINDEXED, person UNINDEXED)"
+    )
+
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._path, timeout=10)
-        conn.execute(
-            "CREATE VIRTUAL TABLE IF NOT EXISTS memories "
-            "USING fts5(text, created)"
-        )
+        conn.execute(self._SCHEMA)
+        # Pre-0.18 databases have no person column, and FTS5 cannot ALTER a
+        # column in - so rebuild once, with every old row owned by the
+        # household ('').
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(memories)")]
+        if "person" not in cols:
+            with conn:
+                conn.execute("ALTER TABLE memories RENAME TO memories_v1")
+                conn.execute(self._SCHEMA)
+                conn.execute(
+                    "INSERT INTO memories (text, created, person) "
+                    "SELECT text, created, '' FROM memories_v1"
+                )
+                conn.execute("DROP TABLE memories_v1")
         return conn
 
     async def async_setup(self) -> None:
@@ -56,8 +71,11 @@ class Memory:
 
     # --- writes --------------------------------------------------------------
 
-    async def async_add(self, text: str) -> str:
-        """Store one fact. Returns what was stored, for the spoken reply."""
+    async def async_add(self, text: str, person: str = "") -> str:
+        """Store one fact. Returns what was stored, for the spoken reply.
+
+        person is who the fact belongs to; "" is the household's.
+        """
         text = " ".join(text.split())
         if not text:
             raise ValueError("nothing to remember")
@@ -66,8 +84,9 @@ class Memory:
             conn = self._connect()
             with conn:
                 conn.execute(
-                    "INSERT INTO memories (text, created) VALUES (?, ?)",
-                    (text, date.today().isoformat()),
+                    "INSERT INTO memories (text, created, person) "
+                    "VALUES (?, ?, ?)",
+                    (text, date.today().isoformat(), person.strip()),
                 )
             conn.close()
 
@@ -75,9 +94,9 @@ class Memory:
         _LOGGER.debug("remembered: %s", text)
         return text
 
-    async def async_forget(self, query: str) -> str | None:
+    async def async_forget(self, query: str, person: str | None = None) -> str | None:
         """Delete the single best match. Returns it, or None if nothing hit."""
-        hits = await self.async_search(query, limit=1)
+        hits = await self.async_search(query, limit=1, person=person)
         if not hits:
             return None
         target = hits[0]
@@ -93,19 +112,29 @@ class Memory:
 
     # --- reads ---------------------------------------------------------------
 
-    async def async_search(self, query: str, limit: int = 3) -> list[str]:
+    async def async_search(
+        self, query: str, limit: int = 3, person: str | None = None
+    ) -> list[str]:
+        """Best matches. person scopes to that person's rows plus the
+        household's (''); None searches everything, as before 0.18."""
         match = self._to_match(query)
         if not match:
             return []
 
         def _search() -> list[str]:
             conn = self._connect()
+            sql = (
+                "SELECT text FROM memories WHERE memories MATCH ? "
+                "{scope}ORDER BY bm25(memories) LIMIT ?"
+            )
+            args: tuple = (match, limit)
+            if person:
+                sql = sql.format(scope="AND person IN (?, '') ")
+                args = (match, person, limit)
+            else:
+                sql = sql.format(scope="")
             try:
-                rows = conn.execute(
-                    "SELECT text FROM memories WHERE memories MATCH ? "
-                    "ORDER BY bm25(memories) LIMIT ?",
-                    (match, limit),
-                ).fetchall()
+                rows = conn.execute(sql, args).fetchall()
             except sqlite3.OperationalError:
                 # A query that survived _to_match but still isn't valid FTS5
                 # should return nothing, not take the intent down with it.
@@ -117,14 +146,16 @@ class Memory:
 
         return await self._hass.async_add_executor_job(_search)
 
-    async def async_all(self) -> list[str]:
-        def _all() -> list[str]:
+    async def async_all(self) -> list[tuple[str, str]]:
+        """Every (text, person) pair, newest first."""
+
+        def _all() -> list[tuple[str, str]]:
             conn = self._connect()
             rows = conn.execute(
-                "SELECT text FROM memories ORDER BY rowid DESC"
+                "SELECT text, person FROM memories ORDER BY rowid DESC"
             ).fetchall()
             conn.close()
-            return [r[0] for r in rows]
+            return [(r[0], r[1]) for r in rows]
 
         return await self._hass.async_add_executor_job(_all)
 

@@ -1,5 +1,13 @@
 language: en
 intents:
+  # No wildcards here, so it goes first: the wildcard rules below would
+  # otherwise eat these words as a query.
+  HubbubbWhoAmI:
+    data:
+      - sentences:
+          - "who am I"
+          - "who is (speaking|talking)"
+          - "do you know who (I am|this is)"
   HubbubbRecall:
     data:
       # Bare and question forms first: the wildcard below matches almost
@@ -23,8 +31,19 @@ intents:
           - "remember {fact}"
           - "make a note that {fact}"
           - "don't forget that {fact}"
+  # Wildcard name, so it stays last. "I am {person}" is deliberately absent:
+  # it swallows "I am cold" and everything like it.
+  HubbubbIdentify:
+    data:
+      - sentences:
+          - "this is {person} speaking"
+          - "this is {person}"
+          - "it's me {person}"
+          - "my name is {person}"
 lists:
   fact:
     wildcard: true
   query:
+    wildcard: true
+  person:
     wildcard: true

@@ -34,6 +34,12 @@ CONF_SENTENCES = "install_sentences"
 CONF_SENTENCES_SECTION = "sentences"
 SENTENCE_FILES = ("house", "memory", "timers")
 
+# Options section for speaker identity. The voice service URL doubles as the
+# on/off switch: blank means no speaker identification anywhere.
+CONF_VOICE = "voice"
+CONF_VOICE_URL = "voice_service_url"
+CONF_SPEAKER_MAP = "speaker_map"
+
 CONF_ATV = "apple_tv"
 CONF_ATV_ENTITIES = "apple_tvs"
 CONF_NIGHTLY_TIME = "nightly_time"
@@ -63,6 +69,10 @@ MEMORY_DB = "hubbubb_home_memory.db"
 # to speak it. This is how a companion announces a finished agent turn.
 WEBHOOK_MESSAGE = f"{DOMAIN}_message"
 EVENT_MESSAGE = f"{DOMAIN}_message"
+
+# The voice service on the companion machine POSTs one event here per
+# utterance: {"person", "confidence", "ts", "text", "candidates"}.
+WEBHOOK_SPEAKER = f"{DOMAIN}_speaker"
 
 CARDS = (
     "hubbubb-ring-card.js",
