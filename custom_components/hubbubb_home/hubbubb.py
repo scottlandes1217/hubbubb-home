@@ -1,4 +1,10 @@
-"""Hubbubb client: OAuth2 client-credentials, then MCP over Streamable HTTP.
+"""Hubbubb client: OAuth2 client-credentials, then the REST runs API.
+
+Hubbubb's entire external surface is one agent-runs API; its MCP endpoint is
+a thin wrapper over the same service, so this speaks REST directly and gains
+the part MCP hides: the run id. A slow answer can be handed to a background
+poll and spoken through the house when it lands, instead of the voice
+pipeline holding its breath for a minute.
 
 Hubbubb issues bearer tokens that live an hour and publishes no .well-known
 discovery, so the token is minted here and re-minted when the server refuses
@@ -12,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any
+from typing import Any, Awaitable, Callable
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -22,15 +28,36 @@ _LOGGER = logging.getLogger(__name__)
 # Sixty seconds of slack so a token cannot expire in flight between the check
 # and the request that uses it.
 _SKEW = 60
+# The API's server-side wait caps at 60s; polling picks up from there.
+_MAX_WAIT = 60
+_POLL_SECONDS = 3
 _TIMEOUT = aiohttp.ClientTimeout(total=120)
+
+# API error codes -> something a voice can say.
+_SPEAKABLE = {
+    "too_many_active_runs": "Hubbubb has too many requests running; try again in a minute",
+    "ai_not_configured": "Hubbubb's AI is not set up for this organisation",
+    "empty_instruction": "there was nothing to ask Hubbubb",
+    "run_as_user_required": "this Hubbubb connection has no acting user",
+    "run_as_user_inactive": "this Hubbubb connection's user is no longer active",
+    "insufficient_scope": "this Hubbubb connection is not allowed to do that",
+}
 
 
 class HubbubbError(Exception):
     """Hubbubb refused or could not be reached."""
 
 
+class HubbubbPending(HubbubbError):
+    """The run is still going; poll `run_id` for the answer."""
+
+    def __init__(self, run_id: str) -> None:
+        super().__init__("Hubbubb is still working on it")
+        self.run_id = run_id
+
+
 class HubbubbClient:
-    """Minimal MCP client for one Hubbubb organisation."""
+    """Minimal runs-API client for one Hubbubb organisation."""
 
     def __init__(
         self,
@@ -40,7 +67,13 @@ class HubbubbClient:
         client_secret: str,
     ) -> None:
         self._session = session
-        self._url = url
+        # The configured URL has historically been the MCP endpoint
+        # (…/api/v1/<org>/mcp); the runs API lives beside it, so accept
+        # either form and strip the /mcp suffix.
+        base = url.rstrip("/")
+        if base.endswith("/mcp"):
+            base = base[: -len("/mcp")]
+        self._runs_url = f"{base}/ai/runs"
         self._id = client_id
         self._secret = client_secret
         parts = urlsplit(url)
@@ -48,7 +81,7 @@ class HubbubbClient:
         self._token: str | None = None
         self._expires = 0.0
         self._lock = asyncio.Lock()
-        self._msg_id = 0
+        self._tasks: set[asyncio.Task] = set()
 
     async def _bearer(self, force: bool = False) -> str:
         async with self._lock:
@@ -75,61 +108,111 @@ class HubbubbClient:
             self._expires = time.time() + int(data.get("expires_in", 3600))
             return self._token
 
-    async def _rpc(self, method: str, params: dict | None = None) -> Any:
-        self._msg_id += 1
-        message = {"jsonrpc": "2.0", "id": self._msg_id, "method": method}
-        if params is not None:
-            message["params"] = params
-
+    async def _request(
+        self, method: str, url: str, body: dict | None = None
+    ) -> dict:
+        """One authenticated call, with a single re-mint on 401."""
         for attempt in (0, 1):
             token = await self._bearer(force=attempt == 1)
             try:
-                async with self._session.post(
-                    self._url,
-                    json=message,
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "Accept": "application/json, text/event-stream",
-                    },
+                async with self._session.request(
+                    method,
+                    url,
+                    json=body,
+                    headers={"Authorization": f"Bearer {token}"},
                     timeout=_TIMEOUT,
                 ) as resp:
                     # A token revoked or expired early reads as 401 here.
                     if resp.status == 401 and attempt == 0:
                         continue
-                    body = await resp.text()
+                    payload = None
+                    try:
+                        payload = await resp.json()
+                    except (aiohttp.ContentTypeError, ValueError):
+                        pass
                     if resp.status >= 400:
+                        code = (payload or {}).get("error", "")
                         raise HubbubbError(
-                            f"Hubbubb HTTP {resp.status}: {body[:200]}"
+                            _SPEAKABLE.get(
+                                code, f"Hubbubb HTTP {resp.status}: {code}"
+                            )
                         )
+                    return payload or {}
             except aiohttp.ClientError as err:
                 raise HubbubbError(f"Hubbubb unreachable: {err}") from err
-
-            if not body.strip():
-                return None
-            payload = _parse(body)
-            if isinstance(payload, dict) and "error" in payload:
-                raise HubbubbError(str(payload["error"].get("message", payload)))
-            return (payload or {}).get("result")
         raise HubbubbError("Hubbubb rejected the credentials")
 
     async def async_verify(self) -> None:
-        """Mint a token and shake hands. Raises HubbubbError if either fails."""
-        await self._rpc(
-            "initialize",
-            {
-                "protocolVersion": "2025-06-18",
-                "capabilities": {},
-                "clientInfo": {"name": "hubbubb-home", "version": "0.1.0"},
-            },
-        )
+        """Mint a token. Raises HubbubbError if the credentials are bad."""
+        await self._bearer(force=True)
 
-    async def async_ask(self, question: str) -> str:
-        """Put a plain-English request to Hubbubb's own agent."""
-        result = await self._rpc(
-            "tools/call",
-            {"name": "ask_hubbubb", "arguments": {"query": question}},
+    async def async_ask(
+        self, question: str, wait: int = 25, timeout: float = 90
+    ) -> str:
+        """Put a plain-English request to Hubbubb's own agent, blocking.
+
+        Waits server-side first (capped at the API's 60s), then polls. Past
+        `timeout` the run is NOT cancelled - HubbubbPending carries its id so
+        the caller can keep polling in the background and speak the answer
+        when it lands.
+        """
+        deadline = time.monotonic() + timeout
+        run = await self._request(
+            "POST",
+            self._runs_url,
+            {"message": question, "wait": min(int(wait), _MAX_WAIT)},
         )
-        return _text_of(result)
+        while not run.get("finished"):
+            if time.monotonic() >= deadline:
+                raise HubbubbPending(str(run.get("id")))
+            await asyncio.sleep(_POLL_SECONDS)
+            run = await self._request("GET", f"{self._runs_url}/{run['id']}")
+        return self._summary_of(run)
+
+    def async_wait_background(
+        self,
+        run_id: str,
+        on_done: Callable[[str, bool], Awaitable[None]],
+        timeout: float = 300,
+    ) -> None:
+        """Keep polling an unfinished run; call on_done(text, ok) at the end.
+
+        Never raises into the void: every failure becomes on_done(text, False).
+        Tasks are tracked so unload can cancel them.
+        """
+
+        async def _poll() -> None:
+            deadline = time.monotonic() + timeout
+            try:
+                while time.monotonic() < deadline:
+                    await asyncio.sleep(_POLL_SECONDS)
+                    run = await self._request(
+                        "GET", f"{self._runs_url}/{run_id}"
+                    )
+                    if run.get("finished"):
+                        await on_done(self._summary_of(run), True)
+                        return
+                await on_done("it took too long and was given up on", False)
+            except asyncio.CancelledError:
+                raise
+            except HubbubbError as err:
+                await on_done(str(err), False)
+            except Exception:  # a broken callback must not crash the loop
+                _LOGGER.exception("background Hubbubb poll failed")
+
+        task = asyncio.get_running_loop().create_task(_poll())
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
+    def cancel_background(self) -> None:
+        for task in self._tasks:
+            task.cancel()
+
+    @staticmethod
+    def _summary_of(run: dict) -> str:
+        if run.get("status") == "failed" or run.get("error"):
+            raise HubbubbError(str(run.get("error") or "the Hubbubb run failed"))
+        return str(run.get("summary") or "").strip()
 
 
 def parse_people(text: str) -> dict[str, tuple[str, str]]:
@@ -145,35 +228,3 @@ def parse_people(text: str) -> dict[str, tuple[str, str]]:
         if person.strip() and client_id.strip() and sep and secret.strip():
             out[person.strip().lower()] = (client_id.strip(), secret.strip())
     return out
-
-
-def _parse(body: str) -> dict | None:
-    """Read a JSON body, or the first data: frame of an SSE response."""
-    import json
-
-    body = body.strip()
-    if body.startswith("{"):
-        return json.loads(body)
-    for line in body.splitlines():
-        if line.startswith("data:"):
-            chunk = line[5:].strip()
-            if chunk and chunk != "[DONE]":
-                return json.loads(chunk)
-    return None
-
-
-def _text_of(result: Any) -> str:
-    """Flatten an MCP tool result into something speakable."""
-    if result is None:
-        return ""
-    if isinstance(result, str):
-        return result
-    content = result.get("content") if isinstance(result, dict) else None
-    if not content:
-        return str(result)
-    parts = [
-        block.get("text", "")
-        for block in content
-        if isinstance(block, dict) and block.get("type") == "text"
-    ]
-    return "\n".join(p for p in parts if p).strip()

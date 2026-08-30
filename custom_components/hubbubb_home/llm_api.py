@@ -24,7 +24,7 @@ from homeassistant.util.json import JsonObjectType
 from .approvals import VERIFY_CONFIDENCE
 from .companion import CompanionError
 from .const import DOMAIN
-from .hubbubb import HubbubbError
+from .hubbubb import HubbubbError, HubbubbPending
 from .speakers import SpeakerServiceError
 
 _LOGGER = logging.getLogger(__name__)
@@ -367,10 +367,11 @@ class AskHubbubbTool(_RuntimeTool):
         "Put a plain-English request to Hubbubb, the household's CRM - "
         "records, correspondence, the inbox. Hubbubb's own agent plans and "
         "runs it, so ask in ordinary words; you do not need field names. "
-        "Answers can take a few seconds, so only call it when the question is "
-        "really about Hubbubb data. When verified people are configured this "
-        "may need the speaker to approve on their own device; a denial is "
-        "final for that request - do not retry it."
+        "Answers can take a few seconds; a slow one comes back as pending and "
+        "the house announces the real answer aloud when it is ready - relay "
+        "that and stop, do not retry. When verified people are configured "
+        "this may need the speaker to approve on their own device; a denial "
+        "is final for that request - do not retry it."
     )
     parameters = vol.Schema({vol.Required("request"): str})
 
@@ -427,7 +428,27 @@ class AskHubbubbTool(_RuntimeTool):
                     )
                 }
         try:
-            answer = await client.async_ask(request)
+            # One short blocking try; past it the run keeps going and the
+            # answer arrives through the announcement policy (quiet hours
+            # included) instead of the pipeline holding its breath.
+            answer = await client.async_ask(request, wait=20, timeout=22)
+        except HubbubbPending as pending:
+            announce = self._runtime.announce_message
+
+            async def _done(text: str, ok: bool) -> None:
+                await announce(
+                    f"Hubbubb says: {text}" if ok
+                    else f"Hubbubb couldn't finish that: {text}"
+                )
+
+            client.async_wait_background(pending.run_id, _done)
+            return {
+                "pending": True,
+                "detail": (
+                    "Hubbubb is working on it; the answer will be announced "
+                    "when it is ready. Say so and stop."
+                ),
+            }
         except HubbubbError as err:
             return {"error": str(err)}
         return {"answer": answer}

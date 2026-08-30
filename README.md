@@ -221,9 +221,12 @@ in code.
 
 ### Hubbubb
 
-Standard OAuth2 client-credentials, then MCP over Streamable HTTP. Create a
+Standard OAuth2 client-credentials against Hubbubb's runs API. Create a
 client ID and secret in Hubbubb, paste them into the setup screen, and the
 model gets an `ask_hubbubb` tool it can put plain-English questions to.
+Quick answers come back in the same breath; a slow one is acknowledged and
+then spoken through the house's announcement policy when Hubbubb finishes,
+instead of the voice pipeline holding its breath for a minute.
 
 ### The companion (optional)
 

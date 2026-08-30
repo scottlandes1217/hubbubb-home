@@ -138,6 +138,9 @@ class Runtime:
     # person (lowercased) -> that person's own HubbubbClient. Non-empty means
     # the voice path must act as the verified speaker, never the shared account.
     hubbubb_people: dict = field(default_factory=dict)
+    # Set after construction: tools speak through the same announcement policy
+    # as the message webhook (quiet hours included) without importing __init__.
+    announce_message: Any = None
     unsubscribe: list = field(default_factory=list)
 
     def option(self, section: str, key: str, default: Any = None) -> Any:
@@ -237,6 +240,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     runtime.timers = TimerPool(hass, _timer_finished)
 
+    async def _announce_message(text: str) -> None:
+        await _route_message(runtime, {"message": text, "ask": True})
+
+    runtime.announce_message = _announce_message
+
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
 
     await _async_serve_cards(hass)
@@ -272,6 +280,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     runtime: Runtime = hass.data[DOMAIN].pop(entry.entry_id)
     runtime.timers.cancel_all()
+    for client in (runtime.hubbubb, *runtime.hubbubb_people.values()):
+        if client is not None:
+            client.cancel_background()
     for unsub in runtime.unsubscribe:
         unsub()
     for intent_type in (*ALL_INTENTS, *appletv.ATV_INTENTS):
@@ -603,43 +614,7 @@ def _async_register_webhook(hass: HomeAssistant, runtime: Runtime) -> None:
             data = {"message": (await request.text()).strip()}
         if not isinstance(data, dict):
             data = {"message": str(data)}
-        message = data.get("message")
-        if not message:
-            return
-
-        # Quiet hours: nothing audible, nothing on screens - only the passive
-        # push below. "ask" answers included: the question was asked hours
-        # ago if its answer is arriving at 3am.
-        if not _quiet_now(runtime):
-            if data.get("ask"):
-                await _announce(runtime, message)
-                return
-
-            switch = runtime.entity_id("agent_announcements")
-            state = hass.states.get(switch) if switch else None
-            if state is None or state.state == "on":
-                hass.bus.async_fire(EVENT_MESSAGE, data)
-                return
-
-        notify = runtime.option(CONF_ANNOUNCE, CONF_NOTIFY)
-        if not notify or "." not in notify:
-            _LOGGER.debug("announcements off and no notify service: %s", message)
-            return
-        domain, service = notify.split(".", 1)
-        try:
-            await hass.services.async_call(
-                domain, service,
-                {
-                    "title": runtime.name,
-                    "message": message,
-                    # Passive: the phone should not buzz for a finished turn
-                    # the user chose not to hear out loud.
-                    "data": {"push": {"interruption-level": "passive"}},
-                },
-                blocking=False,
-            )
-        except HomeAssistantError as err:
-            _LOGGER.warning("could not push %r via %s: %s", message, notify, err)
+        await _route_message(runtime, data)
 
     webhook.async_register(
         hass,
@@ -653,6 +628,53 @@ def _async_register_webhook(hass: HomeAssistant, runtime: Runtime) -> None:
     runtime.unsubscribe.append(
         lambda: webhook.async_unregister(hass, WEBHOOK_MESSAGE)
     )
+
+
+async def _route_message(runtime: Runtime, data: dict) -> None:
+    """The announcement policy, shared by the webhook and in-process callers.
+
+    Anything the house wants to say after the fact - a finished agent turn, a
+    late Hubbubb answer, a training result - goes through here, so quiet
+    hours and the announcements switch are enforced exactly once.
+    """
+    hass = runtime.hass
+    message = data.get("message")
+    if not message:
+        return
+
+    # Quiet hours: nothing audible, nothing on screens - only the passive
+    # push below. "ask" answers included: the question was asked hours
+    # ago if its answer is arriving at 3am.
+    if not _quiet_now(runtime):
+        if data.get("ask"):
+            await _announce(runtime, message)
+            return
+
+        switch = runtime.entity_id("agent_announcements")
+        state = hass.states.get(switch) if switch else None
+        if state is None or state.state == "on":
+            hass.bus.async_fire(EVENT_MESSAGE, data)
+            return
+
+    notify = runtime.option(CONF_ANNOUNCE, CONF_NOTIFY)
+    if not notify or "." not in notify:
+        _LOGGER.debug("announcements off and no notify service: %s", message)
+        return
+    domain, service = notify.split(".", 1)
+    try:
+        await hass.services.async_call(
+            domain, service,
+            {
+                "title": runtime.name,
+                "message": message,
+                # Passive: the phone should not buzz for a finished turn
+                # the user chose not to hear out loud.
+                "data": {"push": {"interruption-level": "passive"}},
+            },
+            blocking=False,
+        )
+    except HomeAssistantError as err:
+        _LOGGER.warning("could not push %r via %s: %s", message, notify, err)
 
 
 def _since(finding: dict) -> str:

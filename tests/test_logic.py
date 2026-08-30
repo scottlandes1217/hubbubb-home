@@ -469,7 +469,7 @@ def test_hubbubb_tool_gate_matrix():
     from hubbubb_home.llm_api import AskHubbubbTool
 
     class _Hubbubb:
-        async def async_ask(self, request):
+        async def async_ask(self, request, **kwargs):
             return "42"
 
     def call(runtime):
@@ -555,7 +555,7 @@ def test_hubbubb_tool_uses_the_verified_persons_own_client():
             self.who = who
             self.calls = 0
 
-        async def async_ask(self, request):
+        async def async_ask(self, request, **kwargs):
             self.calls += 1
             return f"answered as {self.who}"
 
@@ -605,6 +605,164 @@ def test_hubbubb_tool_uses_the_verified_persons_own_client():
     lone.speakers.set_override("Scott")
     assert call(lone) == {"answer": "answered as scott"}
     assert shared.calls == 0
+
+
+# --- hubbubb: the REST runs transport ----------------------------------------
+
+class _RunsResp:
+    def __init__(self, status, payload):
+        self.status = status
+        self._payload = payload
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def json(self):
+        return self._payload
+
+
+class _RunsSession:
+    """Answers /oauth/token from one queue and everything else from another."""
+
+    def __init__(self, tokens, runs):
+        self.tokens, self.runs = list(tokens), list(runs)
+        self.calls = []
+
+    def post(self, url, **kwargs):
+        self.calls.append(("POST", url))
+        return _RunsResp(*self.tokens.pop(0))
+
+    def request(self, method, url, **kwargs):
+        self.calls.append((method, url))
+        return _RunsResp(*self.runs.pop(0))
+
+
+def test_hubbubb_url_derivation():
+    from hubbubb_home.hubbubb import HubbubbClient
+
+    for url in ("https://h.example/api/v1/org7/mcp",
+                "https://h.example/api/v1/org7",
+                "https://h.example/api/v1/org7/mcp/"):
+        client = HubbubbClient(None, url, "id", "secret")
+        assert client._runs_url == "https://h.example/api/v1/org7/ai/runs", url
+        assert client._token_url == "https://h.example/oauth/token"
+
+
+def test_hubbubb_token_cache_and_remint_on_401():
+    import asyncio
+
+    from hubbubb_home.hubbubb import HubbubbClient
+
+    token = (200, {"access_token": "t", "expires_in": 3600})
+    session = _RunsSession(
+        tokens=[token, token],
+        runs=[
+            (401, {"error": "invalid_token"}),  # stale -> one re-mint
+            (200, {"id": "r1", "finished": True, "summary": "hello"}),
+            (200, {"id": "r2", "finished": True, "summary": "again"}),
+        ],
+    )
+    client = HubbubbClient(session, "https://h.example/api/v1/o/mcp", "i", "s")
+    assert asyncio.run(client.async_ask("hi")) == "hello"
+    # Second ask: cached token, no third mint.
+    assert asyncio.run(client.async_ask("hi")) == "again"
+    assert sum(1 for m, u in session.calls if u.endswith("/oauth/token")) == 2
+
+
+def test_hubbubb_ask_polls_to_the_answer_or_raises_pending():
+    import asyncio
+
+    from hubbubb_home import hubbubb as hubbubb_mod
+    from hubbubb_home.hubbubb import HubbubbClient, HubbubbError, HubbubbPending
+
+    token = (200, {"access_token": "t", "expires_in": 3600})
+    hubbubb_mod._POLL_SECONDS = 0
+    try:
+        # Not finished at first, finished on the poll.
+        session = _RunsSession(
+            tokens=[token],
+            runs=[(200, {"id": "r9", "finished": False}),
+                  (200, {"id": "r9", "finished": True, "summary": "done"})],
+        )
+        client = HubbubbClient(session, "https://h/api/v1/o/mcp", "i", "s")
+        assert asyncio.run(client.async_ask("slow", wait=0)) == "done"
+        assert ("GET", "https://h/api/v1/o/ai/runs/r9") in session.calls
+
+        # Past the deadline: pending carries the run id, run not abandoned.
+        session2 = _RunsSession(
+            tokens=[token], runs=[(200, {"id": "r10", "finished": False})]
+        )
+        client2 = HubbubbClient(session2, "https://h/api/v1/o", "i", "s")
+        try:
+            asyncio.run(client2.async_ask("slower", wait=0, timeout=0))
+            raise AssertionError("expected HubbubbPending")
+        except HubbubbPending as pending:
+            assert pending.run_id == "r10"
+
+        # API error codes come back speakable.
+        session3 = _RunsSession(
+            tokens=[token], runs=[(429, {"error": "too_many_active_runs"})]
+        )
+        client3 = HubbubbClient(session3, "https://h/api/v1/o", "i", "s")
+        try:
+            asyncio.run(client3.async_ask("busy"))
+            raise AssertionError("expected HubbubbError")
+        except HubbubbPending:
+            raise AssertionError("a 429 is an error, not pending")
+        except HubbubbError as err:
+            assert "too many requests" in str(err)
+    finally:
+        hubbubb_mod._POLL_SECONDS = 3
+
+
+def test_hubbubb_tool_pending_hands_off_and_announces():
+    import asyncio
+    import time as _time
+
+    from hubbubb_home.approvals import Approvals
+    from hubbubb_home.hubbubb import HubbubbPending
+    from hubbubb_home.llm_api import AskHubbubbTool
+
+    class _SlowClient:
+        def __init__(self):
+            self.background = None
+
+        async def async_ask(self, request, **kwargs):
+            raise HubbubbPending("r42")
+
+        def async_wait_background(self, run_id, on_done, timeout=300):
+            self.background = (run_id, on_done)
+
+    spoken = []
+
+    async def announce(text):
+        spoken.append(text)
+
+    client = _SlowClient()
+    book = SpeakerBook(None, "", "")
+    book.record({"person": "Scott", "confidence": 0.95, "ts": _time.time()})
+    runtime = types.SimpleNamespace(
+        hubbubb=client,
+        hubbubb_people={},
+        speakers=book,
+        approvals=Approvals(None, "Jarvis", ""),
+        announce_message=announce,
+    )
+    result = asyncio.run(
+        AskHubbubbTool(runtime).async_call(
+            None, types.SimpleNamespace(tool_args={"request": "audit"}), None
+        )
+    )
+    assert result["pending"] is True
+    run_id, on_done = client.background
+    assert run_id == "r42"
+    asyncio.run(on_done("3 unread", True))
+    asyncio.run(on_done("it broke", False))
+    assert spoken == ["Hubbubb says: 3 unread",
+                      "Hubbubb couldn't finish that: it broke"]
 
 
 # --- timers ------------------------------------------------------------------
