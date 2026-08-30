@@ -55,6 +55,28 @@ class Service:
         self.last: dict | None = None
         self.last_embedding: np.ndarray | None = None
         self.http: ClientSession | None = None
+        self._vocab: tuple[float, str] = (0.0, "")
+
+    def vocabulary(self) -> str:
+        """Whisper priming text from the household's proper nouns.
+
+        One name per line in vocabulary.txt beside the profiles; whisper
+        biases decoding toward words it has just 'heard', which fixes the
+        chronic mishearings of names no model was trained on. Re-read when
+        the file changes, so the nightly pass can grow it without a restart.
+        """
+        path = Path(self.args.data_dir).expanduser() / "vocabulary.txt"
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            return ""
+        if mtime != self._vocab[0]:
+            words = [w.strip() for w in path.read_text().splitlines()
+                     if w.strip() and not w.startswith("#")]
+            prompt = ("Household words: " + ", ".join(words[:50]) + "."
+                      if words else "")
+            self._vocab = (mtime, prompt)
+        return self._vocab[1]
 
     async def process(self, pcm: bytes, language: str | None) -> dict:
         audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
@@ -91,7 +113,8 @@ class Service:
         # Pipelines send a locale ("en-US"); whisper wants the bare code.
         language = (language or self.args.language).split("-")[0]
         segments, _info = self.model.transcribe(
-            audio, language=language, beam_size=1
+            audio, language=language, beam_size=1,
+            initial_prompt=self.vocabulary() or None,
         )
         text = " ".join(s.text.strip() for s in segments).strip()
         embedding = None
