@@ -38,8 +38,11 @@ PIPER_MODEL_URL = (
 MWW_REPO = CACHE / "microWakeWord"
 NEGATIVE_ROOT = "https://huggingface.co/datasets/kahrendt/microwakeword/resolve/main/"
 NEGATIVE_ZIPS = ["dinner_party.zip", "dinner_party_eval.zip", "no_speech.zip", "speech.zip"]
+# One shard of ambient clips. The dataset dropped its tar layout for parquet
+# (the old data/bal_trainNN.tar URLs 404 as of 2026-08); each shard holds
+# a couple thousand flac clips, plenty for augmentation noise.
 AUDIOSET_URL = (
-    "https://huggingface.co/datasets/agkphysics/AudioSet/resolve/main/data/bal_train09.tar"
+    "https://huggingface.co/datasets/agkphysics/AudioSet/resolve/main/data/bal_train/09.parquet"
 )
 
 # Spoken by piper as the negative/ambient set in smoke mode - anything that is
@@ -164,29 +167,41 @@ def ensure_negative_features() -> Path:
 
 
 def ensure_background() -> Path:
-    """Background audio for augmentation (flac -> the augmenter reads wav)."""
+    """Background audio for augmentation (parquet flacs -> the augmenter reads wav)."""
+    import io
+
+    import pyarrow.parquet as pq
     import soundfile
 
     wav_dir = CACHE / "audioset_16k"
     if wav_dir.exists() and any(wav_dir.iterdir()):
         return wav_dir
-    tar_path = CACHE / "bal_train09.tar"
-    raw = CACHE / "audioset_raw"
-    if not raw.exists():
-        run(["curl", "-fsSL", "-o", tar_path, AUDIOSET_URL])
-        raw.mkdir()
-        run(["tar", "-xf", tar_path, "-C", raw])
-        tar_path.unlink()
+    shard = CACHE / "bal_train_09.parquet"
+    if not shard.exists():
+        run(["curl", "-fsSL", "-o", shard, AUDIOSET_URL])
     wav_dir.mkdir()
-    for i, flac in enumerate(sorted(raw.glob("**/*.flac"))):
-        audio, rate = soundfile.read(flac)
-        if audio.ndim > 1:
-            audio = audio.mean(axis=1)
-        if rate != 16000:
-            idx = np.linspace(0, len(audio), int(len(audio) * 16000 / rate),
-                              endpoint=False)
-            audio = np.interp(idx, np.arange(len(audio)), audio)
-        soundfile.write(wav_dir / f"{i}.wav", audio.astype(np.float32), 16000)
+    i = 0
+    # Streamed in batches: the shard is 650MB of audio bytes, and a whole-table
+    # read plus decode would double it in memory.
+    for batch in pq.ParquetFile(shard).iter_batches(
+            batch_size=64, columns=["audio"]):
+        for row in batch.column("audio").to_pylist():
+            try:
+                audio, rate = soundfile.read(io.BytesIO(row["bytes"]))
+            except Exception:
+                continue  # one undecodable clip is not worth the run
+            if audio.ndim > 1:
+                audio = audio.mean(axis=1)
+            if rate != 16000:
+                idx = np.linspace(0, len(audio),
+                                  int(len(audio) * 16000 / rate),
+                                  endpoint=False)
+                audio = np.interp(idx, np.arange(len(audio)), audio)
+            soundfile.write(wav_dir / f"{i}.wav",
+                            audio.astype(np.float32), 16000)
+            i += 1
+    if not i:
+        raise RuntimeError("background shard yielded no decodable clips")
     return wav_dir
 
 
