@@ -7,6 +7,13 @@ restarts. Voice timers. An overnight sweep that finds the things that break
 quietly. A Hubbubb connection for your records and correspondence. And, if you
 run a coding agent somewhere, a build screen that drives it from the wall.
 
+Give it a companion machine and it goes further: speech-to-text that never
+leaves the house, voice fingerprints so it knows who is talking and keeps
+memories per person, tap-on-your-phone verification before anything sensitive,
+a small local model as the everyday brain with your coding agent as the
+escape hatch — and wake words it trains for itself when you ask for a new
+name out loud.
+
 Call it Athena, or Jeeves, or your dog's name. Nothing in it is branded with
 an assistant's name until you type one.
 
@@ -25,6 +32,24 @@ an assistant's name until you type one.
 
 That is the whole setup. No YAML, no Lovelace resources to register, no
 helpers to create — the integration makes its own and serves its own cards.
+
+### What needs what
+
+Everything degrades gracefully: each row below is off (and harmless) until
+its requirement is configured, and the core works with nothing but Home
+Assistant.
+
+| Feature | Needs |
+|---|---|
+| Ring, timers, memory, sentences, sweep, briefing | Home Assistant only |
+| A conversational brain | Any HA LLM integration (Anthropic, Ollama, …) with the **Assist** + **Hubbubb Home** APIs ticked |
+| Hubbubb records and inbox | A Hubbubb OAuth2 client ID + secret |
+| Apple TV voice, native Music | HA's `apple_tv` integration; Apple Music subscription for music |
+| Build screen, coding-agent handoff | The companion daemon on the machine running your coding agent |
+| Local speech-to-text + speaker identification | The voice service (`companion/voice-service/`) on a machine with a few GB free — Apple Silicon or any modern x86; Python 3.12 via `uv` |
+| A local model as the brain | [Ollama](https://ollama.com) on that same machine (a 3B model wants ~4 GB RAM), reachable from HA (`OLLAMA_HOST=0.0.0.0`) |
+| Custom wake words, trained by voice | The voice service + its `wakeword/` trainer (~3 GB of cached audio the first run) |
+| Verified people (tap-to-approve) | The HA companion app on each person's phone, or any actionable-notification target |
 
 <p align="center">
   <img src="docs/images/setup.png" alt="Naming your assistant" width="49%">
@@ -68,13 +93,13 @@ Entity IDs take the name you chose, so an assistant called Athena gets
 |---|---|
 | Animated listening ring, with the build screen | `custom:hubbubb-ring-card` |
 | Apple TV / Siri Remote | `custom:hubbubb-remote-card` |
+| Voice timer countdowns | `custom:hubbubb-timers-card` |
 
 The remote card's volume keys use plain `media_player` volume on its
 `volume_entity` (usually your TV). Point them at the Apple TV itself and
 you will want the separate `apple_tv_hid` custom component, which the card
 prefers automatically when installed — the Apple TV ignores core's volume
 services over HDMI.
-| Voice timer countdowns | `custom:hubbubb-timers-card` |
 
 Add the ring card from the dashboard editor and it wires itself up: it finds
 your voice satellite and the three switches, and reads the assistant's name
@@ -108,24 +133,39 @@ They are served by the integration at a versioned URL, so a HACS update can
 never leave a stale bundle in someone's browser cache. There is nothing to add
 to your Lovelace resources.
 
-The build panel takes a height, or floats over the whole dashboard. Panel and
-terminal colours are settable, as are the five state colours of the ring.
-
 A starter dashboard is in [`docs/dashboard.yaml`](docs/dashboard.yaml).
 
 ### Voice
 
-Eleven sentence intents are answered locally, without waking a language model
-— because "set a timer for ten minutes" should not cost a frontier model call,
-and paying for one makes the house feel slower than the speaker it replaced.
+A family of sentence intents is answered locally, without waking a language
+model — because "set a timer for ten minutes" should not cost a frontier model
+call, and paying for one makes the house feel slower than the speaker it
+replaced.
 
 > "Remember that the pool guy comes on Tuesdays"
 > "What do you remember about the pool?"
 > "Set a timer for ten minutes" · "How long's left?" · "Add five minutes"
 > "How's the house?" · "Did anything go quiet?"
+> "This is Scott" · "Who am I?"
 > "Build mode on"
 
 Everything else falls through to your conversation agent.
+
+### Announcements and quiet hours
+
+Finished agent turns, training results, and anything else POSTed to the
+message webhook follow one policy: an answer to a spoken question goes back
+to the satellite you asked from; with the announcements switch on, other
+messages go to whichever dashboard screen you're actually at; with it off,
+they become a silent phone push. Between the **quiet hours** (announcement
+options, 22:00–08:00 by default, set both times equal to disable) nothing is
+spoken or shown at all — only the silent push. Timers and the scheduled
+morning briefing ignore quiet hours on purpose: a 3am timer was set on
+purpose.
+
+The **morning briefing** (its own options section) speaks the weather, the
+day's calendar and the overnight sweep's count at a time you pick, through
+the satellites or speakers you pick.
 
 ### Apple TV, including music
 
@@ -241,6 +281,23 @@ it (multi-step work, coding, research) is handed to the coding agent, which
 answers aloud later through the message webhook. Point your voice pipeline at
 the Ollama agent to keep everyday requests fast, private and free, with the
 frontier model as the escape hatch rather than the default.
+
+### Wake words, including ones it trains itself (optional)
+
+The wake word lives on the satellite, before any audio leaves it, so it is
+set per device — each puck can answer to a different name, and a Voice PE
+runs two wake-word models at once. The stock choices are a dropdown on the
+device page; a custom phrase means training a small on-device model, and the
+voice service can do that **by voice**: say "train yourself a new wake word
+called Athena" and the `train_wake_word` tool starts the run on the
+companion machine — synthetic voices speak the phrase thousands of ways, a
+model trains against real negative corpora, and the house announces out loud
+when the finished model is ready to load. One run at a time, an hour or two
+each, ~3 GB of audio cached after the first. Loading the model onto a puck
+is deliberately a human step: an ESPHome reflash, walked through in
+[`companion/voice-service/WAKEWORD.md`](companion/voice-service/WAKEWORD.md),
+along with honest advice about single-word wake words and phrases the
+training voices cannot pronounce.
 
 ---
 
