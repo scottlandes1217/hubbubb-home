@@ -84,8 +84,10 @@ class Service:
         return event
 
     def _transcribe_and_embed(self, audio: np.ndarray, language: str | None):
+        # Pipelines send a locale ("en-US"); whisper wants the bare code.
+        language = (language or self.args.language).split("-")[0]
         segments, _info = self.model.transcribe(
-            audio, language=language or self.args.language, beam_size=1
+            audio, language=language, beam_size=1
         )
         text = " ".join(s.text.strip() for s in segments).strip()
         embedding = None
@@ -240,7 +242,13 @@ def make_info(args) -> Info:
                         attribution=attribution,
                         installed=True,
                         version="1.0.0",
-                        languages=[args.language],
+                        # Home Assistant matches the pipeline's locale against
+                        # this list verbatim, so the bare code alone gets every
+                        # request refused as unsupported metadata.
+                        languages=[args.language] + [
+                            f"{args.language}-{region}"
+                            for region in ("US", "GB", "AU", "CA", "NZ", "IN", "IE", "ZA")
+                        ],
                     )
                 ],
             )
