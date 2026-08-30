@@ -94,17 +94,25 @@ class SpeakerBook:
 
     async def async_label(self, person: str) -> None:
         """Tell the voice service the last utterance was this person's."""
+        await self._post("/label", {"person": person})
+
+    async def async_train(self, phrase: str) -> None:
+        """Start training a wake word model on the voice service's machine."""
+        await self._post("/train", {"phrase": phrase})
+
+    async def _post(self, route: str, body: dict) -> None:
         if not self._url:
             raise SpeakerServiceError("no voice service is configured")
         try:
             async with self._session.post(
-                f"{self._url}/label",
-                json={"person": person},
+                f"{self._url}{route}",
+                json=body,
                 timeout=aiohttp.ClientTimeout(total=10),
             ) as resp:
                 if resp.status >= 400:
                     raise SpeakerServiceError(
-                        f"voice service returned {resp.status}"
+                        (await resp.text())[:200]
+                        or f"voice service returned {resp.status}"
                     )
         except aiohttp.ClientError as err:
             raise SpeakerServiceError(

@@ -56,6 +56,8 @@ class HubbubbAPI(llm.API):
             tools.append(AskHubbubbTool(runtime))
         if runtime.companion.configured:
             tools.append(EscalateTool(runtime))
+        if runtime.speakers.configured:
+            tools.append(TrainWakeWordTool(runtime))
 
         speaker = runtime.speakers.prompt_line(
             getattr(llm_context, "device_id", None)
@@ -211,6 +213,34 @@ class EscalateTool(_RuntimeTool):
         except CompanionError as err:
             return {"error": str(err)}
         return {"handed_off": True}
+
+
+class TrainWakeWordTool(_RuntimeTool):
+    name = "train_wake_word"
+    description = (
+        "Start training a new wake word - the phrase that wakes the voice "
+        "pucks - on the companion computer. Use it when asked to learn, "
+        "train, or change the assistant's wake word or name. Training runs "
+        "for hours and the house announces out loud when the model is ready "
+        "to load; loading it onto a puck is a separate, human-approved step. "
+        "Only one training runs at a time."
+    )
+    parameters = vol.Schema(
+        {vol.Required("phrase"): vol.All(str, vol.Length(min=2, max=40))}
+    )
+
+    async def async_call(
+        self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context
+    ) -> JsonObjectType:
+        phrase = tool_input.tool_args["phrase"]
+        try:
+            await self._runtime.speakers.async_train(phrase)
+        except SpeakerServiceError as err:
+            return {"error": str(err)}
+        return {
+            "training": phrase,
+            "detail": "started; the house will announce when it is ready",
+        }
 
 
 class StartTimerTool(_RuntimeTool):

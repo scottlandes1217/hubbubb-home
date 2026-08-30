@@ -174,6 +174,92 @@ def _to_16k_mono(chunk: AudioChunk) -> bytes:
     return samples.astype(np.int16).tobytes()
 
 
+# --- wake word training -------------------------------------------------------
+
+
+class Trainer:
+    """One wake-word training run at a time, announced when it lands.
+
+    The heavy lifting is wakeword/train.py in its own venv; this only spawns
+    it detached, remembers what is running, and tells the house - through the
+    same message webhook the finished-turn announcements use - when the model
+    is ready or the run failed.
+    """
+
+    def __init__(self, args) -> None:
+        self.args = args
+        self.proc: asyncio.subprocess.Process | None = None
+        self.status: dict = {"running": False}
+
+    @property
+    def script(self) -> Path:
+        return Path(__file__).parent / "wakeword" / "train.py"
+
+    @property
+    def python(self) -> Path:
+        return Path(__file__).parent / "wakeword" / ".venv" / "bin" / "python"
+
+    def start(self, phrase: str) -> dict:
+        if self.status.get("running"):
+            raise RuntimeError(
+                f"already training {self.status.get('phrase')!r}"
+            )
+        if not self.python.exists():
+            raise RuntimeError("the trainer is not installed (wakeword/.venv)")
+        slug = "_".join(phrase.lower().split())
+        out = Path(self.args.data_dir).expanduser() / "wakewords" / slug
+        out.mkdir(parents=True, exist_ok=True)
+        log = open(out / "train.log", "ab")
+        self.status = {
+            "running": True, "phrase": phrase, "started": time.time(),
+            "out": str(out),
+        }
+        asyncio.ensure_future(self._run(phrase, out, log))
+        return self.status
+
+    async def _run(self, phrase: str, out: Path, log) -> None:
+        try:
+            self.proc = await asyncio.create_subprocess_exec(
+                str(self.python), str(self.script), phrase, "--out", str(out),
+                stdout=log, stderr=log,
+                cwd=str(self.script.parent),
+            )
+            code = await self.proc.wait()
+        except Exception as err:
+            code = -1
+            _LOGGER.exception("wake word training did not start: %s", err)
+        finally:
+            log.close()
+        manifest = next(iter(out.glob("*.json")), None)
+        ok = code == 0 and manifest is not None
+        self.status = {
+            "running": False, "phrase": phrase, "ok": ok,
+            "returncode": code, "manifest": str(manifest) if manifest else None,
+            "out": str(out),
+        }
+        _LOGGER.info("wake word %r training finished: ok=%s", phrase, ok)
+        message = (
+            f"The {phrase} wake word has finished training and is ready to "
+            "load onto a puck."
+            if ok else
+            f"Training the {phrase} wake word failed - the log is in "
+            f"{out}/train.log."
+        )
+        await self._announce(message)
+
+    async def _announce(self, message: str) -> None:
+        if not self.args.message_webhook:
+            return
+        try:
+            async with ClientSession(timeout=ClientTimeout(total=5)) as http:
+                await http.post(
+                    self.args.message_webhook,
+                    json={"message": message, "ask": True},
+                )
+        except Exception as err:
+            _LOGGER.warning("training announcement not delivered: %s", err)
+
+
 # --- admin HTTP ---------------------------------------------------------------
 
 
@@ -212,6 +298,22 @@ def admin_app(service: Service) -> web.Application:
             raise web.HTTPNotFound(text=f"no profile named {person!r}")
         return web.json_response(service.profiles.counts())
 
+    trainer = Trainer(service.args)
+
+    async def train(req):
+        data = await req.json()
+        phrase = " ".join(str(data.get("phrase") or "").split())
+        if not phrase or len(phrase) > 40 or len(phrase.split()) > 4 \
+                or not all(w.isalpha() for w in phrase.split()):
+            raise web.HTTPBadRequest(text="a wake phrase is one to four words")
+        try:
+            return web.json_response(trainer.start(phrase))
+        except RuntimeError as err:
+            raise web.HTTPConflict(text=str(err))
+
+    async def train_status(_req):
+        return web.json_response(trainer.status)
+
     app = web.Application()
     app.add_routes(
         [
@@ -220,6 +322,8 @@ def admin_app(service: Service) -> web.Application:
             web.post("/label", label),
             web.get("/people", people),
             web.post("/people/delete", people_delete),
+            web.post("/train", train),
+            web.get("/train/status", train_status),
         ]
     )
     return app
@@ -276,7 +380,16 @@ def parse_args(argv=None):
         default="",
         help="HA speaker webhook, e.g. http://192.168.0.62/api/webhook/hubbubb_home_speaker",
     )
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--message-webhook",
+        default="",
+        help="HA announcement webhook for training results; derived from "
+        "--webhook when left blank",
+    )
+    args = parser.parse_args(argv)
+    if not args.message_webhook and args.webhook.endswith("_speaker"):
+        args.message_webhook = args.webhook[: -len("_speaker")] + "_message"
+    return args
 
 
 async def main() -> None:
