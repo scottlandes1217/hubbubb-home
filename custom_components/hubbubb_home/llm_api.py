@@ -357,11 +357,15 @@ class CameraActivityTool(_RuntimeTool):
 
         def ago(when) -> str:
             minutes = max(0, int((now - when).total_seconds() // 60))
+            clock = dt_util.as_local(when).strftime("%-I:%M %p")
             if minutes < 60:
-                return f"{minutes} minutes ago"
+                return f"{minutes} minutes ago at {clock}"
             if minutes < 60 * 24:
-                return f"{round(minutes / 60)} hours ago"
-            return f"{round(minutes / 60 / 24)} days ago"
+                return f"{round(minutes / 60)} hours ago at {clock}"
+            # Only past a day does the weekday matter - and paired with
+            # "N days ago" it cannot be misread the way a bare "Sun" was.
+            day = dt_util.as_local(when).strftime("%A")
+            return f"{round(minutes / 60 / 24)} days ago, {day} at {clock}"
 
         report = []
         for entity_id, states in (changes or {}).items():
