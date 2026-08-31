@@ -350,12 +350,23 @@ class CameraActivityTool(_RuntimeTool):
                 hass, start, None, sensors, None, False
             )
         )
+        # Relative times, not clock times: the model answering has no idea
+        # what "8:48 PM Sun" is relative to today (it called tonight's event
+        # "yesterday"), but "90 minutes ago" cannot be misread.
+        now = dt_util.utcnow()
+
+        def ago(when) -> str:
+            minutes = max(0, int((now - when).total_seconds() // 60))
+            if minutes < 60:
+                return f"{minutes} minutes ago"
+            if minutes < 60 * 24:
+                return f"{round(minutes / 60)} hours ago"
+            return f"{round(minutes / 60 / 24)} days ago"
+
         report = []
         for entity_id, states in (changes or {}).items():
             times = [
-                dt_util.as_local(s.last_updated).strftime("%-I:%M %p %a")
-                for s in states
-                if s.state == "on"
+                ago(s.last_updated) for s in states if s.state == "on"
             ]
             if times:
                 name = hass.states.get(entity_id)
