@@ -66,9 +66,20 @@ class HubbubbAPI(llm.API):
         speaker = runtime.speakers.prompt_line(
             getattr(llm_context, "device_id", None)
         )
+        prompt = f"{runtime.persona()}\n\n{speaker}"
+        # The persona's "say you can't" reads, to a 3B model, as license to
+        # improvise a sentence of filler. When the companion exists, the rule
+        # is escalate - never guess.
+        if runtime.companion.configured:
+            prompt += (
+                "\n\nWhen a request is beyond your tools, or you do not know "
+                "the answer, do not guess and do not apologize at length: "
+                "call hand_to_companion with the request, then say only that "
+                "you have passed it along."
+            )
         return llm.APIInstance(
             api=self,
-            api_prompt=f"{runtime.persona()}\n\n{speaker}",
+            api_prompt=prompt,
             llm_context=llm_context,
             tools=tools,
         )

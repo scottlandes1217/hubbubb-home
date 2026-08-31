@@ -323,6 +323,13 @@ def admin_app(service: Service) -> web.Application:
         # only the caller knows which words were the name.
         if len(person) > 40 or len(person.split()) > 3:
             raise web.HTTPBadRequest(text="that does not look like a name")
+        # "This is I..." STT garbles enroll a pronoun that then outbids every
+        # real profile (an "I" profile beat Scott's on 2026-08-30). This is the
+        # one door every enrollment path walks through - refuse them here.
+        if person.lower() in ("i", "me", "you", "it", "we", "us", "he", "she",
+                              "they", "who", "someone", "somebody", "nobody",
+                              "yes", "no", "okay", "ok"):
+            raise web.HTTPBadRequest(text=f"{person!r} is not a name")
         try:
             return web.json_response(service.label(person))
         except ValueError as err:
