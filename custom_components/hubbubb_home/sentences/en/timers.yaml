@@ -1,11 +1,10 @@
-# Named kitchen timers ("set a 10 minute timer for the pasta"). These
-# deliberately SHADOW the built-in Assist timer intents (custom sentences win
-# over built-ins): built-in voice timers live only inside the satellite and
-# are invisible to dashboards, so these route to the integration's timer pool
-# instead. A phrasing that slips past this grammar still falls through to the
-# built-in device timer - it rings on the satellite but won't show on the
-# dashboard. Timer names are wildcards; durations are hassil ranges. This
-# grammar is lifted from a long-lived production setup, hassil-verified.
+# Named kitchen timers ("set a 10 minute timer for the pasta"). These route
+# to the integration's timer pool. A phrasing that slips past this grammar
+# falls through to the built-in Assist timer grammar - whose intents
+# (HassStartTimer and friends) intents.py re-registers against the same
+# pool, so every phrasing lands on the dashboard either way. Timer names are
+# wildcards; durations are hassil ranges. This grammar is lifted from a
+# long-lived production setup, hassil-verified.
 language: en
 lists:
   hours:

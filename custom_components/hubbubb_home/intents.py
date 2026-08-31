@@ -80,6 +80,16 @@ def async_register_all(hass: HomeAssistant, runtime) -> None:
         ListAddHandler(runtime),
         ListReadHandler(runtime),
         ListDoneHandler(runtime),
+        # HA's own timer intents, re-pointed at the pool - see the comment
+        # block above HassStartTimerHandler.
+        HassStartTimerHandler(runtime),
+        HassCancelTimerHandler(runtime),
+        HassCancelAllTimersHandler(runtime),
+        HassChangeTimerHandler(runtime, "HassIncreaseTimer", +1),
+        HassChangeTimerHandler(runtime, "HassDecreaseTimer", -1),
+        HassPauseTimerHandler(runtime),
+        HassUnpauseTimerHandler(runtime),
+        HassTimerStatusHandler(runtime),
     ):
         intent.async_register(hass, handler)
 
@@ -373,6 +383,175 @@ class TimerStatusHandler(_Handler):
             label = "" if timer.name == "Timer" else f"{timer.name}, "
             parts.append(f"{label}{_spoken(timer.remaining())}")
         return self._say(intent_obj, "; ".join(parts) + ".")
+
+
+# --- Home Assistant's own timer intents --------------------------------------
+# Assist's stock grammar matches nearly any timer phrasing before the
+# conversation agent ever sees it, and fires HassStartTimer and friends; the
+# stock handlers keep those timers inside the conversation component, ringing
+# on the satellite but invisible to every dashboard. Registering handlers
+# under the same intent names replaces the stock ones (intent.async_register
+# overwrites by name, with a startup warning), so any phrasing Assist
+# understands lands in the same pool the dashboard card reads. The manifest's
+# "intent" dependency keeps the stock handlers registering first.
+
+
+def _meant(pool, slots):
+    """Which running timer the built-in slots point at.
+
+    A spoken name wins; "cancel the five minute timer" arrives as start_*
+    slots and matches on original duration; a bare reference means the next
+    timer to finish.
+    """
+    name = str(slots.get("name", {}).get("value", "") or "").strip()
+    if name:
+        return pool.find(name)
+    started = (
+        _slot(slots, "start_hours") * 3600
+        + _slot(slots, "start_minutes") * 60
+        + _slot(slots, "start_seconds")
+    )
+    if started:
+        return next(
+            (t for t in pool.timers if round(t.duration) == started), None
+        )
+    return pool.find(None)
+
+
+_BUILTIN_WHICH = {
+    vol.Optional("start_hours"): vol.Coerce(int),
+    vol.Optional("start_minutes"): vol.Coerce(int),
+    vol.Optional("start_seconds"): vol.Coerce(int),
+    vol.Optional("name"): cv.string,
+    vol.Optional("area"): cv.string,
+}
+
+
+class HassStartTimerHandler(TimerStartHandler):
+    intent_type = "HassStartTimer"
+    slot_schema = {
+        **TimerStartHandler.slot_schema,
+        vol.Optional("area"): cv.string,
+        vol.Optional("conversation_command"): cv.string,
+    }
+
+    async def async_handle(self, intent_obj: intent.Intent):
+        response = await super().async_handle(intent_obj)
+        # The stock handler can run a command when the timer ends ("...then
+        # turn off the lights"); the pool cannot, so say so rather than
+        # silently dropping it.
+        if str(
+            intent_obj.slots.get("conversation_command", {}).get("value", "")
+        ).strip():
+            speech = response.speech.get("plain", {}).get("speech", "")
+            response.async_set_speech(
+                f"{speech} I can't run a command when it ends, though."
+            )
+        return response
+
+
+class HassCancelTimerHandler(_Handler):
+    intent_type = "HassCancelTimer"
+    slot_schema = _BUILTIN_WHICH
+    description = "Cancel a running countdown"
+
+    async def async_handle(self, intent_obj: intent.Intent):
+        slots = self.async_validate_slots(intent_obj.slots)
+        timer = _meant(self._runtime.timers, slots)
+        if timer is None:
+            return self._say(intent_obj, "Nothing like that is running.")
+        self._runtime.timers.cancel(timer)
+        return self._say(intent_obj, "Cancelled.")
+
+
+class HassCancelAllTimersHandler(_Handler):
+    intent_type = "HassCancelAllTimers"
+    slot_schema = {vol.Optional("area"): cv.string}
+    description = "Cancel every running countdown"
+
+    async def async_handle(self, intent_obj: intent.Intent):
+        count = self._runtime.timers.cancel_all()
+        if not count:
+            return self._say(intent_obj, "No timers are running.")
+        plural = "s" if count != 1 else ""
+        return self._say(intent_obj, f"Cancelled {count} timer{plural}.")
+
+
+class HassChangeTimerHandler(_Handler):
+    """HassIncreaseTimer and HassDecreaseTimer, one sign apart."""
+
+    slot_schema = {
+        vol.Optional("hours"): vol.Coerce(int),
+        vol.Optional("minutes"): vol.Coerce(int),
+        vol.Optional("seconds"): vol.Coerce(int),
+        **_BUILTIN_WHICH,
+    }
+
+    def __init__(self, runtime, intent_type: str, sign: int) -> None:
+        super().__init__(runtime)
+        self.intent_type = intent_type
+        self.description = (
+            "Add time to a running countdown"
+            if sign > 0
+            else "Take time off a running countdown"
+        )
+        self._sign = sign
+
+    async def async_handle(self, intent_obj: intent.Intent):
+        slots = self.async_validate_slots(intent_obj.slots)
+        timer = _meant(self._runtime.timers, slots)
+        if timer is None:
+            return self._say(intent_obj, "Nothing like that is running.")
+        amount = (
+            _slot(slots, "hours") * 3600
+            + _slot(slots, "minutes") * 60
+            + _slot(slots, "seconds")
+        )
+        if not amount:
+            return self._say(intent_obj, "How much time?")
+        self._runtime.timers.add_time(timer, self._sign * amount)
+        return self._say(
+            intent_obj, f"{_spoken(timer.remaining()).capitalize()} left."
+        )
+
+
+class HassPauseTimerHandler(_Handler):
+    intent_type = "HassPauseTimer"
+    slot_schema = _BUILTIN_WHICH
+    description = "Pause a running countdown"
+
+    async def async_handle(self, intent_obj: intent.Intent):
+        slots = self.async_validate_slots(intent_obj.slots)
+        timer = _meant(self._runtime.timers, slots)
+        if timer is None:
+            return self._say(intent_obj, "Nothing like that is running.")
+        self._runtime.timers.pause(timer)
+        return self._say(
+            intent_obj, f"Paused with {_spoken(timer.remaining())} left."
+        )
+
+
+class HassUnpauseTimerHandler(_Handler):
+    intent_type = "HassUnpauseTimer"
+    slot_schema = _BUILTIN_WHICH
+    description = "Resume a paused countdown"
+
+    async def async_handle(self, intent_obj: intent.Intent):
+        slots = self.async_validate_slots(intent_obj.slots)
+        timer = _meant(self._runtime.timers, slots)
+        if timer is not None and not timer.paused:
+            # A bare "resume the timer" means whichever one is paused.
+            timer = next(
+                (t for t in self._runtime.timers.timers if t.paused), None
+            )
+        if timer is None:
+            return self._say(intent_obj, "No timer is paused.")
+        self._runtime.timers.resume(timer)
+        return self._say(intent_obj, f"{_spoken(timer.remaining())} to go.")
+
+
+class HassTimerStatusHandler(TimerStatusHandler):
+    intent_type = "HassTimerStatus"
 
 
 class BuildModeHandler(_Handler):

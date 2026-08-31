@@ -87,8 +87,8 @@ except ImportError:
         Coerce=lambda kind: kind,
         Schema=lambda *a, **k: None,
         All=lambda *a, **k: None,
-        Length=lambda **k: None,
-        Range=lambda **k: None,
+        Length=lambda *a, **k: None,
+        Range=lambda *a, **k: None,
     )
 
 class _LLMAPI:
@@ -846,6 +846,21 @@ def test_cancel_all_disarms_everything():
     assert len(_scheduled) == 3
     assert pool.cancel_all() == 3
     assert _scheduled == [], "a cancelled timer must not still be scheduled"
+
+
+def test_builtin_timer_slot_resolution():
+    from hubbubb_home.intents import _meant
+
+    pool = TimerPool(_Hass(), _noop)
+    pasta = pool.start("pasta", 600)
+    eggs = pool.start("eggs", 300)
+
+    assert _meant(pool, {"name": {"value": "pasta"}}).id == pasta.id
+    # "cancel the five minute timer" arrives as start_* slots, no name.
+    assert _meant(pool, {"start_minutes": {"value": 5}}).id == eggs.id
+    assert _meant(pool, {"start_minutes": {"value": 7}}) is None
+    # Bare reference: the next timer to finish.
+    assert _meant(pool, {}).id == eggs.id
 
 
 # --- findings ----------------------------------------------------------------
