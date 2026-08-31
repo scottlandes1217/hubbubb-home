@@ -14,11 +14,14 @@ model setting, and no opinion from us about which provider anyone uses.
 from __future__ import annotations
 
 import logging
+from datetime import timedelta
 from typing import Any
 
 import voluptuous as vol
+from homeassistant.components.recorder import get_instance, history
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import llm
+from homeassistant.util import dt as dt_util
 from homeassistant.util.json import JsonObjectType
 
 from .approvals import VERIFY_CONFIDENCE
@@ -51,6 +54,7 @@ class HubbubbAPI(llm.API):
             AddToListTool(runtime),
             ReadListTool(runtime),
             SetSpeakerTool(runtime),
+            CameraActivityTool(runtime),
             StartTimerTool(runtime),
             CancelTimerTool(runtime),
             TimerStatusTool(runtime),
@@ -305,6 +309,65 @@ class SetSpeakerTool(_RuntimeTool):
             # voice-profile training was missed.
             result["training"] = f"not recorded: {err}"
         return result
+
+
+class CameraActivityTool(_RuntimeTool):
+    name = "camera_activity"
+    description = (
+        "Recent detections from the house cameras: motion, and the "
+        "doorbell's person/vehicle/animal alerts. Use it whenever asked "
+        "about camera activity, motion, or whether anything happened "
+        "outside/at the door. Returns each camera's detections in the "
+        "window, newest first."
+    )
+    parameters = vol.Schema(
+        {vol.Optional("hours", default=24): vol.All(int, vol.Range(1, 168))}
+    )
+
+    async def async_call(
+        self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context
+    ) -> JsonObjectType:
+        # Camera history is security data; unknown voices don't get it.
+        if self._guest(llm_context):
+            return {"error": _GUEST_ERROR}
+        sensors = [
+            s.entity_id
+            for s in hass.states.async_all("binary_sensor")
+            # A phone's "camera in use" sensor also carries device_class
+            # motion-ish naming; it is not a house camera.
+            if "phone" not in s.entity_id
+            and (s.attributes.get("device_class") == "motion"
+                 or s.entity_id.rsplit("_", 2)[-2:-1] in (["person"],
+                                                          ["vehicle"],
+                                                          ["animal"]))
+        ]
+        if not sensors:
+            return {"error": "no camera motion sensors found"}
+        hours = tool_input.tool_args["hours"]
+        start = dt_util.utcnow() - timedelta(hours=hours)
+        changes = await get_instance(hass).async_add_executor_job(
+            lambda: history.get_significant_states(
+                hass, start, None, sensors, None, False
+            )
+        )
+        report = []
+        for entity_id, states in (changes or {}).items():
+            times = [
+                dt_util.as_local(s.last_updated).strftime("%-I:%M %p %a")
+                for s in states
+                if s.state == "on"
+            ]
+            if times:
+                name = hass.states.get(entity_id)
+                report.append({
+                    "camera": name.name if name else entity_id,
+                    "detections": times[-5:][::-1],
+                    "count": len(times),
+                })
+        return {
+            "window_hours": hours,
+            "activity": report or "none - all quiet",
+        }
 
 
 class EscalateTool(_RuntimeTool):
