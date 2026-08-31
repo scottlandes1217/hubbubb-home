@@ -56,6 +56,7 @@ from .const import (
     CONF_PERSON_LISTS,
     CONF_NIGHTLY_ENABLED,
     CONF_NIGHTLY_TIME,
+    CONF_QUIET_FINDINGS,
     CONF_NOTIFY,
     CONF_PROMPT,
     CONF_QUIET_END,
@@ -273,6 +274,9 @@ class HubbubbHomeOptionsFlow(OptionsFlow):
                             vol.Optional(
                                 CONF_NIGHTLY_TIME, default=DEFAULT_NIGHTLY_TIME
                             ): TimeSelector(),
+                            vol.Optional(
+                                CONF_QUIET_FINDINGS, default=True
+                            ): BooleanSelector(),
                             vol.Optional(CONF_IGNORE, default=""): TextSelector(
                                 TextSelectorConfig(
                                     type=TextSelectorType.TEXT, multiline=True

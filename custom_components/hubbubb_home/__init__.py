@@ -55,6 +55,7 @@ from .const import (
     CONF_IGNORE,
     CONF_NIGHTLY_ENABLED,
     CONF_NIGHTLY_TIME,
+    CONF_QUIET_FINDINGS,
     CONF_PERSON_CALENDARS,
     CONF_PROMPT,
     CONF_SENTENCES,
@@ -756,6 +757,8 @@ async def _sweep(runtime: Runtime) -> None:
     raw = runtime.option("overnight", CONF_IGNORE, "") or ""
     ignore = [line.strip() for line in raw.replace(",", "\n").splitlines() if line.strip()]
     findings = await async_sweep(runtime.hass, ignore)
+    if not runtime.option("overnight", CONF_QUIET_FINDINGS, True):
+        findings = [f for f in findings if f.get("kind") != "quiet"]
     await runtime.findings.async_update(findings)
     _LOGGER.info("overnight sweep: %d finding(s)", len(findings))
 

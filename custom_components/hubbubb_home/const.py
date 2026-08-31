@@ -75,6 +75,10 @@ CONF_ATV = "apple_tv"
 CONF_ATV_ENTITIES = "apple_tvs"
 CONF_NIGHTLY_TIME = "nightly_time"
 CONF_NIGHTLY_ENABLED = "nightly_enabled"
+# Off: only hard failures (unavailable/unknown) are reported; the
+# went-quiet detector still runs but its findings are dropped - some houses
+# find "changed most days, now doesn't" more noise than signal.
+CONF_QUIET_FINDINGS = "quiet_findings"
 CONF_IGNORE = "ignore"
 CONF_BRIEFING_TIME = "briefing_time"
 CONF_BRIEFING_ENABLED = "briefing_enabled"
