@@ -37,11 +37,15 @@ intents:
           - "(set|start|create|make) [me] [a] [new] timer for half an hour [for [the] {name}]"
           - "(set|start|create|make) [me] [a] [new] half [an] hour timer [for [the] {name}]"
           - "(set|start|create|make) [me] [a] [new] half[-]hour timer [for [the] {name}]"
+          - "(set|start|create|make) [me] [a] [new] {name} timer for half [an] hour"
+          - "(set|start|create|make) [me] [a] [new] timer for [the] {name} for half [an] hour"
         slots:
           minutes: 30
       - sentences:
           - "(set|start|create|make) [me] [a] [new] timer for (an|one) hour [for [the] {name}]"
           - "(set|start|create|make) [me] [a] [new] one[-]hour timer [for [the] {name}]"
+          - "(set|start|create|make) [me] [a] [new] {name} timer for (an|one) hour"
+          - "(set|start|create|make) [me] [a] [new] timer for [the] {name} for (an|one) hour"
         slots:
           hours: 1
       - sentences:
@@ -58,6 +62,10 @@ intents:
           - "(set|start|create|make) [me] [a] [new] {name} timer for <min_u>"
           - "(set|start|create|make) [me] [a] [new] {name} timer for <hr_u>"
           - "(set|start|create|make) [me] [a] [new] {name} timer for <sec_u>"
+          - "(set|start|create|make) [me] [a] [new] timer for [the] {name} for <hr_u> and <min_u>"
+          - "(set|start|create|make) [me] [a] [new] timer for [the] {name} for <min_u>"
+          - "(set|start|create|make) [me] [a] [new] timer for [the] {name} for <hr_u>"
+          - "(set|start|create|make) [me] [a] [new] timer for [the] {name} for <sec_u>"
 
   HubbubbTimerCancel:
     data:
