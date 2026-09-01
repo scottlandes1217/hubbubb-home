@@ -493,9 +493,13 @@ def test_hubbubb_tool_gate_matrix():
     # Nobody known: refused with ask-who guidance, no notification sent.
     assert call(runtime)["error"] == "speaker_not_verified"
 
-    # A 0.7 voice match is a lean, not a verification.
+    # With an approver device configured, a 0.7 lean is enough to CHALLENGE.
+    # The tap is the gate: a wrong guess rings the wrong person's phone, shows
+    # them the request, and they decline. Requiring 0.90 first made this tool
+    # unusable - all 8 of Scott's own enrolment samples score under 0.90
+    # against his own profile, so it asked "who is speaking?" every time.
     book.record({"person": "Scott", "confidence": 0.7, "ts": _time.time()})
-    assert call(runtime)["error"] == "speaker_not_verified"
+    assert call(runtime) == {"answer": "42"}
 
     # 0.92 voice: challenge the device, approved, answered.
     book.record({"person": "Scott", "confidence": 0.92, "ts": _time.time()})
@@ -525,6 +529,22 @@ def test_hubbubb_tool_gate_matrix():
         approvals=Approvals(None, "Jarvis", ""),
     )
     assert call(open_runtime) == {"answer": "42"}
+
+    # Per-person credentials but NO approver device: nothing catches a wrong
+    # guess, because voice alone decides whose Hubbubb account gets spent. This
+    # is the one case that still demands VERIFY_CONFIDENCE, and lowering the
+    # bar for the tap path above must not have lowered it here.
+    creds = SpeakerBook(None, "", "")
+    creds_runtime = types.SimpleNamespace(
+        hubbubb=_Hubbubb(),
+        hubbubb_people={"scott": _Hubbubb()},
+        speakers=creds,
+        approvals=Approvals(None, "Jarvis", ""),
+    )
+    creds.record({"person": "Scott", "confidence": 0.7, "ts": _time.time()})
+    assert call(creds_runtime)["error"] == "speaker_not_verified"
+    creds.record({"person": "Scott", "confidence": 0.92, "ts": _time.time()})
+    assert call(creds_runtime) == {"answer": "42"}
 
 
 def test_people_lines_split_on_the_first_two_colons_only():
@@ -1033,11 +1053,18 @@ def test_guest_tier_refusal_matrix():
             None, types.SimpleNamespace(tool_args={"request": "refactor it"}),
             None))
 
-    # Speaker ID on, nobody recognized: a guest. Both stay closed, nothing
-    # stored, nothing handed to the coding agent.
+    # Speaker ID on, nobody recognized: a guest. Memory stays closed - an
+    # unrecognized voice must not write durable facts, and the television
+    # scores as high as a real but noisy utterance.
     guest = runtime(SpeakerBook(None, "http://svc:10301", ""))
     assert "error" in remember(guest) and guest.memory.added == []
-    assert "error" in escalate(guest) and guest.companion.sent == []
+    # Escalation is deliberately OPEN to guests since 2026-09-01. It is the
+    # local model's only route out of a request it cannot serve, and "guest"
+    # in practice means Scott on a noisy utterance about half the time, so
+    # gating it made the house refuse its owner and demand he identify
+    # himself. Unattributed here, prefixed with the name when one is known.
+    assert escalate(guest) == {"handed_off": True}
+    assert guest.companion.sent == ["refactor it"]
 
     # Speaker ID on and the voice known: both open, escalation attributed.
     known_book = SpeakerBook(None, "http://svc:10301", "")
@@ -1054,6 +1081,24 @@ def test_guest_tier_refusal_matrix():
     # And the guest prompt line only exists when speaker ID is on.
     assert "guest" in SpeakerBook(None, "http://svc:10301", "").prompt_line()
     assert "guest" not in SpeakerBook(None, "", "").prompt_line()
+
+    # No prompt line may invite the model to challenge the speaker. A middling
+    # score is the common case with a thin profile, and "(not confirmed by
+    # voice)" read to a 4B model as an instruction to go and confirm, which is
+    # what turned every other exchange into "who am I speaking to?".
+    unsure = SpeakerBook(None, "http://svc:10301", "")
+    unsure.record({"person": "Scott", "confidence": 0.66, "ts": _time.time()})
+    line = unsure.prompt_line()
+    assert "Scott" in line and "not confirmed" not in line, line
+    assert "do not ask them to confirm" in line, line
+
+    sure = SpeakerBook(None, "http://svc:10301", "")
+    sure.record({"person": "Scott", "confidence": 0.95, "ts": _time.time()})
+    assert sure.prompt_line() == "The person speaking is Scott."
+
+    # The guest line must not open with an identity demand either.
+    guest_line = SpeakerBook(None, "http://svc:10301", "").prompt_line()
+    assert "Do not open the conversation by asking who is speaking" in guest_line
 
 
 def test_person_calendar_map_parses_lines():

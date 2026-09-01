@@ -102,7 +102,16 @@ class SpeakerBook:
         if person and (source == "told" or confidence >= CONFIDENT):
             return f"The person speaking is {person}."
         if person:
-            return f"The speaker is probably {person} (not confirmed by voice)."
+            # Say the name plainly. "(not confirmed by voice)" read to a small
+            # model as an instruction to go and confirm it, so a middling score
+            # - which is most of them, the profile is thin - turned every other
+            # exchange into "who am I speaking to?". The uncertainty is handled
+            # by the tools that care, not by nagging in the prompt.
+            return (
+                f"The person speaking is probably {person}. Address them as "
+                f"{person} and act normally; do not ask them to confirm who "
+                "they are. The few tools that need certainty will say so."
+            )
         if self.configured:
             # Speaker ID is on and heard nobody it knows: treat them as a
             # guest until they say who they are.
@@ -124,9 +133,11 @@ class SpeakerBook:
                 "questions and house basics freely. Control lights, valves, "
                 "switches, media and timers for them normally - anyone in the "
                 "house may do that, and never ask them to enroll or identify "
-                "their voice first. Only decline to store memories or to read "
-                "or change a person's own data (lists, calendar, Hubbubb) "
-                "until they say who they are ('this is ...')."
+                "their voice first. Do not open the conversation by asking who "
+                "is speaking. Only when a tool refuses because it needs a "
+                "person - storing a memory, or someone's own lists, calendar "
+                "or Hubbubb data - say so and ask them to tell you their name "
+                "('this is ...')."
             )
         return (
             "You do not know who is speaking. That is fine for questions and "

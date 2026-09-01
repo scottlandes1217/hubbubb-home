@@ -327,9 +327,11 @@ class CameraActivityTool(_RuntimeTool):
     async def async_call(
         self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context
     ) -> JsonObjectType:
-        # Camera history is security data; unknown voices don't get it.
-        if self._guest(llm_context):
-            return {"error": _GUEST_ERROR}
+        # No guest gate. Whether the cameras saw motion is house state, the
+        # same kind of thing as whether a light is on, and "guest" here mostly
+        # means Scott on a noisy utterance - speaker ID puts him under the bar
+        # roughly as often as over it. Refusing to answer and asking who is
+        # speaking was the common case, not the rare one.
         sensors = [
             s.entity_id
             for s in hass.states.async_all("binary_sensor")
@@ -401,9 +403,11 @@ class EscalateTool(_RuntimeTool):
     async def async_call(
         self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context
     ) -> JsonObjectType:
-        # Guests don't drive the coding agent.
-        if self._guest(llm_context):
-            return {"error": _GUEST_ERROR}
+        # No guest gate. This is the local model's only way out of anything it
+        # cannot do itself, so gating it on an unreliable voice score made the
+        # assistant refuse hard requests from the house's own owner and ask him
+        # to identify himself instead. The request lands in a tmux session Scott
+        # reads; the speaker's name is prefixed below when it is known.
         text = tool_input.tool_args["request"]
         if person := self._speaker(llm_context):
             text = f"[{person}] {text}"
@@ -548,11 +552,31 @@ class AskHubbubbTool(_RuntimeTool):
             person, confidence, source = self._runtime.speakers.resolve(
                 getattr(llm_context, "device_id", None)
             )
-            # Voice picks who to challenge; below the bar the house must ask,
-            # not guess whose device to ring.
-            if not person or (
-                source != "told" and confidence < VERIFY_CONFIDENCE
-            ):
+            # An approver device is a second factor, and a self-correcting one:
+            # a wrong guess rings the wrong person's phone, shows them the
+            # request, and they decline. So when approvers are configured voice
+            # only has to nominate a likely person - the tap is the gate, not
+            # the voice score.
+            #
+            # VERIFY_CONFIDENCE was doing the opposite of its job here. All 8 of
+            # Scott's own enrolment samples score below 0.90 against his own
+            # profile, and live utterances are noisier still, so the bar was
+            # unreachable and this tool asked "who is speaking?" every single
+            # time it was used. A gate nobody can ever pass is not security, it
+            # is just the assistant refusing to work.
+            #
+            # Without approvers there is no second factor: voice alone decides
+            # whose Hubbubb credentials get spent and nothing catches a wrong
+            # guess, which is the one case that still needs the high bar.
+            unverified = (
+                not person
+                if approvals.configured
+                else (
+                    not person
+                    or (source != "told" and confidence < VERIFY_CONFIDENCE)
+                )
+            )
+            if unverified:
                 return {
                     "error": "speaker_not_verified",
                     "detail": (
