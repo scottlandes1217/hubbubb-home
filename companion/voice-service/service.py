@@ -51,7 +51,7 @@ _KILL_FILLER = {"jarvis", "no", "please", "okay", "ok", "now", "just", "oh"}
 _KILL_PHRASES = {
     "cancel", "cancel that", "cancel request", "never mind", "nevermind",
     "forget it", "shut up", "shut the fuck up", "stop", "stop it",
-    "be quiet", "quiet",
+    "stop talking", "be quiet", "quiet",
 }
 
 

@@ -44,6 +44,7 @@ def main():
     assert kill("No, nevermind!")
     assert kill("Shut the fuck up!")
     assert kill("Jarvis, please stop")
+    assert kill("Stop talking.")
     assert not kill("Stop the laundry timer")
     assert not kill("Cancel my three o'clock meeting")
     print("echo check ok")
