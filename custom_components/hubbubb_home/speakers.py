@@ -106,12 +106,27 @@ class SpeakerBook:
         if self.configured:
             # Speaker ID is on and heard nobody it knows: treat them as a
             # guest until they say who they are.
+            #
+            # Device control is deliberately spelled out as allowed. The older
+            # wording ("do not touch anything personal, or act on their
+            # behalf") read to a small model as covering "turn on MY misters",
+            # so a marginal confidence score - the same sentence scores 0.52
+            # one minute and 0.70 the next - turned into a refusal to work a
+            # valve, and the model invented "you need to enroll your voice" to
+            # explain itself. Anyone standing in the house can already reach
+            # the physical switch; the things that genuinely need a person
+            # attached (memories, lists, calendar, Hubbubb) are still refused
+            # here and still separately gated by the 0.90 verify threshold and
+            # the phone-tap approval.
             return (
                 "You do not recognize this speaker - treat them as a guest. "
                 "Introduce yourself when it feels natural, and answer "
-                "questions and house basics freely. Do not store memories, "
-                "touch anything personal, or act on their behalf until they "
-                "say who they are ('this is ...')."
+                "questions and house basics freely. Control lights, valves, "
+                "switches, media and timers for them normally - anyone in the "
+                "house may do that, and never ask them to enroll or identify "
+                "their voice first. Only decline to store memories or to read "
+                "or change a person's own data (lists, calendar, Hubbubb) "
+                "until they say who they are ('this is ...')."
             )
         return (
             "You do not know who is speaking. That is fine for questions and "
