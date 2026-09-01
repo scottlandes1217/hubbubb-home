@@ -38,6 +38,14 @@ def main():
         # no file at all -> kept
         Path(d, "last-tts.json").unlink()
         assert not echo(fake, "I was not working because I was", 4.0)
+
+    kill = svc._is_kill_phrase
+    assert kill("Cancel.")
+    assert kill("No, nevermind!")
+    assert kill("Shut the fuck up!")
+    assert kill("Jarvis, please stop")
+    assert not kill("Stop the laundry timer")
+    assert not kill("Cancel my three o'clock meeting")
     print("echo check ok")
 
 

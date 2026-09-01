@@ -45,6 +45,21 @@ def _words(text: str) -> list[str]:
     ).split()
 
 
+# Say one of these (alone, filler aside) and Jarvis goes quiet: the pipeline
+# gets an empty transcript, so nothing downstream ever composes a reply.
+_KILL_FILLER = {"jarvis", "no", "please", "okay", "ok", "now", "just", "oh"}
+_KILL_PHRASES = {
+    "cancel", "cancel that", "cancel request", "never mind", "nevermind",
+    "forget it", "shut up", "shut the fuck up", "stop", "stop it",
+    "be quiet", "quiet",
+}
+
+
+def _is_kill_phrase(text: str) -> bool:
+    meaningful = [w for w in _words(text) if w not in _KILL_FILLER]
+    return " ".join(meaningful) in _KILL_PHRASES
+
+
 class Service:
     """Shared models and state; one instance for every connection."""
 
@@ -95,6 +110,10 @@ class Service:
             elapsed = time.monotonic() - started
         if self._is_self_echo(text, len(audio) / RATE):
             _LOGGER.info("self-echo dropped: %r", text)
+            return {"person": None, "confidence": 0.0, "ts": time.time(),
+                    "text": "", "candidates": [], "token": self.args.token}
+        if _is_kill_phrase(text):
+            _LOGGER.info("kill phrase heard, staying quiet: %r", text)
             return {"person": None, "confidence": 0.0, "ts": time.time(),
                     "text": "", "candidates": [], "token": self.args.token}
         person, confidence, candidates = self.profiles.match(embedding)
