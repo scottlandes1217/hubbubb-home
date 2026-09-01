@@ -10,8 +10,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
+import os
+import time
 from functools import partial
+from pathlib import Path
 
 import numpy as np
 from kokoro_onnx import Kokoro
@@ -28,6 +32,22 @@ _LOGGER = logging.getLogger("hubbubb-kokoro")
 # refused as unsupported.
 LANGUAGES = ["en", "en-GB", "en-US", "en-AU", "en-CA", "en-NZ", "en-IE"]
 CHUNK = 4096
+
+# The sibling STT service reads this to drop the mic's echo of our own
+# playback - the puck's echo canceller does not cover a speaker on its
+# line-out jack, so without it Jarvis hears its replies and answers itself.
+LAST_TTS = Path("~/.hubbubb-voice/last-tts.json").expanduser()
+
+
+def note_playback(text: str, duration: float) -> None:
+    try:
+        entries = json.loads(LAST_TTS.read_text())[-2:]
+    except (OSError, ValueError):
+        entries = []
+    entries.append({"ts": time.time(), "duration": duration, "text": text})
+    tmp = LAST_TTS.with_suffix(".tmp")
+    tmp.write_text(json.dumps(entries))
+    os.replace(tmp, LAST_TTS)
 
 
 class KokoroHandler(AsyncEventHandler):
@@ -55,6 +75,7 @@ class KokoroHandler(AsyncEventHandler):
                 None, self.service.synthesize, synthesize.text, voice
             )
         pcm = (np.clip(samples, -1.0, 1.0) * 32767).astype("<i2").tobytes()
+        note_playback(synthesize.text, len(pcm) / (2 * rate))
         await self.write_event(
             AudioStart(rate=rate, width=2, channels=1).event()
         )

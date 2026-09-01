@@ -39,6 +39,12 @@ RATE = 16000
 MIN_EMBED_SECONDS = 0.5
 
 
+def _words(text: str) -> list[str]:
+    return "".join(
+        c.lower() if c.isalnum() or c.isspace() else " " for c in text
+    ).split()
+
+
 class Service:
     """Shared models and state; one instance for every connection."""
 
@@ -87,6 +93,10 @@ class Service:
                 None, self._transcribe_and_embed, audio, language
             )
             elapsed = time.monotonic() - started
+        if self._is_self_echo(text, len(audio) / RATE):
+            _LOGGER.info("self-echo dropped: %r", text)
+            return {"person": None, "confidence": 0.0, "ts": time.time(),
+                    "text": "", "candidates": [], "token": self.args.token}
         person, confidence, candidates = self.profiles.match(embedding)
         event = {
             "person": person,
@@ -108,6 +118,38 @@ class Service:
         if self.args.webhook:
             asyncio.ensure_future(self._post_webhook(event))
         return event
+
+    def _is_self_echo(self, text: str, audio_seconds: float) -> bool:
+        """True when the transcript is the mic hearing our own TTS.
+
+        The puck's echo canceller does not cover a speaker on its line-out
+        jack, so Jarvis's replies come straight back into the mic and it
+        answers itself forever. The kokoro server notes what it synthesized
+        and for how long; a capture that overlaps that playback window and
+        whose words mostly come from it is our own voice, not the household's.
+        """
+        heard = _words(text)
+        if len(heard) < 3:
+            return False  # barge-ins like "stop" must survive
+        path = Path(self.args.data_dir).expanduser() / "last-tts.json"
+        try:
+            entries = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return False
+        capture_start = time.time() - audio_seconds
+        for entry in entries:
+            # 3s margin for HA fetching the audio and the puck starting it.
+            if capture_start > entry["ts"] + entry.get("duration", 0.0) + 3.0:
+                continue
+            spoken = set(_words(entry.get("text", "")))
+            if not spoken:
+                continue
+            overlap = sum(w in spoken for w in heard) / len(heard)
+            # ponytail: bag-of-words at 0.6; swap in a real alignment if a
+            # genuinely echoed-back human answer ever gets eaten.
+            if overlap >= 0.6:
+                return True
+        return False
 
     def _transcribe_and_embed(self, audio: np.ndarray, language: str | None):
         # Pipelines send a locale ("en-US"); whisper wants the bare code.
