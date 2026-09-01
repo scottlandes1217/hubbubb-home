@@ -19,5 +19,15 @@ launchd agent `com.hubbubb.kokoro`, logs to
   (first synthesis ~2s), vs Piper's ~0.8s at 22.05kHz. The trade is
   noticeably warmer, more natural speech for a few hundred milliseconds.
 
+- **Streamed by sentence**: a reply is split into sentences and each one is
+  synthesized and sent as the previous one is still arriving, inside a single
+  audio-start/audio-stop. Total synthesis time is unchanged; time to the first
+  word drops to the first sentence's share of it (2.5s → 0.8s on a
+  three-sentence reply). The splitter refuses to break on decimals,
+  abbreviations, times, initials and ellipses, and merges a short trailing
+  fragment into the sentence before it.
+
 `probe.py` is the self-check: Describe + a full sentence through each
 British male, asserting audio length and level.
+`../tests/sentence_check.py` checks the sentence splitter on its own
+(`kokoro/.venv/bin/python tests/sentence_check.py` from `voice-service/`).
