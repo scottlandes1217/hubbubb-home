@@ -1193,6 +1193,41 @@ def test_list_item_fuzzy_match():
     assert match_item([], "milk") is None
 
 
+def test_spoken_questions_are_answered_out_loud_whatever_the_toggle():
+    """A reply to something the user just said must never be silenced.
+
+    The announcements toggle exists to stop unsolicited chatter from typed
+    sessions. With it off, a question asked at the puck fell through to a
+    passive phone push - no sound, no banner - so the answer vanished while
+    every log said "sent". ha-notify.py had always sent the "voice" flag for
+    exactly this case; nothing read it.
+    """
+    from hubbubb_home.const import delivery_for
+
+    spoken = {"message": "done sir", "voice": True}
+    asked = {"message": "shall I?", "ask": True}
+    typed = {"message": "background job finished"}
+
+    # The reported bug. Toggle off must not silence an answer to speech.
+    assert delivery_for(spoken, announcements_on=False, quiet=False) == "announce"
+    assert delivery_for(spoken, announcements_on=True, quiet=False) == "announce"
+
+    # A session asking the user something already worked; keep it working.
+    assert delivery_for(asked, announcements_on=False, quiet=False) == "announce"
+
+    # What the toggle is actually for: unsolicited output from a typed session.
+    assert delivery_for(typed, announcements_on=False, quiet=False) == "push"
+    assert delivery_for(typed, announcements_on=True, quiet=False) == "event"
+
+    # Quiet hours outrank everything audible, spoken questions included.
+    for data in (spoken, asked, typed):
+        assert delivery_for(data, announcements_on=True, quiet=True) == "push"
+
+    # No message is a no-op rather than an empty announcement.
+    assert delivery_for({"voice": True}, announcements_on=True, quiet=False) == "nothing"
+    assert delivery_for({"message": ""}, announcements_on=True, quiet=False) == "nothing"
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

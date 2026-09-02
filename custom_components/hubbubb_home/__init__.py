@@ -80,6 +80,7 @@ from .const import (
     DEFAULT_PROMPT,
     DOMAIN,
     EVENT_MESSAGE,
+    delivery_for,
     PLATFORMS,
     SENTENCE_FILES,
     WEBHOOK_MESSAGE,
@@ -643,19 +644,22 @@ async def _route_message(runtime: Runtime, data: dict) -> None:
     if not message:
         return
 
-    # Quiet hours: nothing audible, nothing on screens - only the passive
-    # push below. "ask" answers included: the question was asked hours
-    # ago if its answer is arriving at 3am.
-    if not _quiet_now(runtime):
-        if data.get("ask"):
-            await _announce(runtime, message)
-            return
-
-        switch = runtime.entity_id("agent_announcements")
-        state = hass.states.get(switch) if switch else None
-        if state is None or state.state == "on":
-            hass.bus.async_fire(EVENT_MESSAGE, data)
-            return
+    # The decision itself lives in const.delivery_for, pure and tested. A
+    # missing switch entity counts as on, which is the behaviour from before
+    # the toggle existed.
+    switch = runtime.entity_id("agent_announcements")
+    state = hass.states.get(switch) if switch else None
+    where = delivery_for(
+        data,
+        announcements_on=state is None or state.state == "on",
+        quiet=_quiet_now(runtime),
+    )
+    if where == "announce":
+        await _announce(runtime, message)
+        return
+    if where == "event":
+        hass.bus.async_fire(EVENT_MESSAGE, data)
+        return
 
     notify = runtime.option(CONF_ANNOUNCE, CONF_NOTIFY)
     if not notify or "." not in notify:

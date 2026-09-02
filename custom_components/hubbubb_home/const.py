@@ -143,3 +143,33 @@ DEFAULT_PROMPT = (
     "If you genuinely cannot do something, say so plainly in one sentence and "
     "say what you can do instead. Never invent a device, a state, or an event."
 )
+
+
+# Where a finished message goes. Pure, so the policy can be checked without a
+# Home Assistant: the package's __init__ imports half of core, which is exactly
+# why this decision used to be untested.
+#
+#   "announce" - out loud on the satellites (the room the speaker is in)
+#   "event"    - fired for whatever dashboards are open to speak
+#   "push"     - passive phone notification, no sound, no banner
+#   "nothing"  - there was no message
+def delivery_for(data: dict, announcements_on: bool, quiet: bool) -> str:
+    """Decide how to deliver one finished message.
+
+    The announcements toggle stops *unsolicited* chatter from typed sessions.
+    It must never silence one half of a conversation already in progress:
+    "ask" is a session putting a question to the user, "voice" is a turn the
+    user began by speaking to a puck. Both are answers somebody is waiting on,
+    so both are spoken whatever the toggle says - and spoken through the
+    satellite, not the dashboards, because that is where the speaker is.
+
+    Quiet hours outrank all of it. An answer arriving at 3am is answering a
+    question asked hours ago.
+    """
+    if not data.get("message"):
+        return "nothing"
+    if quiet:
+        return "push"
+    if data.get("ask") or data.get("voice"):
+        return "announce"
+    return "event" if announcements_on else "push"
