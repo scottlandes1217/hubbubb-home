@@ -5,3 +5,4 @@ aiohttp
 numpy
 # webrtcvad (via resemblyzer) still imports pkg_resources
 setuptools<81
+sounddevice

@@ -31,7 +31,9 @@ from wyoming.event import Event
 from wyoming.info import AsrModel, AsrProgram, Attribution, Describe, Info
 from wyoming.server import AsyncEventHandler, AsyncTcpServer
 
+from library import KINDS, Library, Recorder, split_take
 from speakers import Profiles
+from wakeword import harvest
 
 _LOGGER = logging.getLogger("hubbubb-voice")
 
@@ -197,22 +199,29 @@ class Service:
         return False
 
     def _transcribe_and_embed(self, audio: np.ndarray, language: str | None):
+        return self.transcribe(audio, language), self.embed(audio)
+
+    def transcribe(self, audio: np.ndarray, language: str | None = None) -> str:
+        """Blocking; run under self.lock in an executor. audio is float32."""
         # Pipelines send a locale ("en-US"); whisper wants the bare code.
         language = (language or self.args.language).split("-")[0]
         segments, _info = self.model.transcribe(
             audio, language=language, beam_size=1,
             initial_prompt=self.vocabulary() or None,
         )
-        text = " ".join(s.text.strip() for s in segments).strip()
-        embedding = None
-        if len(audio) >= RATE * MIN_EMBED_SECONDS:
-            try:
-                wav = preprocess_wav(audio, source_sr=RATE)
-                if len(wav) >= RATE * MIN_EMBED_SECONDS:
-                    embedding = self.encoder.embed_utterance(wav)
-            except Exception:
-                _LOGGER.exception("speaker embedding failed; transcript stands")
-        return text, embedding
+        return " ".join(s.text.strip() for s in segments).strip()
+
+    def embed(self, audio: np.ndarray) -> np.ndarray | None:
+        """Blocking, like transcribe(); None when there is too little to fingerprint."""
+        if len(audio) < RATE * MIN_EMBED_SECONDS:
+            return None
+        try:
+            wav = preprocess_wav(audio, source_sr=RATE)
+            if len(wav) >= RATE * MIN_EMBED_SECONDS:
+                return self.encoder.embed_utterance(wav)
+        except Exception:
+            _LOGGER.exception("speaker embedding failed; transcript stands")
+        return None
 
     def label(self, person: str) -> dict:
         """Enroll the last utterance's fingerprint as this person's voice."""
@@ -271,6 +280,11 @@ class SttHandler(AsyncEventHandler):
         return True
 
 
+def _float(pcm: np.ndarray) -> np.ndarray:
+    """int16 samples as the float32 the models take."""
+    return pcm.astype(np.float32) / 32768.0
+
+
 def _to_16k_mono(chunk: AudioChunk) -> bytes:
     """HA streams 16k/16-bit/mono; anything else gets a cheap linear resample."""
     if chunk.rate == RATE and chunk.channels == 1 and chunk.width == 2:
@@ -300,8 +314,9 @@ class Trainer:
     is ready or the run failed.
     """
 
-    def __init__(self, args) -> None:
+    def __init__(self, args, library: Library) -> None:
         self.args = args
+        self.library = library
         self.proc: asyncio.subprocess.Process | None = None
         self.status: dict = {"running": False}
 
@@ -332,11 +347,19 @@ class Trainer:
         return self.status
 
     async def _run(self, phrase: str, out: Path, log) -> None:
+        argv = [str(self.python), str(self.script), phrase, "--out", str(out)]
+        # The library's shelves are laid out the way train.py's copy_clips
+        # walks them (recursive glob), so point it at them directly. Only when
+        # a shelf has something on it: an empty --extra-* dir aborts the run.
+        positives = self.library.dir("wake", phrase)
+        negatives = self.library.dir("ambient")
+        if any(positives.glob("**/*.wav")):
+            argv += ["--extra-positives", str(positives)]
+        if any(negatives.glob("**/*.wav")):
+            argv += ["--extra-negatives", str(negatives)]
         try:
             self.proc = await asyncio.create_subprocess_exec(
-                str(self.python), str(self.script), phrase, "--out", str(out),
-                stdout=log, stderr=log,
-                cwd=str(self.script.parent),
+                *argv, stdout=log, stderr=log, cwd=str(self.script.parent),
             )
             code = await self.proc.wait()
         except Exception as err:
@@ -399,9 +422,7 @@ def admin_app(service: Service) -> web.Application:
     async def last(_req):
         return web.json_response(service.last or {})
 
-    async def label(req):
-        authorize(req)
-        data = await req.json()
+    def person_name(data: dict) -> str:
         person = str(data.get("person") or "").strip()
         if not person:
             raise web.HTTPBadRequest(text="person is required")
@@ -417,6 +438,11 @@ def admin_app(service: Service) -> web.Application:
                               "they", "who", "someone", "somebody", "nobody",
                               "yes", "no", "okay", "ok"):
             raise web.HTTPBadRequest(text=f"{person!r} is not a name")
+        return person
+
+    async def label(req):
+        authorize(req)
+        person = person_name(await req.json())
         try:
             return web.json_response(service.label(person))
         except ValueError as err:
@@ -433,7 +459,110 @@ def admin_app(service: Service) -> web.Application:
             raise web.HTTPNotFound(text=f"no profile named {person!r}")
         return web.json_response(service.profiles.counts())
 
-    trainer = Trainer(service.args)
+    library = Library(Path(service.args.data_dir).expanduser() / "library")
+    recorder = Recorder()
+
+    async def record_status(_req):
+        return web.json_response(recorder.status())
+
+    async def record_start(req):
+        authorize(req)
+        data = await req.json()
+        kind = data.get("kind")
+        label = " ".join(str(data.get("label") or "").split())
+        if kind not in KINDS or not label:
+            raise web.HTTPBadRequest(
+                text=f"kind must be one of {', '.join(KINDS)}; label is required"
+            )
+        try:
+            recorder.start(kind, label)
+        except RuntimeError as err:
+            raise web.HTTPConflict(text=str(err))
+        return web.json_response({"kind": kind, "label": label})
+
+    async def record_stop(req):
+        authorize(req)
+        loop = asyncio.get_running_loop()
+        try:
+            audio = await loop.run_in_executor(None, recorder.stop)
+        except RuntimeError as err:
+            raise web.HTTPConflict(text=str(err))
+        except OSError as err:
+            raise web.HTTPInternalServerError(text=f"microphone: {err}")
+        kind, label = recorder.kind, recorder.label
+        clips = []
+        for piece in split_take(kind, audio):
+            text = ""
+            if kind != "ambient":  # dozens of chunks nobody will read
+                async with service.lock:  # the puck's utterances take turns with ours
+                    text = await loop.run_in_executor(
+                        None, service.transcribe, _float(piece)
+                    )
+            clips.append(library.add(kind, label, piece, text))
+        return web.json_response(
+            {"seconds": round(len(audio) / RATE, 1), "clips": clips}
+        )
+
+    async def clips(req):
+        return web.json_response(
+            {"clips": library.list(req.query.get("kind"), req.query.get("label"))}
+        )
+
+    def clip_or_404(req) -> dict:
+        clip = library.get(req.match_info["id"])
+        if clip is None:
+            raise web.HTTPNotFound(text="no such clip")
+        return clip
+
+    async def clip_audio(req):
+        authorize(req)
+        return web.Response(
+            body=library.path(clip_or_404(req)).read_bytes(),
+            content_type="audio/wav",
+        )
+
+    async def clip_delete(req):
+        authorize(req)
+        clip_id = req.match_info["id"]
+        if not library.delete(clip_id):
+            raise web.HTTPNotFound(text="no such clip")
+        return web.json_response({"deleted": clip_id})
+
+    async def clip_refile(req):
+        authorize(req)
+        clip = clip_or_404(req)
+        data = await req.json()
+        kind = data.get("kind") or clip["kind"]
+        label = " ".join(str(data.get("label") or "").split()) or clip["label"]
+        if kind not in KINDS:
+            raise web.HTTPBadRequest(text=f"kind must be one of {', '.join(KINDS)}")
+        return web.json_response({"clip": library.refile(clip["id"], kind, label)})
+
+    async def people_enroll(req):
+        authorize(req)
+        data = await req.json()
+        person = person_name(data)
+        ids = data.get("clips") or []
+        if not isinstance(ids, list) or not ids:
+            raise web.HTTPBadRequest(text="clips is a non-empty list of ids")
+        found = [library.get(str(i)) for i in ids]
+        if None in found:
+            raise web.HTTPNotFound(text="no such clip")
+        loop = asyncio.get_running_loop()
+        count = samples = 0
+        for clip in found:
+            audio = _float(harvest.read(library.path(clip)))
+            async with service.lock:
+                embedding = await loop.run_in_executor(None, service.embed, audio)
+            if embedding is None:
+                continue  # silence, or too short to fingerprint
+            samples = service.profiles.add(person, embedding)
+            count += 1
+        return web.json_response(
+            {"person": person, "count": count, "samples": samples}
+        )
+
+    trainer = Trainer(service.args, library)
 
     async def train(req):
         authorize(req)
@@ -460,6 +589,14 @@ def admin_app(service: Service) -> web.Application:
             web.post("/people/delete", people_delete),
             web.post("/train", train),
             web.get("/train/status", train_status),
+            web.get("/record/status", record_status),
+            web.post("/record/start", record_start),
+            web.post("/record/stop", record_stop),
+            web.get("/clips", clips),
+            web.get("/clips/{id}/audio", clip_audio),
+            web.post("/clips/{id}", clip_refile),
+            web.delete("/clips/{id}", clip_delete),
+            web.post("/people/enroll", people_enroll),
         ]
     )
     return app

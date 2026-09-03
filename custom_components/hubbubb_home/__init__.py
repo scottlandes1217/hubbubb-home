@@ -81,6 +81,8 @@ from .const import (
     DOMAIN,
     EVENT_MESSAGE,
     delivery_for,
+    PANEL_FILE,
+    PANEL_PATH,
     PLATFORMS,
     SENTENCE_FILES,
     WEBHOOK_MESSAGE,
@@ -96,7 +98,11 @@ from .intents import (
 )
 from .llm_api import HubbubbAPI
 from .memory import Memory
-from .speakers import SpeakerBook, async_register_webhook as _speaker_webhook
+from .speakers import (
+    SpeakerBook,
+    VoiceProxyView,
+    async_register_webhook as _speaker_webhook,
+)
 from .nightly import FindingsReport, async_sweep
 from .timers import TimerPool
 
@@ -291,6 +297,9 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         intent_helper.async_remove(hass, intent_type)
     for service in (*AGENT_SERVICES, *SERVICE_SCHEMAS):
         hass.services.async_remove(DOMAIN, service)
+    # One panel between however many entries; it goes with the last of them.
+    if not hass.data[DOMAIN]:
+        frontend.async_remove_panel(hass, PANEL_PATH)
     return True
 
 
@@ -317,7 +326,7 @@ class _CardsView(HomeAssistantView):
     async def get(
         self, request: web.Request, version: str, filename: str
     ) -> web.StreamResponse:
-        if filename not in CARDS:  # also forecloses path traversal
+        if filename not in (*CARDS, PANEL_FILE):  # also forecloses traversal
             raise web.HTTPNotFound
         return web.FileResponse(
             Path(__file__).parent / "www" / filename,
@@ -333,14 +342,35 @@ async def _async_serve_cards(hass: HomeAssistant) -> None:
     "custom element doesn't exist" - a coin flip on every load of the wall
     tablet. Registered resources are awaited before the first card renders.
     """
+    integration = await async_get_integration(hass, DOMAIN)
+    base = f"{URL_BASE}/{integration.version or 'dev'}"
+
+    # Every time, not once: unloading the last entry removes the panel, so a
+    # reload has to put it back. update=True is what makes a second entry, or
+    # that reload, a no-op rather than a ValueError.
+    frontend.async_register_built_in_panel(
+        hass,
+        "custom",
+        sidebar_title="Voice Studio",
+        sidebar_icon="mdi:microphone-plus",
+        frontend_url_path=PANEL_PATH,
+        config={
+            "_panel_custom": {
+                "name": "hubbubb-voice-studio",
+                "module_url": f"{base}/{PANEL_FILE}",
+                "embed_iframe": False,
+                "trust_external": False,
+            }
+        },
+        update=True,
+    )
+
     if hass.data.get(f"{DOMAIN}_cards"):
         return
     hass.data[f"{DOMAIN}_cards"] = True
 
-    integration = await async_get_integration(hass, DOMAIN)
-    base = f"{URL_BASE}/{integration.version or 'dev'}"
-
     hass.http.register_view(_CardsView())
+    hass.http.register_view(VoiceProxyView(hass))
 
     resources = getattr(hass.data.get("lovelace"), "resources", None)
     if resources is None or not hasattr(resources, "async_create_item"):

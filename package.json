@@ -5,9 +5,9 @@
   "description": "Hubbubb Home - a voice assistant for Home Assistant that you name yourself",
   "type": "module",
   "scripts": {
-    "build": "esbuild cards/src/hubbubb-ring-card.js cards/src/hubbubb-remote-card.js cards/src/hubbubb-timers-card.js --bundle --format=esm --minify --target=es2017 --outdir=custom_components/hubbubb_home/www",
+    "build": "esbuild cards/src/hubbubb-ring-card.js cards/src/hubbubb-remote-card.js cards/src/hubbubb-timers-card.js cards/src/hubbubb-voice-studio.js --bundle --format=esm --minify --target=es2017 --outdir=custom_components/hubbubb_home/www",
     "watch": "npm run build -- --watch",
-    "test": "node cards/test/envelope.mjs && node cards/test/pack.mjs && node cards/test/foam.mjs && python3 tests/test_logic.py"
+    "test": "node cards/test/envelope.mjs && node cards/test/pack.mjs && node cards/test/foam.mjs && node cards/test/voice-studio.mjs && python3 tests/test_logic.py"
   },
   "dependencies": {
     "lit": "^3.2.1"

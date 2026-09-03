@@ -8,7 +8,8 @@ One process on the household computer, two ports:
 - **10301** — admin HTTP: `GET /health`, `GET /last` (last utterance: text,
   matched person, confidence, per-person similarities), `POST /label
   {"person": "Scott"}` (enroll the last utterance as that person's voice),
-  `GET /people`, `POST /people/delete {"person": "..."}`.
+  `GET /people`, `POST /people/delete {"person": "..."}`, `POST /train
+{"phrase": "..."}` + `GET /train/status`, and the sample library below.
 
 Every utterance is also fingerprinted (resemblyzer) and matched against the
 enrolled voices. The result is written to `~/.hubbubb-voice/last.json` and
@@ -64,6 +65,32 @@ curl -s -X POST localhost:10301/label -d '{"person":"Scott"}' # that was Scott
 
 A handful of utterances per person is enough to start; each person keeps
 their latest 40 fingerprints and the centroid tracks their voice over time.
+
+## Recording samples from a front end
+
+The Mac's own microphone, driven over the admin port (mutating calls need
+the `X-Voice-Service-Token` header; the token is `~/.hubbubb-voice/token`):
+
+```sh
+POST /record/start {"kind": "wake"|"ambient"|"voice", "label": "..."}
+GET  /record/status      # {"recording", "kind", "label", "seconds", "level"} - poll it for the meter
+POST /record/stop        # -> {"seconds", "clips": [...]}
+GET  /clips?kind=&label= # newest first
+GET  /clips/<id>/audio   # wav (token required)
+POST /clips/<id> {"kind"?, "label"?}   # re-file
+DELETE /clips/<id>
+POST /people/enroll {"person": "Scott", "clips": [id, ...]}
+```
+
+A stopped take is cut by kind - `wake` into one 1.5 s clip per spoken burst
+(`wakeword/harvest.py`), `ambient` into ten-second chunks, `voice` kept whole -
+and shelved under `~/.hubbubb-voice/library/<kind>/<label-slug>/<id>.wav`
+with `library/index.json` beside it. Wake and voice clips carry a whisper
+transcript so a mis-take shows up in the listing. `POST /train` feeds the
+`wake` shelf whose label matches the phrase and the whole `ambient` shelf to
+the trainer as `--extra-positives` / `--extra-negatives`.
+
+`tests/library_check.py` exercises all of this with a canned microphone.
 
 ## A model tuned to the house
 

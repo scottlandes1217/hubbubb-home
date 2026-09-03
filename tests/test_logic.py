@@ -58,6 +58,7 @@ _components.webhook = _stub(
     async_register=lambda *a, **k: None,
     async_unregister=lambda *a, **k: None,
 )
+_components.http = _stub("homeassistant.components.http", HomeAssistantView=object)
 _stub(
     "homeassistant.components.recorder",
     get_instance=lambda hass: hass,
@@ -372,6 +373,98 @@ def test_speaker_events_need_the_token_when_one_is_set():
                       "token": "anything"})
     assert open_book.resolve()[0] == "Vega"
     assert "token" not in open_book.events[-1]
+
+
+class _ProxyResp:
+    def __init__(self, status, content_type, body):
+        self.status, self.headers, self._body = status, {"Content-Type": content_type}, body
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def read(self):
+        return self._body
+
+
+class _ProxySession:
+    """The voice service as the proxy sees it: records the call, answers once."""
+
+    def __init__(self, answer):
+        self.answer, self.calls = answer, []
+
+    def request(self, method, url, **kwargs):
+        self.calls.append((method, url, kwargs))
+        if isinstance(self.answer, Exception):
+            raise self.answer
+        return _ProxyResp(*self.answer)
+
+
+def test_voice_proxy_routing():
+    import asyncio
+    import json
+
+    from hubbubb_home.speakers import VoiceProxyView, upstream_url
+
+    def call(book, method, path, query="", body=b"", ctype="application/json"):
+        return asyncio.run(book.async_proxy(method, path, query, body, ctype))
+
+    # The view opens exactly the methods the studio needs; aiohttp 405s the rest.
+    assert all(hasattr(VoiceProxyView, m) for m in ("get", "post", "delete"))
+    assert not any(hasattr(VoiceProxyView, m) for m in ("put", "patch"))
+    assert VoiceProxyView.requires_auth is True
+
+    # Nothing configured: a 503 the panel can show, and no call goes out.
+    status, ctype, body = call(SpeakerBook(None, "", ""), "GET", "clips")
+    assert status == 503 and ctype == "application/json"
+    assert json.loads(body) == {"ok": False, "detail": "no voice service is configured"}
+
+    # Path joining: base without a trailing slash, segments re-quoted, the
+    # token on the way out, query string kept but authSig (HA's signed-path
+    # credential for <audio src>) dropped before it reaches the LAN service.
+    session = _ProxySession((200, "application/json", b'{"clips": []}'))
+    book = SpeakerBook(session, "http://mac:10301/", "", token="s3cret")
+    assert call(book, "GET", "clips", "limit=5&authSig=abc") == (
+        200, "application/json", b'{"clips": []}'
+    )
+    method, url, kwargs = session.calls[-1]
+    assert (method, url) == ("GET", "http://mac:10301/clips?limit=5")
+    assert kwargs["headers"] == {"X-Voice-Service-Token": "s3cret"}
+    assert kwargs["data"] is None, "a bodiless GET must not send an empty body"
+
+    # A POST carries its body and content type through untouched.
+    call(book, "POST", "clips/2026-09-02T10:00:00", body=b'{"person": "Scott"}')
+    method, url, kwargs = session.calls[-1]
+    assert (method, url) == ("POST", "http://mac:10301/clips/2026-09-02T10%3A00%3A00")
+    assert kwargs["data"] == b'{"person": "Scott"}'
+    assert kwargs["headers"]["Content-Type"] == "application/json"
+
+    # Audio comes back as audio, bytes and content type alike.
+    wav = _ProxySession((200, "audio/wav", b"RIFF...."))
+    status, ctype, body = call(SpeakerBook(wav, "http://mac:10301", ""), "GET", "clips/7/audio")
+    assert (status, ctype, body) == (200, "audio/wav", b"RIFF....")
+    assert wav.calls[-1][2]["headers"] == {}, "no token configured, none sent"
+
+    # Upstream errors pass through with their own status; ours stay 405/404/503.
+    bad = _ProxySession((404, "application/json", b'{"detail": "no clip"}'))
+    assert call(SpeakerBook(bad, "http://mac:10301", ""), "DELETE", "clips/9")[0] == 404
+    assert call(book, "PUT", "clips/9")[0] == 405
+    assert len(session.calls) == 2, "a refused method never reaches the service"
+    down = _ProxySession(sys.modules["aiohttp"].ClientError("refused"))
+    status, ctype, body = call(SpeakerBook(down, "http://mac:10301", ""), "GET", "people")
+    assert status == 503 and "unreachable" in json.loads(body)["detail"]
+
+    # Nothing in a path may leave the configured base.
+    base = "http://mac:10301"
+    for escape in ("", "/", "../train", "clips/../../etc", "./clips", "clips//x", "clips/."):
+        assert upstream_url(base, escape) is None, escape
+        assert call(book, "GET", escape)[0] == 404, escape
+    assert upstream_url(base, "record/status") == f"{base}/record/status"
+    # Separators and schemes inside a segment are quoted, not interpreted.
+    assert upstream_url(base, "clips/http:%2F%2Fevil/audio").startswith(f"{base}/clips/http%3A%252F")
+    assert upstream_url(base, "clips/a b#c", "x=1&y=") == f"{base}/clips/a%20b%23c?x=1&y="
 
 
 # --- approvals: the phone-tap gate -------------------------------------------

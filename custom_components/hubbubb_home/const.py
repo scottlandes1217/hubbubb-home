@@ -117,6 +117,11 @@ CARDS = (
     "hubbubb-remote-card.js",
     "hubbubb-timers-card.js",
 )
+# The Voice Studio sidebar panel. Served from the same versioned URL as the
+# cards but not registered as a Lovelace resource: a panel loads its own
+# module, and every dashboard would otherwise pull the studio in too.
+PANEL_FILE = "hubbubb-voice-studio.js"
+PANEL_PATH = "hubbubb-voice"
 
 PLATFORMS = ["switch", "sensor", "conversation"]
 

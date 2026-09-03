@@ -1,0 +1,1016 @@
+/* Hubbubb voice studio — a recording desk for wake-word and speaker data.
+
+   A full panel rather than a card, because a recording session is a sit-down
+   job: pick what you are recording, say it thirty times, listen back, throw
+   out the coughs, file the good ones. Everything goes through the
+   integration's proxy at /api/hubbubb_home/voice/<path>, so the browser only
+   ever holds a Home Assistant session - the voice service's own token stays
+   on the server.
+
+   The pure parts (URL building, filtering, the meter maths, the blob
+   lifecycle) are exported so test/voice-studio.mjs can assert them without a
+   browser. */
+import { LitElement, css, html, nothing } from "lit";
+
+/* Not import.meta.url: the build targets es2017 for the wall tablet's old
+   webview and esbuild lowers import.meta to `{}` below es2020. */
+const BUILD =
+  ((new Error().stack || "").match(/\/(\d+\.\d+\.\d+)\//) || [])[1] || "dev";
+console.info(`hubbubb-voice-studio ${BUILD}`);
+
+export const API_BASE = "/api/hubbubb_home/voice/";
+
+export const KINDS = [
+  { id: "wake", name: "Wake word", hint: "the phrase, said the way you say it" },
+  { id: "ambient", name: "Room noise", hint: "what it must not wake to" },
+  { id: "voice", name: "Voice", hint: "a person, for speaker matching" },
+];
+
+const enc = encodeURIComponent;
+const query = (params = {}) => {
+  const q = Object.entries(params)
+    .filter(([, v]) => v !== undefined && v !== null && v !== "")
+    .map(([k, v]) => `${enc(k)}=${enc(v)}`)
+    .join("&");
+  return q ? `?${q}` : "";
+};
+
+/* Every upstream call as [method, path, body]. One table, so the test can
+   check the wire shape of each without a fetch in sight. */
+export const api = {
+  status: () => ["GET", "record/status"],
+  start: (kind, label) => ["POST", "record/start", { kind, label }],
+  stop: () => ["POST", "record/stop"],
+  clips: (filter) => ["GET", `clips${query(filter)}`],
+  deleteClip: (id) => ["DELETE", `clips/${enc(id)}`],
+  refile: (id, patch) => ["POST", `clips/${enc(id)}`, patch],
+  people: () => ["GET", "people"],
+  enroll: (person, clips) => ["POST", "people/enroll", { person, clips }],
+  deletePerson: (person) => ["POST", "people/delete", { person }],
+  train: (phrase) => ["POST", "train", { phrase }],
+  trainStatus: () => ["GET", "train/status"],
+};
+
+export const audioPath = (id) => `${API_BASE}clips/${enc(id)}/audio`;
+
+/* What to tell the user when a call fails. The proxy answers 503 with a
+   short JSON message when the voice service is unreachable; aiohttp's own
+   errors are plain text. Either way the words are more use than the code. */
+export function errMessage(status, body) {
+  let text = typeof body === "string" ? body : "";
+  try {
+    const j = typeof body === "string" ? JSON.parse(body) : body;
+    // Parsed JSON with no message is worth nothing to a person; fall through
+    // to the status rather than print braces.
+    text = j?.message || j?.error || "";
+  } catch (e) {}
+  text = (text || "").trim();
+  if (!text) text = status === 503 ? "the voice service is not reachable" : `request failed (${status})`;
+  return text;
+}
+
+/* created comes back as epoch seconds; tolerate ms and ISO too, because
+   "newest first" silently becomes "random order" if this guesses wrong. */
+export const clipTime = (created) => {
+  if (typeof created === "number") return created < 1e12 ? created * 1000 : created;
+  const t = Date.parse(created);
+  return Number.isFinite(t) ? t : 0;
+};
+
+/* Newest first, narrowed by kind, label and a since-time (ms). */
+export function filterClips(clips, { kind, label, since } = {}) {
+  return (clips || [])
+    .filter((c) => !kind || c.kind === kind)
+    .filter((c) => !label || c.label === label)
+    .filter((c) => !since || clipTime(c.created) >= since)
+    .sort((a, b) => clipTime(b.created) - clipTime(a.created));
+}
+
+/* Labels in use for a kind, most clips first - the filter chips. */
+export function labelsOf(clips, kind) {
+  const n = new Map();
+  for (const c of clips || []) {
+    if (kind && c.kind !== kind) continue;
+    if (c.label) n.set(c.label, (n.get(c.label) || 0) + 1);
+  }
+  return [...n.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([l]) => l);
+}
+
+/* Level (linear 0..1 RMS) to a bar width. Square root so that ordinary
+   room speech, which sits around 0.05, shows as a quarter of the bar and
+   not a sliver you cannot tell from silence. */
+export const meterPct = (level) => {
+  const v = Number(level);
+  if (!Number.isFinite(v) || v <= 0) return 0;
+  return Math.round(Math.min(1, Math.sqrt(v)) * 100);
+};
+
+/* A dead microphone reports a level too - a very small one, forever. Six
+   polls at two a second is three seconds of nothing, which is longer than
+   any pause between takes and shorter than a wasted session. */
+export const DEAD_FLOOR = 0.002;
+export function deadMic(levels, floor = DEAD_FLOOR, n = 6) {
+  if (!levels || levels.length < n) return false;
+  return levels.slice(-n).every((l) => !(Number(l) > floor));
+}
+
+export function fmtElapsed(s) {
+  s = Math.max(0, Math.floor(Number(s) || 0));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  const mm = h ? String(m).padStart(2, "0") : String(m);
+  return (h ? `${h}:${mm}:` : `${m}:`) + String(sec).padStart(2, "0");
+}
+
+/* The trainer's own rule, mirrored so the button can stay disabled rather
+   than bounce a 400 after the fact. */
+export const validPhrase = (phrase) => {
+  const words = String(phrase || "").trim().split(/\s+/).filter(Boolean);
+  return words.length >= 1 && words.length <= 4 && words.every((w) => /^[a-z]+$/i.test(w));
+};
+
+/* One blob at a time, revoked when the next starts, when playback ends, and
+   on dispose. `urls` and `audio` are injectable so the balance can be
+   asserted in node. */
+export function makePlayer({ fetchBytes, audio, urls = URL, onstate = () => {} }) {
+  let cur = null;
+  let id = null;
+  const drop = () => {
+    if (cur) urls.revokeObjectURL(cur);
+    cur = null;
+    id = null;
+  };
+  audio.onended = () => {
+    drop();
+    onstate(null);
+  };
+  return {
+    async play(clipId) {
+      audio.pause();
+      drop();
+      const blob = await fetchBytes(clipId);
+      drop(); // a second tap landed while this one was loading
+      cur = urls.createObjectURL(blob);
+      id = clipId;
+      audio.src = cur;
+      onstate(clipId);
+      try {
+        await audio.play();
+      } catch (e) {
+        drop();
+        onstate(null);
+        throw e;
+      }
+    },
+    stop() {
+      audio.pause();
+      drop();
+      onstate(null);
+    },
+    dispose() {
+      audio.pause();
+      audio.onended = null;
+      drop();
+    },
+    get playing() {
+      return id;
+    },
+  };
+}
+
+const POLL_MS = 500;
+const TRAIN_POLL_MS = 60000;
+
+class HubbubbVoiceStudio extends LitElement {
+  static build = BUILD;
+
+  static properties = {
+    /* hass arrives on every state change in the house; nothing here reads
+       it except the transport, so it must not redraw a long list each time. */
+    hass: { attribute: false, hasChanged: () => false },
+    narrow: { type: Boolean },
+    panel: {},
+    route: {},
+    _status: { state: true },
+    _levels: { state: true },
+    _elapsed: { state: true },
+    _clips: { state: true },
+    _people: { state: true },
+    _train: { state: true },
+    _kind: { state: true },
+    _label: { state: true },
+    _fKind: { state: true },
+    _fLabel: { state: true },
+    _sel: { state: true },
+    _err: { state: true },
+    _busy: { state: true },
+    _playing: { state: true },
+    _since: { state: true },
+    _refileKind: { state: true },
+    _refileLabel: { state: true },
+    _enrolTo: { state: true },
+    _phrase: { state: true },
+    _armed: { state: true },
+    _loaded: { state: true },
+  };
+
+  constructor() {
+    super();
+    this._status = null;
+    this._levels = [];
+    this._elapsed = 0;
+    this._clips = [];
+    this._people = {};
+    this._train = null;
+    this._kind = "wake";
+    this._label = "";
+    this._fKind = "";
+    this._fLabel = "";
+    this._sel = new Set();
+    this._err = "";
+    this._busy = false;
+    this._playing = null;
+    this._since = 0;
+    this._refileKind = "";
+    this._refileLabel = "";
+    this._enrolTo = "";
+    this._phrase = "";
+    this._armed = false;
+    this._loaded = false;
+  }
+
+  connectedCallback() {
+    super.connectedCallback();
+    this._player = makePlayer({
+      audio: new Audio(),
+      fetchBytes: (id) => this._fetchAudio(id),
+      onstate: (id) => (this._playing = id),
+    });
+    this._load();
+  }
+
+  disconnectedCallback() {
+    super.disconnectedCallback();
+    this._stopPolling();
+    clearInterval(this._trainTimer);
+    this._trainTimer = null;
+    this._player?.dispose();
+    this._player = null;
+  }
+
+  /* ---------------- transport ---------------- */
+
+  async _api([method, path, body]) {
+    const init = {
+      method,
+      headers: body ? { "Content-Type": "application/json" } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    };
+    const url = API_BASE + path;
+    // fetchWithAuth refreshes an expired token; the bearer fallback is for a
+    // hass object that predates it.
+    const res = this.hass?.fetchWithAuth
+      ? await this.hass.fetchWithAuth(url, init)
+      : await fetch(url, {
+          ...init,
+          headers: { ...init.headers, Authorization: `Bearer ${this.hass?.auth?.data?.access_token}` },
+        });
+    const text = await res.text();
+    if (!res.ok) throw new Error(errMessage(res.status, text));
+    try {
+      return text ? JSON.parse(text) : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  async _fetchAudio(id) {
+    const url = audioPath(id);
+    const res = this.hass?.fetchWithAuth
+      ? await this.hass.fetchWithAuth(url)
+      : await fetch(url, { headers: { Authorization: `Bearer ${this.hass?.auth?.data?.access_token}` } });
+    if (!res.ok) throw new Error(errMessage(res.status, await res.text()));
+    const buf = await res.arrayBuffer();
+    return new Blob([buf], { type: res.headers.get("content-type") || "audio/wav" });
+  }
+
+  /* Run a call, park the failure in the banner, never leave _busy stuck. */
+  async _try(fn) {
+    this._busy = true;
+    this._err = "";
+    try {
+      return await fn();
+    } catch (e) {
+      this._err = e?.message || String(e);
+      return undefined;
+    } finally {
+      this._busy = false;
+    }
+  }
+
+  /* ---------------- loading and polling ---------------- */
+
+  async _load() {
+    // A recording may already be running - a phone that fell asleep on the
+    // start button, a second screen. Believe the service, not the page.
+    await this._try(async () => {
+      const st = await this._api(api.status());
+      this._applyStatus(st);
+      if (st?.recording) {
+        this._kind = st.kind || this._kind;
+        this._label = st.label || this._label;
+        this._since = this._since || Date.now();
+        this._startPolling();
+      }
+    });
+    this._loaded = true;
+    await Promise.all([this._loadClips(), this._loadPeople(), this._loadTrain()]);
+  }
+
+  async _loadClips() {
+    const clips = await this._try(() => this._api(api.clips(this._fKind ? { kind: this._fKind } : {})));
+    if (Array.isArray(clips)) this._clips = clips;
+    else if (clips && Array.isArray(clips.clips)) this._clips = clips.clips;
+  }
+
+  async _loadPeople() {
+    const p = await this._try(() => this._api(api.people()));
+    if (p && typeof p === "object") this._people = p;
+  }
+
+  async _loadTrain() {
+    const t = await this._try(() => this._api(api.trainStatus()));
+    if (t) this._train = t;
+    const running = Boolean(t?.running);
+    if (running && !this._trainTimer) {
+      this._trainTimer = setInterval(() => this._loadTrain(), TRAIN_POLL_MS);
+    } else if (!running && this._trainTimer) {
+      clearInterval(this._trainTimer);
+      this._trainTimer = null;
+    }
+  }
+
+  _applyStatus(st) {
+    this._status = st || { recording: false };
+    if (st?.recording) {
+      this._levels = [...this._levels.slice(-11), Number(st.level) || 0];
+      this._elapsed =
+        st.seconds != null ? Number(st.seconds) : st.started ? Date.now() / 1000 - Number(st.started) : this._elapsed + POLL_MS / 1000;
+    } else {
+      this._levels = [];
+      this._elapsed = 0;
+    }
+  }
+
+  _startPolling() {
+    if (this._poll) return;
+    this._poll = setInterval(async () => {
+      try {
+        const st = await this._api(api.status());
+        this._applyStatus(st);
+        if (!st?.recording) this._recordingEnded();
+      } catch (e) {
+        // One missed poll is nothing; a service that has gone away is not.
+        this._err = e?.message || String(e);
+        this._stopPolling();
+        this._status = { recording: false };
+      }
+    }, POLL_MS);
+  }
+
+  _stopPolling() {
+    clearInterval(this._poll);
+    this._poll = null;
+  }
+
+  _recordingEnded() {
+    this._stopPolling();
+    this._levels = [];
+    // The library is fetched per kind, and "just recorded" is drawn from the
+    // same list - so show the kind that was just recorded.
+    this._fKind = this._kind;
+    this._fLabel = "";
+    this._loadClips();
+  }
+
+  /* ---------------- actions ---------------- */
+
+  async _toggleRecord() {
+    if (this._status?.recording) {
+      await this._try(() => this._api(api.stop()));
+      this._status = { recording: false };
+      this._recordingEnded();
+      return;
+    }
+    const label = this._label.trim();
+    if (!label) {
+      this._err = this._kind === "voice" ? "whose voice is this?" : "give the recording a label first";
+      return;
+    }
+    const st = await this._try(() => this._api(api.start(this._kind, label)));
+    if (st === undefined) return;
+    this._since = Date.now();
+    this._levels = [];
+    this._elapsed = 0;
+    this._status = { recording: true, kind: this._kind, label, ...(st || {}) };
+    this._startPolling();
+  }
+
+  async _delete(ids) {
+    if (!ids.length) return;
+    this._player?.stop();
+    // Sequential, on purpose: one failure stops the run with the survivors
+    // still listed, instead of a fan-out that half-succeeds in silence.
+    await this._try(async () => {
+      for (const id of ids) {
+        await this._api(api.deleteClip(id));
+        this._clips = this._clips.filter((c) => c.id !== id);
+        this._sel.delete(id);
+      }
+    });
+    this._sel = new Set(this._sel);
+  }
+
+  async _refile() {
+    const ids = [...this._sel];
+    const patch = {};
+    if (this._refileKind) patch.kind = this._refileKind;
+    if (this._refileLabel.trim()) patch.label = this._refileLabel.trim();
+    if (!ids.length || !Object.keys(patch).length) return;
+    await this._try(async () => {
+      for (const id of ids) {
+        await this._api(api.refile(id, patch));
+        this._clips = this._clips.map((c) => (c.id === id ? { ...c, ...patch } : c));
+      }
+    });
+    this._sel = new Set();
+    this._refileLabel = "";
+    if (this._fKind && patch.kind && patch.kind !== this._fKind) this._loadClips();
+  }
+
+  async _enrol() {
+    const person = this._enrolTo.trim();
+    const clips = [...this._sel].filter((id) => this._clips.find((c) => c.id === id)?.kind === "voice");
+    if (!person || !clips.length) return;
+    const ok = await this._try(() => this._api(api.enroll(person, clips)));
+    if (ok === undefined) return;
+    this._sel = new Set();
+    this._loadPeople();
+  }
+
+  async _deletePerson(person) {
+    // The one destructive thing here that is not one listed clip: a person
+    // is every sample ever enrolled, and voice matching stops for them.
+    if (!confirm(`Forget ${person}'s voice? Their enrolled samples go too.`)) return;
+    const p = await this._try(() => this._api(api.deletePerson(person)));
+    if (p && typeof p === "object") this._people = p;
+    else this._loadPeople();
+  }
+
+  async _train() {
+    const phrase = this._phrase.trim();
+    if (!this._armed || !validPhrase(phrase) || this._train?.running) return;
+    const st = await this._try(() => this._api(api.train(phrase)));
+    this._armed = false;
+    if (st) this._train = st;
+    this._loadTrain();
+  }
+
+  _play(id) {
+    if (this._playing === id) return this._player.stop();
+    this._player.play(id).catch((e) => (this._err = e?.message || String(e)));
+  }
+
+  _toggleSel(id, on) {
+    const s = new Set(this._sel);
+    on ? s.add(id) : s.delete(id);
+    this._sel = s;
+  }
+
+  _setFilterKind(kind) {
+    this._fKind = kind;
+    this._fLabel = "";
+    this._sel = new Set();
+    this._loadClips();
+  }
+
+  /* ---------------- render ---------------- */
+
+  render() {
+    const rec = Boolean(this._status?.recording);
+    return html`
+      <div class="bar">
+        <ha-menu-button .hass=${this.hass} .narrow=${this.narrow}></ha-menu-button>
+        <div class="title">Voice studio</div>
+      </div>
+      ${this._err
+        ? html`<div class="err" @click=${() => (this._err = "")}>${this._err}<span class="x">dismiss</span></div>`
+        : nothing}
+      <div class="cols">
+        <div class="col side">
+          ${this._renderRecord(rec)}
+          ${this._renderPeople()}
+          ${this._renderTrain()}
+        </div>
+        <div class="col main">
+          ${this._since ? this._renderList("Just recorded", filterClips(this._clips, { since: this._since }), true) : nothing}
+          ${this._renderLibrary()}
+        </div>
+      </div>
+    `;
+  }
+
+  _renderRecord(rec) {
+    const people = Object.keys(this._people);
+    const suggestions = this._kind === "voice" ? people : labelsOf(this._clips, this._kind);
+    const dead = rec && deadMic(this._levels);
+    const level = this._levels[this._levels.length - 1] || 0;
+    return html`
+      <ha-card class="card">
+        <div class="h">Record</div>
+        <div class="seg">
+          ${KINDS.map(
+            (k) => html`<button
+              class="segb ${this._kind === k.id ? "on" : ""}"
+              ?disabled=${rec}
+              @click=${() => {
+                this._kind = k.id;
+                this._label = "";
+              }}
+            >${k.name}</button>`
+          )}
+        </div>
+        <div class="hint">${KINDS.find((k) => k.id === this._kind)?.hint}</div>
+        <input
+          class="input"
+          list="vs-labels"
+          .value=${this._label}
+          ?disabled=${rec}
+          placeholder=${this._kind === "wake" ? "wake phrase, e.g. hey jarvis" : this._kind === "voice" ? "who is speaking" : "what it is, e.g. dishwasher"}
+          @input=${(e) => (this._label = e.target.value)}
+        />
+        <datalist id="vs-labels">${suggestions.map((s) => html`<option value=${s}></option>`)}</datalist>
+        <button class="big ${rec ? "stop" : "start"}" ?disabled=${this._busy || !this._loaded} @click=${this._toggleRecord}>
+          ${rec ? "Stop" : "Start recording"}
+        </button>
+        ${rec
+          ? html`
+              <div class="live">
+                <span class="elapsed">${fmtElapsed(this._elapsed)}</span>
+                <span class="what">${this._status.kind} · ${this._status.label}</span>
+              </div>
+              <div class="meter ${dead ? "dead" : ""}"><div class="fill" style="width:${meterPct(level)}%"></div></div>
+              ${dead
+                ? html`<div class="warn">Nothing is coming from the microphone. Check it before you carry on.</div>`
+                : html`<div class="hint">Level ${meterPct(level)}%</div>`}
+            `
+          : nothing}
+      </ha-card>
+    `;
+  }
+
+  _renderLibrary() {
+    const labels = labelsOf(this._clips, this._fKind);
+    const list = filterClips(this._clips, { kind: this._fKind, label: this._fLabel });
+    return html`
+      <ha-card class="card">
+        <div class="h">Library <span class="count">${list.length}</span></div>
+        <div class="chips">
+          <button class="chip ${!this._fKind ? "on" : ""}" @click=${() => this._setFilterKind("")}>All</button>
+          ${KINDS.map(
+            (k) => html`<button class="chip ${this._fKind === k.id ? "on" : ""}" @click=${() => this._setFilterKind(k.id)}>${k.name}</button>`
+          )}
+        </div>
+        ${labels.length
+          ? html`<div class="chips">
+              ${labels.map(
+                (l) => html`<button
+                  class="chip ${this._fLabel === l ? "on" : ""}"
+                  @click=${() => (this._fLabel = this._fLabel === l ? "" : l)}
+                >${l}</button>`
+              )}
+            </div>`
+          : nothing}
+        ${this._renderSelBar(list)}
+        ${list.length
+          ? list.map((c) => this._renderRow(c))
+          : html`<div class="empty">${this._loaded ? "Nothing here yet. Record something." : "Loading…"}</div>`}
+      </ha-card>
+    `;
+  }
+
+  _renderList(title, list, hideEmpty) {
+    if (hideEmpty && !list.length) return nothing;
+    return html`
+      <ha-card class="card">
+        <div class="h">${title} <span class="count">${list.length}</span></div>
+        ${list.map((c) => this._renderRow(c))}
+      </ha-card>
+    `;
+  }
+
+  _renderSelBar(list) {
+    const n = this._sel.size;
+    const all = list.length && list.every((c) => this._sel.has(c.id));
+    const voice = n && [...this._sel].every((id) => this._clips.find((c) => c.id === id)?.kind === "voice");
+    const people = Object.keys(this._people);
+    return html`
+      <div class="selbar">
+        <label class="sel-all">
+          <input type="checkbox" .checked=${Boolean(all)} ?disabled=${!list.length}
+            @change=${(e) => (this._sel = e.target.checked ? new Set([...this._sel, ...list.map((c) => c.id)]) : new Set())} />
+          ${n ? `${n} selected` : "Select all"}
+        </label>
+        ${n
+          ? html`
+              <button class="btn danger" ?disabled=${this._busy} @click=${() => this._delete([...this._sel])}>Delete ${n}</button>
+              <span class="grp">
+                <select class="input sm" .value=${this._refileKind} @change=${(e) => (this._refileKind = e.target.value)}>
+                  <option value="">keep kind</option>
+                  ${KINDS.map((k) => html`<option value=${k.id}>${k.name}</option>`)}
+                </select>
+                <input class="input sm" placeholder="new label" .value=${this._refileLabel} @input=${(e) => (this._refileLabel = e.target.value)} />
+                <button class="btn" ?disabled=${this._busy || (!this._refileKind && !this._refileLabel.trim())} @click=${this._refile}>Re-file</button>
+              </span>
+              ${voice
+                ? html`<span class="grp">
+                    <input class="input sm" list="vs-people" placeholder="enrol into…" .value=${this._enrolTo} @input=${(e) => (this._enrolTo = e.target.value)} />
+                    <datalist id="vs-people">${people.map((p) => html`<option value=${p}></option>`)}</datalist>
+                    <button class="btn" ?disabled=${this._busy || !this._enrolTo.trim()} @click=${this._enrol}>Enrol</button>
+                  </span>`
+                : nothing}
+            `
+          : nothing}
+      </div>
+    `;
+  }
+
+  _renderRow(c) {
+    const on = this._sel.has(c.id);
+    const playing = this._playing === c.id;
+    const when = clipTime(c.created);
+    return html`
+      <div class="row ${on ? "on" : ""}">
+        <input type="checkbox" .checked=${on} @change=${(e) => this._toggleSel(c.id, e.target.checked)} />
+        <div class="body" @click=${() => this._toggleSel(c.id, !on)}>
+          <div class="text ${c.transcript ? "" : "none"}">${c.transcript || "no transcript"}</div>
+          <div class="meta">
+            ${c.kind} · ${c.label} · ${Number(c.seconds || 0).toFixed(1)}s
+            ${when ? html` · ${new Date(when).toLocaleString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}` : nothing}
+          </div>
+        </div>
+        <button class="btn icon" title=${playing ? "Stop" : "Play"} @click=${() => this._play(c.id)}>${playing ? "■" : "▶"}</button>
+        <button class="btn icon danger" title="Delete" ?disabled=${this._busy} @click=${() => this._delete([c.id])}>✕</button>
+      </div>
+    `;
+  }
+
+  _renderPeople() {
+    const people = Object.entries(this._people);
+    return html`
+      <ha-card class="card">
+        <div class="h">People</div>
+        ${people.length
+          ? people.map(
+              ([name, n]) => html`<div class="row">
+                <div class="body">
+                  <div class="text">${name}</div>
+                  <div class="meta">${n} sample${n === 1 ? "" : "s"}</div>
+                </div>
+                <button class="btn icon danger" title="Forget" ?disabled=${this._busy} @click=${() => this._deletePerson(name)}>✕</button>
+              </div>`
+            )
+          : html`<div class="empty">Nobody enrolled. Record "Voice" clips, select them, and enrol.</div>`}
+      </ha-card>
+    `;
+  }
+
+  _renderTrain() {
+    const t = this._train || {};
+    const running = Boolean(t.running);
+    const phrase = this._phrase || (this._kind === "wake" ? this._label : "");
+    const state = running
+      ? `Training "${t.phrase}" since ${t.started ? new Date(Number(t.started) * 1000).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }) : "earlier"}. The house will say when it is done.`
+      : t.phrase
+        ? `Last run: "${t.phrase}" ${t.ok ? "finished and is ready to load onto a puck" : `failed (see ${t.out || "the log"})`}.`
+        : "No training run yet.";
+    return html`
+      <ha-card class="card">
+        <div class="h">Train wake word</div>
+        <div class="hint">${state}</div>
+        <input class="input" placeholder="phrase, one to four words" .value=${phrase} ?disabled=${running}
+          @input=${(e) => (this._phrase = e.target.value)} />
+        <label class="arm">
+          <input type="checkbox" .checked=${this._armed} ?disabled=${running} @change=${(e) => (this._armed = e.target.checked)} />
+          <span>This takes hours and ties up the Mac. Start it now.</span>
+        </label>
+        <button class="btn wide" ?disabled=${running || !this._armed || !validPhrase(phrase) || this._busy}
+          @click=${() => {
+            this._phrase = phrase;
+            this._train();
+          }}>
+          ${running ? "Training…" : "Train"}
+        </button>
+      </ha-card>
+    `;
+  }
+
+  static styles = css`
+    :host {
+      display: block;
+      height: 100%;
+      overflow-y: auto;
+      -webkit-overflow-scrolling: touch;
+      color: var(--primary-text-color);
+      background: var(--primary-background-color);
+      font-size: 14px;
+    }
+    .bar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      height: 56px;
+      padding: 0 12px;
+      background: var(--app-header-background-color, var(--primary-color));
+      color: var(--app-header-text-color, var(--text-primary-color, #fff));
+      position: sticky;
+      top: 0;
+      z-index: 2;
+    }
+    .title {
+      font-size: 20px;
+      font-weight: 400;
+    }
+    .err {
+      margin: 12px 16px 0;
+      padding: 10px 14px;
+      border-radius: 8px;
+      background: rgba(var(--rgb-error-color, 219, 68, 55), 0.14);
+      color: var(--error-color, #db4437);
+      cursor: pointer;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+    }
+    .err .x {
+      opacity: 0.7;
+      font-size: 12px;
+      white-space: nowrap;
+    }
+    .cols {
+      display: grid;
+      grid-template-columns: minmax(280px, 360px) minmax(0, 1fr);
+      gap: 16px;
+      padding: 16px;
+      max-width: 1280px;
+      margin: 0 auto;
+      box-sizing: border-box;
+    }
+    @media (max-width: 760px) {
+      .cols {
+        grid-template-columns: minmax(0, 1fr);
+        padding: 12px;
+      }
+    }
+    .col {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      min-width: 0;
+    }
+    .card {
+      padding: 14px 16px;
+    }
+    .h {
+      font-size: 15px;
+      font-weight: 500;
+      margin-bottom: 10px;
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+    }
+    .count {
+      font-weight: 400;
+      color: var(--secondary-text-color);
+      font-size: 13px;
+    }
+    .hint,
+    .empty {
+      color: var(--secondary-text-color);
+      font-size: 13px;
+      line-height: 1.4;
+      margin: 6px 0;
+    }
+    .empty {
+      padding: 12px 0 4px;
+    }
+    .seg {
+      display: flex;
+      border: 1px solid var(--divider-color);
+      border-radius: 10px;
+      overflow: hidden;
+    }
+    .segb {
+      flex: 1;
+      min-height: 44px;
+      border: none;
+      background: transparent;
+      color: var(--primary-text-color);
+      font: inherit;
+      cursor: pointer;
+    }
+    .segb + .segb {
+      border-left: 1px solid var(--divider-color);
+    }
+    .segb.on {
+      background: var(--primary-color);
+      color: var(--text-primary-color, #fff);
+    }
+    .input {
+      width: 100%;
+      box-sizing: border-box;
+      min-height: 44px;
+      margin: 8px 0;
+      border: 1px solid var(--divider-color);
+      border-radius: 8px;
+      padding: 6px 10px;
+      font: inherit;
+      background: var(--card-background-color);
+      color: var(--primary-text-color);
+    }
+    .input.sm {
+      width: auto;
+      min-height: 36px;
+      margin: 0;
+      flex: 1 1 110px;
+      min-width: 0;
+    }
+    .big {
+      width: 100%;
+      min-height: 64px;
+      border: none;
+      border-radius: 12px;
+      font: inherit;
+      font-size: 18px;
+      font-weight: 500;
+      cursor: pointer;
+      color: var(--text-primary-color, #fff);
+      background: var(--primary-color);
+    }
+    .big.stop {
+      background: var(--error-color, #db4437);
+    }
+    .big:disabled,
+    .btn:disabled,
+    .segb:disabled {
+      opacity: 0.5;
+      cursor: default;
+    }
+    .live {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      margin-top: 12px;
+    }
+    .elapsed {
+      font-size: 28px;
+      font-variant-numeric: tabular-nums;
+    }
+    .what {
+      color: var(--secondary-text-color);
+      font-size: 13px;
+      text-transform: capitalize;
+    }
+    .meter {
+      height: 14px;
+      border-radius: 7px;
+      background: var(--divider-color);
+      overflow: hidden;
+      margin-top: 8px;
+    }
+    .meter .fill {
+      height: 100%;
+      background: var(--primary-color);
+      transition: width 0.25s linear;
+    }
+    .meter.dead {
+      outline: 2px solid var(--error-color, #db4437);
+    }
+    .warn {
+      margin-top: 8px;
+      color: var(--error-color, #db4437);
+      font-weight: 500;
+      line-height: 1.4;
+    }
+    .chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-bottom: 8px;
+    }
+    .chip,
+    .btn {
+      border: none;
+      border-radius: 16px;
+      min-height: 36px;
+      padding: 6px 14px;
+      cursor: pointer;
+      font: inherit;
+      font-size: 13px;
+      background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.12);
+      color: var(--primary-color);
+    }
+    .chip.on {
+      background: var(--primary-color);
+      color: var(--text-primary-color, #fff);
+    }
+    .btn.danger {
+      background: rgba(var(--rgb-error-color, 219, 68, 55), 0.12);
+      color: var(--error-color, #db4437);
+    }
+    .btn.icon {
+      min-width: 44px;
+      min-height: 44px;
+      padding: 0;
+      border-radius: 22px;
+      font-size: 16px;
+    }
+    .btn.wide {
+      width: 100%;
+      min-height: 44px;
+    }
+    .selbar {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 0;
+      border-bottom: 1px solid var(--divider-color);
+      min-height: 44px;
+    }
+    .sel-all {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--secondary-text-color);
+      font-size: 13px;
+      min-height: 36px;
+    }
+    .grp {
+      display: flex;
+      gap: 6px;
+      align-items: center;
+      flex: 1 1 260px;
+    }
+    input[type="checkbox"] {
+      width: 20px;
+      height: 20px;
+      margin: 0;
+      flex: none;
+      accent-color: var(--primary-color);
+    }
+    .row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 8px 0;
+      min-height: 52px;
+    }
+    .row + .row {
+      border-top: 1px solid var(--divider-color);
+    }
+    .row.on {
+      background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.06);
+    }
+    .body {
+      flex: 1;
+      min-width: 0;
+      cursor: pointer;
+    }
+    .text {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .text.none {
+      color: var(--secondary-text-color);
+      font-style: italic;
+    }
+    .meta {
+      color: var(--secondary-text-color);
+      font-size: 12px;
+      margin-top: 2px;
+    }
+    .arm {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      margin: 8px 0 10px;
+      line-height: 1.4;
+      cursor: pointer;
+    }
+  `;
+}
+
+customElements.define("hubbubb-voice-studio", HubbubbVoiceStudio);

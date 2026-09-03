@@ -11,14 +11,18 @@ idea" rather than to a guess presented as fact.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import logging
 import secrets
 import time
 from collections import deque
+from urllib.parse import parse_qsl, quote, urlencode
 
 import aiohttp
 from aiohttp import web
 from homeassistant.components import webhook
+from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN, WEBHOOK_SPEAKER
@@ -34,6 +38,12 @@ EVENT_WINDOW = 20.0
 OVERRIDE_WINDOW = 300.0
 # Below this, a voice match is a lean, not an identification.
 CONFIDENT = 0.75
+
+# The Voice Studio panel drives the voice service's admin API through Home
+# Assistant, so the browser never holds the shared token or talks to a second
+# origin. Only what the studio needs; PUT/PATCH stay closed.
+PROXY_URL = f"/api/{DOMAIN}/voice"
+PROXY_METHODS = ("GET", "POST", "DELETE")
 
 
 class SpeakerServiceError(Exception):
@@ -154,6 +164,43 @@ class SpeakerBook:
         """Start training a wake word model on the voice service's machine."""
         await self._post("/train", {"phrase": phrase})
 
+    async def async_proxy(
+        self, method: str, path: str, query: str, body: bytes, content_type: str
+    ) -> tuple[int, str, bytes]:
+        """Forward one Voice Studio request. -> (status, content type, body).
+
+        Plain values rather than a web.Response, so every decision here - the
+        method, the path, the unconfigured and unreachable cases - runs in the
+        test without aiohttp. Whatever the service answers is passed through
+        with its own content type; a JSON error and a WAV clip take the same
+        road.
+        """
+        if not self._url:
+            return _refusal(503, "no voice service is configured")
+        if method not in PROXY_METHODS:
+            return _refusal(405, f"{method} is not allowed here")
+        url = upstream_url(self._url, path, query)
+        if url is None:
+            return _refusal(404, "no such path")
+        headers = {"Content-Type": content_type} if body else {}
+        if self._token:
+            headers["X-Voice-Service-Token"] = self._token
+        try:
+            async with self._session.request(
+                method,
+                url,
+                data=body or None,
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=30),
+            ) as resp:
+                return (
+                    resp.status,
+                    resp.headers.get("Content-Type", "application/octet-stream"),
+                    await resp.read(),
+                )
+        except (aiohttp.ClientError, asyncio.TimeoutError) as err:
+            return _refusal(503, f"voice service unreachable: {err}")
+
     async def _post(self, route: str, body: dict) -> None:
         if not self._url:
             raise SpeakerServiceError("no voice service is configured")
@@ -176,6 +223,69 @@ class SpeakerBook:
             raise SpeakerServiceError(
                 f"voice service unreachable: {err}"
             ) from err
+
+
+def upstream_url(base: str, path: str, query: str = "") -> str | None:
+    """Where one proxied request goes, or None if it would leave the service.
+
+    Each segment is re-quoted on its own, so nothing inside a clip id can
+    become a separator, a host or a scheme on the way out; dot segments are
+    refused outright rather than trusted to a normaliser somewhere upstream.
+    """
+    segments = path.split("/")
+    if any(seg in ("", ".", "..") for seg in segments):
+        return None
+    url = f"{base}/" + "/".join(quote(seg, safe="") for seg in segments)
+    # authSig is Home Assistant's own signed-path credential - how an <audio>
+    # element gets past requires_auth. The voice service has no use for it.
+    pairs = [
+        (key, value)
+        for key, value in parse_qsl(query, keep_blank_values=True)
+        if key != "authSig"
+    ]
+    return f"{url}?{urlencode(pairs)}" if pairs else url
+
+
+def _refusal(status: int, detail: str) -> tuple[int, str, bytes]:
+    # The shape the companion services already fail in, so the panel has one
+    # error to understand.
+    body = json.dumps({"ok": False, "detail": detail}).encode()
+    return status, "application/json", body
+
+
+class VoiceProxyView(HomeAssistantView):
+    """/api/hubbubb_home/voice/<path> -> <voice service>/<path>.
+
+    Behind Home Assistant's own login; the shared token is added here. A view
+    cannot be unregistered, so this is registered once and finds the live
+    SpeakerBook on every request - after an unload it answers "not
+    configured" instead of holding on to a dead one.
+    """
+
+    url = f"{PROXY_URL}/{{path:.*}}"
+    name = f"{DOMAIN}:voice"
+    requires_auth = True
+
+    def __init__(self, hass: HomeAssistant) -> None:
+        self._hass = hass
+
+    async def get(self, request: web.Request, path: str) -> web.Response:
+        runtimes = self._hass.data.get(DOMAIN, {}).values()
+        book = next(
+            (r.speakers for r in runtimes if r.speakers.configured), None
+        ) or SpeakerBook(None, None, None)
+        status, content_type, body = await book.async_proxy(
+            request.method,
+            path,
+            request.query_string,
+            await request.read(),
+            request.content_type,
+        )
+        return web.Response(
+            status=status, body=body, headers={"Content-Type": content_type}
+        )
+
+    post = delete = get
 
 
 def parse_map(text: str) -> dict[str, str]:
