@@ -656,6 +656,168 @@ def test_people_lines_split_on_the_first_two_colons_only():
     assert parse_people("") == {}
 
 
+def test_people_map_rewrites_one_line_and_leaves_the_rest_alone():
+    from hubbubb_home.links import hint, remove_line, set_line
+
+    before = (
+        "Scott Landes:  hbbc_abc :s3cr3t:with:colons\n"
+        "\n"
+        "   vega : id2 : sec2   \n"
+        "no secret here: just_an_id\n"
+    )
+    # Change one: only that line moves, case-blind; the trailing newline stays.
+    after = set_line(before, "scott landes", "hbbc_new", "n3w")
+    assert after == (
+        "scott landes: hbbc_new : n3w\n"
+        "\n"
+        "   vega : id2 : sec2   \n"
+        "no secret here: just_an_id\n"
+    )
+    # Add one: appended, nothing else touched.
+    assert set_line(before, "Guest", "gid", "gsec") == before + "Guest: gid : gsec\n"
+    assert set_line("", "Guest", "gid", "gsec") == "Guest: gid : gsec"
+    assert set_line("Vega: a : b", "Guest", "gid", "gsec") == "Vega: a : b\nGuest: gid : gsec"
+    # Remove one: the line goes, the blank and the half-written line do not.
+    assert remove_line(before, "VEGA") == (
+        "Scott Landes:  hbbc_abc :s3cr3t:with:colons\n"
+        "\n"
+        "no secret here: just_an_id\n"
+    )
+    assert remove_line(before, "nobody") == before
+    # A duplicate would win on read (the parser keeps the last), so it goes.
+    assert set_line("a: 1 : x\na: 2 : y\n", "a", "3", "z") == "a: 3 : z\n"
+    # The hint gives away a prefix and a length, never the id.
+    assert hint("hbbc_abcdefghijklmnop") == "hbbc_a… (21 characters)"
+    assert hint("ab") == "ab… (2 characters)"
+
+
+def test_people_links_endpoint_decisions():
+    import asyncio
+    import json
+
+    from hubbubb_home import links as links_mod
+    from hubbubb_home.hubbubb import HubbubbError
+    from hubbubb_home.links import PeopleLinksView, async_links
+
+    assert PeopleLinksView.requires_auth is True
+    assert all(hasattr(PeopleLinksView, m) for m in ("get", "post", "delete"))
+
+    class _Verify:
+        """HubbubbClient as the endpoint sees it: one secret is right."""
+
+        made = []
+
+        def __init__(self, session, url, client_id, secret):
+            _Verify.made.append((url, client_id, secret))
+            self._ok = secret == "right"
+
+        async def async_verify(self):
+            if not self._ok:
+                raise HubbubbError("token endpoint returned 401")
+
+    links_mod.HubbubbClient = _Verify
+
+    writes = []
+
+    def _hass(entries, speakers=None):
+        def update(entry, data):
+            writes.append(data)
+            entry.data = data
+
+        return types.SimpleNamespace(
+            config_entries=types.SimpleNamespace(
+                async_entries=lambda domain: entries, async_update_entry=update
+            ),
+            data={"hubbubb_home": {"e": types.SimpleNamespace(speakers=speakers)}}
+            if speakers
+            else {},
+        )
+
+    def call(hass, admin, method, person=None, body=None):
+        status, ctype, payload = asyncio.run(
+            async_links(hass, admin, method, person, body)
+        )
+        return status, (json.loads(payload) if "json" in ctype else payload.decode())
+
+    # No Hubbubb configured: a 503 the panel hides the controls on, no write.
+    bare = types.SimpleNamespace(data={"hubbubb": {}}, options={})
+    assert call(_hass([bare]), True, "GET") == (
+        503, {"ok": False, "detail": "Hubbubb is not configured"}
+    )
+    assert call(_hass([]), True, "POST", body={"person": "a", "client_id": "b", "client_secret": "right"})[0] == 503
+    assert writes == []
+
+    entry = types.SimpleNamespace(
+        data={
+            "hubbubb": {
+                "hubbubb_url": "https://hub.example/api/v1/org/mcp",
+                "hubbubb_client_id": "house",
+                "hubbubb_client_secret": "hs",
+                "people": "Scott: hbbc_scott : sekrit\n",
+            },
+            "assistant_name": "Jarvis",
+        },
+        options={"voice": {}},
+    )
+    # The voice service knows Scott (as "scott") and Vega; the map knows Scott.
+    voice = SpeakerBook(
+        _ProxySession((200, "application/json", b'{"scott": 4, "Vega": 2}')),
+        "http://mac:10301",
+        "",
+    )
+    hass = _hass([entry], voice)
+
+    # Reading is for anyone logged in, and never carries a secret or an id.
+    status, listed = call(hass, False, "GET")
+    assert status == 200
+    assert listed == {
+        "people": {
+            "Scott": {"linked": True, "client_id_hint": "hbbc_s… (10 characters)"},
+            "Vega": {"linked": False},
+        }
+    }
+    assert "sekrit" not in json.dumps(listed) and "hbbc_scott" not in json.dumps(listed)
+
+    # Writing is not: a non-admin is refused before anything is checked.
+    assert call(hass, False, "POST", body={"person": "Vega", "client_id": "hbbc_vega", "client_secret": "right"})[0] == 403
+    assert call(hass, False, "DELETE", person="Scott")[0] == 403
+    assert writes == [] and _Verify.made == []
+
+    # A bad pair is refused by Hubbubb, with the reason, and nothing is kept.
+    status, text = call(hass, True, "POST", body={"person": "Vega", "client_id": "hbbc_vega", "client_secret": "wrong"})
+    assert status == 400 and "401" in text
+    assert writes == []
+    # Half a body, or a name the line format cannot hold, never reaches Hubbubb.
+    assert call(hass, True, "POST", body={"person": "Vega", "client_id": "x"})[0] == 400
+    assert call(hass, True, "POST", body="junk")[0] == 400
+    assert call(hass, True, "POST", body={"person": "a:b", "client_id": "x", "client_secret": "right"})[0] == 400
+    assert len(_Verify.made) == 1
+
+    # A good pair is checked against the configured URL, then written into
+    # the entry's data with every other key intact and Scott's line untouched.
+    status, row = call(hass, True, "POST", body={"person": " Vega ", "client_id": "hbbc_vega", "client_secret": "right"})
+    assert status == 200
+    assert row == {"person": "Vega", "linked": True, "client_id_hint": "hbbc_v… (9 characters)"}
+    assert _Verify.made[-1] == ("https://hub.example/api/v1/org/mcp", "hbbc_vega", "right")
+    assert len(writes) == 1
+    assert writes[0]["assistant_name"] == "Jarvis"
+    assert writes[0]["hubbubb"]["hubbubb_client_id"] == "house"
+    assert writes[0]["hubbubb"]["people"] == "Scott: hbbc_scott : sekrit\nVega: hbbc_vega : right\n"
+    assert call(hass, True, "GET")[1]["people"]["Vega"]["linked"] is True
+
+    # Unlinking removes only that line.
+    assert call(hass, True, "DELETE", person="scott") == (200, {"person": "scott", "linked": False})
+    assert writes[-1]["hubbubb"]["people"] == "Vega: hbbc_vega : right\n"
+    assert call(hass, True, "DELETE")[0] == 400
+    assert call(hass, True, "PUT")[0] == 405
+
+    # The voice service being down only shortens the list; it is not an error.
+    down = SpeakerBook(_ProxySession(sys.modules["aiohttp"].ClientError("refused")), "http://mac:10301", "")
+    assert call(_hass([entry], down), False, "GET")[1] == {
+        "people": {"Vega": {"linked": True, "client_id_hint": "hbbc_v… (9 characters)"}}
+    }
+
+
 def test_hubbubb_tool_uses_the_verified_persons_own_client():
     import asyncio
     import time as _time

@@ -176,12 +176,12 @@ class SpeakerBook:
         road.
         """
         if not self._url:
-            return _refusal(503, "no voice service is configured")
+            return refusal(503, "no voice service is configured")
         if method not in PROXY_METHODS:
-            return _refusal(405, f"{method} is not allowed here")
+            return refusal(405, f"{method} is not allowed here")
         url = upstream_url(self._url, path, query)
         if url is None:
-            return _refusal(404, "no such path")
+            return refusal(404, "no such path")
         headers = {"Content-Type": content_type} if body else {}
         if self._token:
             headers["X-Voice-Service-Token"] = self._token
@@ -199,7 +199,7 @@ class SpeakerBook:
                     await resp.read(),
                 )
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
-            return _refusal(503, f"voice service unreachable: {err}")
+            return refusal(503, f"voice service unreachable: {err}")
 
     async def _post(self, route: str, body: dict) -> None:
         if not self._url:
@@ -246,7 +246,7 @@ def upstream_url(base: str, path: str, query: str = "") -> str | None:
     return f"{url}?{urlencode(pairs)}" if pairs else url
 
 
-def _refusal(status: int, detail: str) -> tuple[int, str, bytes]:
+def refusal(status: int, detail: str) -> tuple[int, str, bytes]:
     # The shape the companion services already fail in, so the panel has one
     # error to understand.
     body = json.dumps({"ok": False, "detail": detail}).encode()

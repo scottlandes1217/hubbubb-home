@@ -13,6 +13,7 @@ import {
   labelsOf,
   makePlayer,
   meterPct,
+  peopleRows,
   validPhrase,
 } from "../src/hubbubb-voice-studio.js";
 
@@ -31,12 +32,35 @@ assert.deepEqual(api.deletePerson("Scott"), ["POST", "people/delete", { person: 
 assert.deepEqual(api.train("hey jarvis"), ["POST", "train", { phrase: "hey jarvis" }]);
 assert.deepEqual(api.trainStatus(), ["GET", "train/status"]);
 assert.equal(audioPath("c 1"), "/api/hubbubb_home/voice/clips/c%201/audio");
+// The Hubbubb link calls go to the integration itself, not through the voice proxy.
+assert.deepEqual(api.links(), ["GET", "/api/hubbubb_home/people/links"]);
+assert.deepEqual(api.link("Scott", "hbbc_x", "s3cret"), ["POST", "/api/hubbubb_home/people/links", { person: "Scott", client_id: "hbbc_x", client_secret: "s3cret" }]);
+assert.deepEqual(api.unlink("Scott Landes"), ["DELETE", "/api/hubbubb_home/people/links/Scott%20Landes"]);
 
 // --- error text: the proxy's JSON message wins, then plain text, then the code ---
 assert.equal(errMessage(503, '{"message":"voice service unreachable"}'), "voice service unreachable");
 assert.equal(errMessage(400, "a wake phrase is one to four words"), "a wake phrase is one to four words");
 assert.equal(errMessage(503, ""), "the voice service is not reachable");
 assert.equal(errMessage(500, "{}"), "request failed (500)");
+assert.equal(errMessage(503, '{"ok":false,"detail":"Hubbubb is not configured"}'), "Hubbubb is not configured", "the integration's own refusals say detail");
+assert.equal(errMessage(400, "Hubbubb refused these credentials: token endpoint returned 401"), "Hubbubb refused these credentials: token endpoint returned 401");
+
+// --- the People card's rows: voice samples and Hubbubb links, matched by name ---
+{
+  const people = { scott: 4, Vega: 2 };
+  const links = { Scott: { linked: true, client_id_hint: "hbbc_s… (10 characters)" }, Guest: { linked: false } };
+  assert.deepEqual(peopleRows(people, links), [
+    { name: "Guest", samples: 0, link: { linked: false } },
+    { name: "scott", samples: 4, link: { linked: true, hint: "hbbc_s… (10 characters)" } },
+    { name: "Vega", samples: 2, link: null },
+  ], "case-blind match, map-only people listed, sorted by name");
+  assert.deepEqual(peopleRows(people, null), [
+    { name: "scott", samples: 4, link: null },
+    { name: "Vega", samples: 2, link: null },
+  ], "no Hubbubb: nothing said about links");
+  assert.deepEqual(peopleRows(null, null), []);
+  assert.deepEqual(peopleRows({}, { Scott: { linked: true } })[0].link, { linked: true, hint: "" }, "a hint is never undefined");
+}
 
 // --- filtering and grouping ---
 const clips = [

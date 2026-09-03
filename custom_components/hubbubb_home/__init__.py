@@ -96,6 +96,7 @@ from .intents import (
     async_today_events,
     parse_calendar_map,
 )
+from .links import PeopleLinksView
 from .llm_api import HubbubbAPI
 from .memory import Memory
 from .speakers import (
@@ -371,6 +372,7 @@ async def _async_serve_cards(hass: HomeAssistant) -> None:
 
     hass.http.register_view(_CardsView())
     hass.http.register_view(VoiceProxyView(hass))
+    hass.http.register_view(PeopleLinksView(hass))
 
     resources = getattr(hass.data.get("lovelace"), "resources", None)
     if resources is None or not hasattr(resources, "async_create_item"):

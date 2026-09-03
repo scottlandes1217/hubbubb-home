@@ -19,6 +19,9 @@ const BUILD =
 console.info(`hubbubb-voice-studio ${BUILD}`);
 
 export const API_BASE = "/api/hubbubb_home/voice/";
+/* The integration's own endpoint, not the voice service's: who is linked to
+   their own Hubbubb user. Given whole, so _api can tell it from a proxied path. */
+export const LINKS_PATH = "/api/hubbubb_home/people/links";
 
 export const KINDS = [
   { id: "wake", name: "Wake word", hint: "the phrase, said the way you say it" },
@@ -49,6 +52,9 @@ export const api = {
   deletePerson: (person) => ["POST", "people/delete", { person }],
   train: (phrase) => ["POST", "train", { phrase }],
   trainStatus: () => ["GET", "train/status"],
+  links: () => ["GET", LINKS_PATH],
+  link: (person, client_id, client_secret) => ["POST", LINKS_PATH, { person, client_id, client_secret }],
+  unlink: (person) => ["DELETE", `${LINKS_PATH}/${enc(person)}`],
 };
 
 export const audioPath = (id) => `${API_BASE}clips/${enc(id)}/audio`;
@@ -62,7 +68,7 @@ export function errMessage(status, body) {
     const j = typeof body === "string" ? JSON.parse(body) : body;
     // Parsed JSON with no message is worth nothing to a person; fall through
     // to the status rather than print braces.
-    text = j?.message || j?.error || "";
+    text = j?.message || j?.error || j?.detail || "";
   } catch (e) {}
   text = (text || "").trim();
   if (!text) text = status === 503 ? "the voice service is not reachable" : `request failed (${status})`;
@@ -87,6 +93,21 @@ export function filterClips(clips, { kind, label, since } = {}) {
 }
 
 /* Labels in use for a kind, most clips first - the filter chips. */
+/* The People card's rows: everyone the voice service has samples for and
+   everyone with a Hubbubb line, matched by name case-blind. `links` is null
+   when Hubbubb is not set up, and then no row says anything about it. */
+export function peopleRows(people, links) {
+  const rows = new Map();
+  for (const [name, n] of Object.entries(people || {})) rows.set(name.toLowerCase(), { name, samples: n, link: null });
+  for (const [name, row] of Object.entries(links || {})) {
+    const key = name.toLowerCase();
+    const have = rows.get(key) || { name, samples: 0, link: null };
+    have.link = row?.linked ? { linked: true, hint: row.client_id_hint || "" } : { linked: false };
+    rows.set(key, have);
+  }
+  return [...rows.values()].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+}
+
 export function labelsOf(clips, kind) {
   const n = new Map();
   for (const c of clips || []) {
@@ -197,6 +218,11 @@ class HubbubbVoiceStudio extends LitElement {
     _elapsed: { state: true },
     _clips: { state: true },
     _people: { state: true },
+    _links: { state: true },
+    _linking: { state: true },
+    _linkId: { state: true },
+    _linkSecret: { state: true },
+    _linkErr: { state: true },
     _train: { state: true },
     _kind: { state: true },
     _label: { state: true },
@@ -222,6 +248,11 @@ class HubbubbVoiceStudio extends LitElement {
     this._elapsed = 0;
     this._clips = [];
     this._people = {};
+    this._links = null;
+    this._linking = "";
+    this._linkId = "";
+    this._linkSecret = "";
+    this._linkErr = "";
     this._train = null;
     this._kind = "wake";
     this._label = "";
@@ -267,7 +298,7 @@ class HubbubbVoiceStudio extends LitElement {
       headers: body ? { "Content-Type": "application/json" } : {},
       body: body ? JSON.stringify(body) : undefined,
     };
-    const url = API_BASE + path;
+    const url = path.startsWith("/") ? path : API_BASE + path;
     // fetchWithAuth refreshes an expired token; the bearer fallback is for a
     // hass object that predates it.
     const res = this.hass?.fetchWithAuth
@@ -325,7 +356,7 @@ class HubbubbVoiceStudio extends LitElement {
       }
     });
     this._loaded = true;
-    await Promise.all([this._loadClips(), this._loadPeople(), this._loadTrain()]);
+    await Promise.all([this._loadClips(), this._loadPeople(), this._loadLinks(), this._loadTrain()]);
   }
 
   async _loadClips() {
@@ -337,6 +368,17 @@ class HubbubbVoiceStudio extends LitElement {
   async _loadPeople() {
     const p = await this._try(() => this._api(api.people()));
     if (p && typeof p === "object") this._people = p;
+  }
+
+  async _loadLinks() {
+    // 503 means no Hubbubb: not an error, just nothing to show. Not _try -
+    // the banner is for things that went wrong.
+    try {
+      const r = await this._api(api.links());
+      this._links = r?.people || {};
+    } catch (e) {
+      this._links = null;
+    }
   }
 
   async _loadTrain() {
@@ -466,6 +508,43 @@ class HubbubbVoiceStudio extends LitElement {
     const p = await this._try(() => this._api(api.deletePerson(person)));
     if (p && typeof p === "object") this._people = p;
     else this._loadPeople();
+  }
+
+  _openLink(name) {
+    this._linking = name;
+    this._linkId = "";
+    this._linkSecret = "";
+    this._linkErr = "";
+  }
+
+  async _link() {
+    const person = this._linking;
+    const id = this._linkId.trim();
+    if (!person || !id || !this._linkSecret) return;
+    this._busy = true;
+    this._linkErr = "";
+    try {
+      // The endpoint asks Hubbubb for a token before it keeps anything, so
+      // a refusal here means the pair is wrong, not that it was saved badly.
+      const row = await this._api(api.link(person, id, this._linkSecret));
+      this._links = { ...(this._links || {}), [row.person]: { linked: true, client_id_hint: row.client_id_hint } };
+      this._linking = "";
+    } catch (e) {
+      this._linkErr = e?.message || String(e);
+    } finally {
+      // Whatever happened, the secret does not stay in memory.
+      this._linkSecret = "";
+      this._busy = false;
+    }
+  }
+
+  async _unlink(name) {
+    if (!confirm(`Unlink ${name} from Hubbubb? The house stops acting as them there.`)) return;
+    const row = await this._try(() => this._api(api.unlink(name)));
+    if (!row) return;
+    const links = { ...(this._links || {}) };
+    for (const key of Object.keys(links)) if (key.toLowerCase() === name.toLowerCase()) links[key] = { linked: false };
+    this._links = links;
   }
 
   async _train() {
@@ -667,23 +746,50 @@ class HubbubbVoiceStudio extends LitElement {
   }
 
   _renderPeople() {
-    const people = Object.entries(this._people);
+    const rows = peopleRows(this._people, this._links);
+    const admin = Boolean(this.hass?.user?.is_admin);
     return html`
       <ha-card class="card">
         <div class="h">People</div>
-        ${people.length
-          ? people.map(
-              ([name, n]) => html`<div class="row">
-                <div class="body">
-                  <div class="text">${name}</div>
-                  <div class="meta">${n} sample${n === 1 ? "" : "s"}</div>
-                </div>
-                <button class="btn icon danger" title="Forget" ?disabled=${this._busy} @click=${() => this._deletePerson(name)}>✕</button>
-              </div>`
-            )
+        ${rows.length
+          ? rows.map((r) => this._renderPerson(r, admin))
           : html`<div class="empty">Nobody enrolled. Record "Voice" clips, select them, and enrol.</div>`}
       </ha-card>
     `;
+  }
+
+  /* One person: their samples, and - when Hubbubb is set up - whether they
+     are linked to their own Hubbubb user. The link controls are for
+     administrators; everyone else sees the state and nothing to press. */
+  _renderPerson({ name, samples, link }, admin) {
+    const open = admin && this._linking === name;
+    const state = !link ? nothing : link.linked ? `Hubbubb: linked · ${link.hint}` : "Hubbubb: not linked";
+    return html`<div class="row">
+        <div class="body">
+          <div class="text">${name}</div>
+          <div class="meta">${samples ? `${samples} sample${samples === 1 ? "" : "s"}` : "no voice samples"}${link ? html` · ${state}` : nothing}</div>
+        </div>
+        ${admin && link && !open
+          ? link.linked
+            ? html`<button class="btn" ?disabled=${this._busy} @click=${() => this._unlink(name)}>Unlink</button>`
+            : html`<button class="btn" ?disabled=${this._busy} @click=${() => this._openLink(name)}>Link</button>`
+          : nothing}
+        ${samples
+          ? html`<button class="btn icon danger" title="Forget" ?disabled=${this._busy} @click=${() => this._deletePerson(name)}>✕</button>`
+          : nothing}
+      </div>
+      ${open
+        ? html`<div class="linkform">
+            <div class="hint">${name}'s own Hubbubb API client. The pair is checked against Hubbubb before it is kept; the secret is never shown again.</div>
+            <input class="input" placeholder="client id" autocomplete="off" .value=${this._linkId} @input=${(e) => (this._linkId = e.target.value)} />
+            <input class="input" type="password" placeholder="client secret" autocomplete="new-password" .value=${this._linkSecret} @input=${(e) => (this._linkSecret = e.target.value)} />
+            ${this._linkErr ? html`<div class="warn">${this._linkErr}</div>` : nothing}
+            <div class="chips">
+              <button class="btn" ?disabled=${this._busy || !this._linkId.trim() || !this._linkSecret} @click=${() => this._link()}>${this._busy ? "Checking…" : "Verify and link"}</button>
+              <button class="btn" ?disabled=${this._busy} @click=${() => this._openLink("")}>Cancel</button>
+            </div>
+          </div>`
+        : nothing}`;
   }
 
   _renderTrain() {
@@ -1001,6 +1107,13 @@ class HubbubbVoiceStudio extends LitElement {
       color: var(--secondary-text-color);
       font-size: 12px;
       margin-top: 2px;
+    }
+    .linkform {
+      padding: 4px 0 10px;
+      border-top: 1px dashed var(--divider-color);
+    }
+    .linkform + .row {
+      border-top: 1px solid var(--divider-color);
     }
     .arm {
       display: flex;
