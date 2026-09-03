@@ -15,6 +15,11 @@ CONF_HUBBUBB_SECRET = "hubbubb_client_secret"
 # One line per person: "Person Name: client_id : client_secret". Each maps to
 # that person's own Hubbubb user, so the CRM's permissions are the boundary.
 CONF_HUBBUBB_PEOPLE = "people"
+# {client_id: "Full Name, email"} - who Hubbubb said each linked credential
+# is, as shown in the Voice Studio. A top-level key, not a fourth field on
+# the people line and not a key inside the hubbubb section: parse_people
+# reads the line and the options form rewrites the section wholesale.
+CONF_HUBBUBB_IDENTITIES = "hubbubb_identities"
 
 CONF_COMPANION = "companion"
 CONF_COMPANION_URL = "companion_url"

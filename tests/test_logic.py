@@ -696,7 +696,7 @@ def test_people_links_endpoint_decisions():
     import json
 
     from hubbubb_home import links as links_mod
-    from hubbubb_home.hubbubb import HubbubbError
+    from hubbubb_home.hubbubb import HubbubbError, parse_people
     from hubbubb_home.links import PeopleLinksView, async_links
 
     assert PeopleLinksView.requires_auth is True
@@ -706,6 +706,8 @@ def test_people_links_endpoint_decisions():
         """HubbubbClient as the endpoint sees it: one secret is right."""
 
         made = []
+        # What the agent says to "who am I?": a string, or an exception.
+        answer = "Vega Landes, vega@example.com"
 
         def __init__(self, session, url, client_id, secret):
             _Verify.made.append((url, client_id, secret))
@@ -714,6 +716,15 @@ def test_people_links_endpoint_decisions():
         async def async_verify(self):
             if not self._ok:
                 raise HubbubbError("token endpoint returned 401")
+
+        async def async_ask(self, question, wait=25, timeout=90):
+            assert "Which Hubbubb user am I" in question
+            assert wait <= 10 and timeout <= 10, "the identity ask has its own short clock"
+            if isinstance(_Verify.answer, Exception):
+                raise _Verify.answer
+            if _Verify.answer == "hang":
+                await asyncio.sleep(3600)
+            return _Verify.answer
 
     links_mod.HubbubbClient = _Verify
 
@@ -772,7 +783,7 @@ def test_people_links_endpoint_decisions():
     assert status == 200
     assert listed == {
         "people": {
-            "Scott": {"linked": True, "client_id_hint": "hbbc_s… (10 characters)"},
+            "Scott": {"linked": True, "client_id_hint": "hbbc_s… (10 characters)", "identity": None},
             "Vega": {"linked": False},
         }
     }
@@ -797,25 +808,81 @@ def test_people_links_endpoint_decisions():
     # the entry's data with every other key intact and Scott's line untouched.
     status, row = call(hass, True, "POST", body={"person": " Vega ", "client_id": "hbbc_vega", "client_secret": "right"})
     assert status == 200
-    assert row == {"person": "Vega", "linked": True, "client_id_hint": "hbbc_v… (9 characters)"}
+    assert row == {
+        "person": "Vega",
+        "linked": True,
+        "client_id_hint": "hbbc_v… (9 characters)",
+        "identity": "Vega Landes, vega@example.com",
+    }
     assert _Verify.made[-1] == ("https://hub.example/api/v1/org/mcp", "hbbc_vega", "right")
     assert len(writes) == 1
     assert writes[0]["assistant_name"] == "Jarvis"
     assert writes[0]["hubbubb"]["hubbubb_client_id"] == "house"
     assert writes[0]["hubbubb"]["people"] == "Scott: hbbc_scott : sekrit\nVega: hbbc_vega : right\n"
-    assert call(hass, True, "GET")[1]["people"]["Vega"]["linked"] is True
+    # The identity lives beside the map, keyed by credential, so the map
+    # itself still parses exactly as it always has.
+    assert writes[0]["hubbubb_identities"] == {"hbbc_vega": "Vega Landes, vega@example.com"}
+    assert parse_people(writes[0]["hubbubb"]["people"]) == {
+        "scott": ("hbbc_scott", "sekrit"),
+        "vega": ("hbbc_vega", "right"),
+    }
+    vega = call(hass, True, "GET")[1]["people"]["Vega"]
+    assert vega["linked"] is True and vega["identity"] == "Vega Landes, vega@example.com"
 
-    # Unlinking removes only that line.
+    # Unlinking removes only that line, and whatever Hubbubb said about it.
     assert call(hass, True, "DELETE", person="scott") == (200, {"person": "scott", "linked": False})
     assert writes[-1]["hubbubb"]["people"] == "Vega: hbbc_vega : right\n"
+    assert call(hass, True, "DELETE", person="VEGA")[0] == 200
+    assert writes[-1]["hubbubb"]["people"] == ""
+    assert writes[-1]["hubbubb_identities"] == {}
+    call(hass, True, "POST", body={"person": "Vega", "client_id": "hbbc_vega", "client_secret": "right"})
     assert call(hass, True, "DELETE")[0] == 400
     assert call(hass, True, "PUT")[0] == 405
 
     # The voice service being down only shortens the list; it is not an error.
     down = SpeakerBook(_ProxySession(sys.modules["aiohttp"].ClientError("refused")), "http://mac:10301", "")
     assert call(_hass([entry], down), False, "GET")[1] == {
-        "people": {"Vega": {"linked": True, "client_id_hint": "hbbc_v… (9 characters)"}}
+        "people": {"Vega": {"linked": True, "client_id_hint": "hbbc_v… (9 characters)", "identity": "Vega Landes, vega@example.com"}}
     }
+
+    # The identity is a nicety, never a gate: whatever the ask does - fails,
+    # is still running, hangs past its clock, or answers nonsense - the pair
+    # is kept and the row simply has no name.
+    from hubbubb_home.hubbubb import HubbubbPending
+    from hubbubb_home import links as _links
+
+    _links._IDENTITY_SECONDS = -4  # the hard cap is this plus five: one second, not fifteen
+    for answer in (
+        HubbubbError("Hubbubb HTTP 500: ai_not_configured"),
+        HubbubbPending("run-1"),
+        "hang",
+        "I'm sorry, I cannot determine which user you are authenticated as.",
+        "",
+        None,
+    ):
+        _Verify.answer = answer
+        status, row = call(hass, True, "POST", body={"person": "Guest", "client_id": "hbbc_guest", "client_secret": "right"})
+        assert status == 200 and row["linked"] is True and row["identity"] is None, answer
+        assert "hbbc_guest" not in writes[-1]["hubbubb_identities"]
+        assert parse_people(writes[-1]["hubbubb"]["people"])["guest"] == ("hbbc_guest", "right")
+        assert call(hass, True, "GET")[1]["people"]["Guest"]["identity"] is None
+    # Re-linking a person with a new pair forgets what was said about the old one.
+    _Verify.answer = "Guest Person, guest@example.com"
+    call(hass, True, "POST", body={"person": "Guest", "client_id": "hbbc_guest", "client_secret": "right"})
+    assert writes[-1]["hubbubb_identities"]["hbbc_guest"] == "Guest Person, guest@example.com"
+    call(hass, True, "POST", body={"person": "guest", "client_id": "hbbc_other", "client_secret": "right"})
+    assert writes[-1]["hubbubb_identities"] == {
+        "hbbc_vega": "Vega Landes, vega@example.com",
+        "hbbc_other": "Guest Person, guest@example.com",
+    }
+
+    # What counts as an identity: one line, a name, a comma, an address.
+    from hubbubb_home.links import identity_of
+
+    assert identity_of("Scott Scott, scott@thehubbubb.com") == "Scott Scott, scott@thehubbubb.com"
+    assert identity_of("  Scott Scott,scott@thehubbubb.com\n") == "Scott Scott,scott@thehubbubb.com"
+    for junk in ("Scott Scott", "scott@thehubbubb.com", "You are Scott. Email: scott@x.com", "a, b", "x, y@z", None, 3):
+        assert identity_of(junk) is None, junk
 
 
 def test_hubbubb_tool_uses_the_verified_persons_own_client():

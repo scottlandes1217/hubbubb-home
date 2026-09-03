@@ -52,6 +52,9 @@ export const api = {
   deletePerson: (person) => ["POST", "people/delete", { person }],
   train: (phrase) => ["POST", "train", { phrase }],
   trainStatus: () => ["GET", "train/status"],
+  /* Raw wav, not JSON: the fourth slot is the content type _api sends it as.
+     Voice only - the service refuses the other kinds, and so does this. */
+  upload: (label, wav) => ["POST", `clips/upload${query({ kind: "voice", label })}`, wav, "audio/wav"],
   links: () => ["GET", LINKS_PATH],
   link: (person, client_id, client_secret) => ["POST", LINKS_PATH, { person, client_id, client_secret }],
   unlink: (person) => ["DELETE", `${LINKS_PATH}/${enc(person)}`],
@@ -102,10 +105,23 @@ export function peopleRows(people, links) {
   for (const [name, row] of Object.entries(links || {})) {
     const key = name.toLowerCase();
     const have = rows.get(key) || { name, samples: 0, link: null };
-    have.link = row?.linked ? { linked: true, hint: row.client_id_hint || "" } : { linked: false };
+    have.link = row?.linked ? { linked: true, hint: row.client_id_hint || "", identity: row.identity || null } : { linked: false };
     rows.set(key, have);
   }
   return [...rows.values()].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
+}
+
+/* What a row says about Hubbubb. A linked person reads as who Hubbubb says
+   the credential is - a tick proves the pair works, the name proves it is
+   theirs - and only falls back to the client-id hint when Hubbubb could not
+   say. The identity is stored as "Name, email"; shown as "Name (email)". */
+export function linkText(link) {
+  if (!link) return "";
+  if (!link.linked) return "Hubbubb: not linked";
+  if (!link.identity) return `Hubbubb: linked · ${link.hint}`;
+  const at = link.identity.lastIndexOf(",");
+  if (at < 0) return `Hubbubb: ${link.identity}`;
+  return `Hubbubb: ${link.identity.slice(0, at).trim()} (${link.identity.slice(at + 1).trim()})`;
 }
 
 export function labelsOf(clips, kind) {
@@ -150,6 +166,85 @@ export const validPhrase = (phrase) => {
   const words = String(phrase || "").trim().split(/\s+/).filter(Boolean);
   return words.length >= 1 && words.length <= 4 && words.every((w) => /^[a-z]+$/i.test(w));
 };
+
+/* ---- recording on this device, for voice enrolment only ----
+   The Mac's microphone sits beside the puck, which is right for wake-word
+   takes: they need the room and the distance in them. A voice sample is
+   about the person, who may be anywhere - so it can come from the device in
+   hand instead. */
+
+export const WAV_RATE = 16000;
+export const MAX_TAKE_SECONDS = 60;
+
+/* getUserMedia exists only in a secure context - the https Nabu Casa address,
+   not the plain-http LAN one - and a browser that hides it is not one to ask. */
+export const canRecordHere = (win) =>
+  Boolean(win?.isSecureContext && typeof win.navigator?.mediaDevices?.getUserMedia === "function");
+
+/* Which microphone a Voice take will use, and the sentence that says so
+   before anything is pressed: a person who thought the puck was listening
+   and finds the laptop was has wasted their enrolment. `choice` is whether
+   there is anything to pick. */
+export function micPlan(pref, can, denied) {
+  if (!can) {
+    return { source: "mac", choice: false, text: "This device cannot record over a plain http:// address, so the Mac's microphone beside the puck will be used." };
+  }
+  if (denied) {
+    return { source: "mac", choice: false, text: "This device refused microphone permission, so the Mac's microphone beside the puck will be used." };
+  }
+  return pref === "mac"
+    ? { source: "mac", choice: true, text: "The Mac's microphone beside the puck will record. You need to be in that room." }
+    : { source: "device", choice: true, text: "This device's microphone will record. Speak from wherever you are." };
+}
+
+/* Linear interpolation, the same cheap resample the service does for a puck
+   streaming at the wrong rate. The context is asked for 16 kHz first, so this
+   is usually the identity; it is for the browsers that ignore the ask.
+   ponytail: no low-pass before decimating; add one if enrolment quality
+   from a 48 kHz browser ever measures worse than from the Mac. */
+export function downsample(samples, from, to = WAV_RATE) {
+  if (from === to) return samples;
+  const n = Math.floor((samples.length * to) / from);
+  const out = new Float32Array(n);
+  const step = from / to;
+  for (let i = 0; i < n; i++) {
+    const pos = i * step;
+    const lo = Math.floor(pos);
+    const hi = Math.min(lo + 1, samples.length - 1);
+    out[i] = samples[lo] + (samples[hi] - samples[lo]) * (pos - lo);
+  }
+  return out;
+}
+
+/* Float samples to a 16-bit mono wav: the 44-byte canonical header and
+   nothing else. By hand because it is twenty lines, and the service refuses
+   anything fancier anyway. */
+export function encodeWav(samples, rate = WAV_RATE) {
+  const n = samples.length;
+  const buf = new ArrayBuffer(44 + n * 2);
+  const v = new DataView(buf);
+  const tag = (at, s) => {
+    for (let i = 0; i < s.length; i++) v.setUint8(at + i, s.charCodeAt(i));
+  };
+  tag(0, "RIFF");
+  v.setUint32(4, 36 + n * 2, true);
+  tag(8, "WAVE");
+  tag(12, "fmt ");
+  v.setUint32(16, 16, true);
+  v.setUint16(20, 1, true); // PCM
+  v.setUint16(22, 1, true); // mono
+  v.setUint32(24, rate, true);
+  v.setUint32(28, rate * 2, true); // bytes per second
+  v.setUint16(32, 2, true); // bytes per frame
+  v.setUint16(34, 16, true);
+  tag(36, "data");
+  v.setUint32(40, n * 2, true);
+  for (let i = 0; i < n; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(44 + i * 2, s < 0 ? s * 32768 : s * 32767, true);
+  }
+  return buf;
+}
 
 /* One blob at a time, revoked when the next starts, when playback ends, and
    on dispose. `urls` and `audio` are injectable so the balance can be
@@ -223,6 +318,7 @@ class HubbubbVoiceStudio extends LitElement {
     _linkId: { state: true },
     _linkSecret: { state: true },
     _linkErr: { state: true },
+    _linkNote: { state: true },
     _train: { state: true },
     _kind: { state: true },
     _label: { state: true },
@@ -239,6 +335,8 @@ class HubbubbVoiceStudio extends LitElement {
     _phrase: { state: true },
     _armed: { state: true },
     _loaded: { state: true },
+    _source: { state: true },
+    _micDenied: { state: true },
   };
 
   constructor() {
@@ -253,6 +351,7 @@ class HubbubbVoiceStudio extends LitElement {
     this._linkId = "";
     this._linkSecret = "";
     this._linkErr = "";
+    this._linkNote = null;
     this._train = null;
     this._kind = "wake";
     this._label = "";
@@ -269,6 +368,8 @@ class HubbubbVoiceStudio extends LitElement {
     this._phrase = "";
     this._armed = false;
     this._loaded = false;
+    this._source = "device";
+    this._micDenied = false;
   }
 
   connectedCallback() {
@@ -283,6 +384,7 @@ class HubbubbVoiceStudio extends LitElement {
 
   disconnectedCallback() {
     super.disconnectedCallback();
+    this._releaseMic(); // the take goes with the page; a stream left open lights the tab forever
     this._stopPolling();
     clearInterval(this._trainTimer);
     this._trainTimer = null;
@@ -292,11 +394,12 @@ class HubbubbVoiceStudio extends LitElement {
 
   /* ---------------- transport ---------------- */
 
-  async _api([method, path, body]) {
+  async _api([method, path, body, type]) {
     const init = {
       method,
-      headers: body ? { "Content-Type": "application/json" } : {},
-      body: body ? JSON.stringify(body) : undefined,
+      headers: body ? { "Content-Type": type || "application/json" } : {},
+      // A typed body (a wav) goes as it is; everything else is JSON.
+      body: !body ? undefined : type ? body : JSON.stringify(body),
     };
     const url = path.startsWith("/") ? path : API_BASE + path;
     // fetchWithAuth refreshes an expired token; the bearer fallback is for a
@@ -440,6 +543,7 @@ class HubbubbVoiceStudio extends LitElement {
 
   async _toggleRecord() {
     if (this._status?.recording) {
+      if (this._take) return this._stopLocal();
       await this._try(() => this._api(api.stop()));
       this._status = { recording: false };
       this._recordingEnded();
@@ -450,6 +554,7 @@ class HubbubbVoiceStudio extends LitElement {
       this._err = this._kind === "voice" ? "whose voice is this?" : "give the recording a label first";
       return;
     }
+    if (this._kind === "voice" && this._mic().source === "device") return this._startLocal(label);
     const st = await this._try(() => this._api(api.start(this._kind, label)));
     if (st === undefined) return;
     this._since = Date.now();
@@ -457,6 +562,92 @@ class HubbubbVoiceStudio extends LitElement {
     this._elapsed = 0;
     this._status = { recording: true, kind: this._kind, label, ...(st || {}) };
     this._startPolling();
+  }
+
+  /* ---------------- this device's microphone ---------------- */
+
+  _mic() {
+    return micPlan(this._source, canRecordHere(window), this._micDenied);
+  }
+
+  async _startLocal(label) {
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1 } });
+    } catch (e) {
+      // Refused, or no microphone. The browser remembers a refusal, so
+      // asking again would only fail again: say so and hand over to the Mac.
+      this._micDenied = true;
+      this._err = `This device's microphone is not available (${e?.name || e}), so the Mac's will be used instead.`;
+      return;
+    }
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    let ctx;
+    try {
+      ctx = new Ctx({ sampleRate: WAV_RATE }); // resampled by the browser, where the ask is honoured
+    } catch (e) {
+      ctx = new Ctx();
+    }
+    // ponytail: ScriptProcessorNode is deprecated but needs no worklet file
+    // to serve; move to AudioWorklet when a browser drops it.
+    const proc = ctx.createScriptProcessor(4096, 1, 1);
+    const take = { ctx, stream, proc, chunks: [], samples: 0, peak: 0 };
+    proc.onaudioprocess = (e) => {
+      const block = new Float32Array(e.inputBuffer.getChannelData(0));
+      take.chunks.push(block);
+      take.samples += block.length;
+      let sq = 0;
+      for (let i = 0; i < block.length; i++) sq += block[i] * block[i];
+      take.peak = Math.max(take.peak, Math.sqrt(sq / block.length));
+      // The service refuses anything longer; stop rather than lose the take.
+      if (this._take === take && take.samples >= MAX_TAKE_SECONDS * ctx.sampleRate) this._stopLocal();
+    };
+    ctx.createMediaStreamSource(stream).connect(proc);
+    // The output buffer is never written, so this plays silence; Safari
+    // does not run a processor that is connected to nothing.
+    proc.connect(ctx.destination);
+    this._take = take;
+    this._since = Date.now();
+    this._levels = [];
+    this._elapsed = 0;
+    this._status = { recording: true, kind: "voice", label, local: true };
+    // The Mac path is polled twice a second and the meter and dead-mic rule
+    // are tuned to that pace, so this device reports at the same one.
+    this._poll = setInterval(() => {
+      this._levels = [...this._levels.slice(-11), take.peak];
+      take.peak = 0;
+      this._elapsed = take.samples / ctx.sampleRate;
+    }, POLL_MS);
+  }
+
+  async _stopLocal() {
+    const take = this._take;
+    const label = this._status?.label;
+    this._stopPolling();
+    this._releaseMic();
+    this._status = { recording: false };
+    if (!take) return;
+    const all = new Float32Array(take.samples);
+    let at = 0;
+    for (const c of take.chunks) {
+      all.set(c, at);
+      at += c.length;
+    }
+    const wav = encodeWav(downsample(all, take.ctx.sampleRate));
+    await this._try(() => this._api(api.upload(label, wav)));
+    this._recordingEnded();
+  }
+
+  /* The tracks must be stopped, not just dropped: one left running keeps
+     the browser's recording light on until the tab dies. */
+  _releaseMic() {
+    const take = this._take;
+    this._take = null;
+    if (!take) return;
+    take.proc.onaudioprocess = null;
+    take.proc.disconnect();
+    take.stream.getTracks().forEach((t) => t.stop());
+    Promise.resolve(take.ctx.close()).catch(() => {});
   }
 
   async _delete(ids) {
@@ -515,6 +706,7 @@ class HubbubbVoiceStudio extends LitElement {
     this._linkId = "";
     this._linkSecret = "";
     this._linkErr = "";
+    this._linkNote = null;
   }
 
   async _link() {
@@ -527,8 +719,16 @@ class HubbubbVoiceStudio extends LitElement {
       // The endpoint asks Hubbubb for a token before it keeps anything, so
       // a refusal here means the pair is wrong, not that it was saved badly.
       const row = await this._api(api.link(person, id, this._linkSecret));
-      this._links = { ...(this._links || {}), [row.person]: { linked: true, client_id_hint: row.client_id_hint } };
+      this._links = { ...(this._links || {}), [row.person]: { linked: true, client_id_hint: row.client_id_hint, identity: row.identity || null } };
       this._linking = "";
+      // The confirmation is about who, not whether: the pair worked, now
+      // the administrator checks the name Hubbubb gave is the right person.
+      this._linkNote = {
+        person: row.person,
+        text: row.identity
+          ? `Hubbubb says this credential belongs to ${linkText({ linked: true, identity: row.identity }).slice("Hubbubb: ".length)}. If that is not ${row.person}, unlink it.`
+          : `Linked, but Hubbubb did not say whose credential this is. Ask it later, or unlink if unsure.`,
+      };
     } catch (e) {
       this._linkErr = e?.message || String(e);
     } finally {
@@ -542,6 +742,7 @@ class HubbubbVoiceStudio extends LitElement {
     if (!confirm(`Unlink ${name} from Hubbubb? The house stops acting as them there.`)) return;
     const row = await this._try(() => this._api(api.unlink(name)));
     if (!row) return;
+    this._linkNote = null;
     const links = { ...(this._links || {}) };
     for (const key of Object.keys(links)) if (key.toLowerCase() === name.toLowerCase()) links[key] = { linked: false };
     this._links = links;
@@ -621,6 +822,7 @@ class HubbubbVoiceStudio extends LitElement {
           )}
         </div>
         <div class="hint">${KINDS.find((k) => k.id === this._kind)?.hint}</div>
+        ${this._kind === "voice" ? this._renderMic(rec) : nothing}
         <input
           class="input"
           list="vs-labels"
@@ -637,7 +839,7 @@ class HubbubbVoiceStudio extends LitElement {
           ? html`
               <div class="live">
                 <span class="elapsed">${fmtElapsed(this._elapsed)}</span>
-                <span class="what">${this._status.kind} · ${this._status.label}</span>
+                <span class="what">${this._status.kind} · ${this._status.label}${this._status.local ? " · this device" : ""}</span>
               </div>
               <div class="meter ${dead ? "dead" : ""}"><div class="fill" style="width:${meterPct(level)}%"></div></div>
               ${dead
@@ -646,6 +848,21 @@ class HubbubbVoiceStudio extends LitElement {
             `
           : nothing}
       </ha-card>
+    `;
+  }
+
+  /* Which microphone a Voice take uses - picked, and said, before the button. */
+  _renderMic(rec) {
+    const mic = this._mic();
+    return html`
+      ${mic.choice
+        ? html`<div class="seg">
+            ${[["device", "This device"], ["mac", "The Mac by the puck"]].map(
+              ([id, name]) => html`<button class="segb ${mic.source === id ? "on" : ""}" ?disabled=${rec} @click=${() => (this._source = id)}>${name}</button>`
+            )}
+          </div>`
+        : nothing}
+      <div class="hint">${mic.text}</div>
     `;
   }
 
@@ -763,7 +980,8 @@ class HubbubbVoiceStudio extends LitElement {
      administrators; everyone else sees the state and nothing to press. */
   _renderPerson({ name, samples, link }, admin) {
     const open = admin && this._linking === name;
-    const state = !link ? nothing : link.linked ? `Hubbubb: linked · ${link.hint}` : "Hubbubb: not linked";
+    const state = linkText(link);
+    const note = this._linkNote?.person === name ? this._linkNote.text : "";
     return html`<div class="row">
         <div class="body">
           <div class="text">${name}</div>
@@ -778,6 +996,7 @@ class HubbubbVoiceStudio extends LitElement {
           ? html`<button class="btn icon danger" title="Forget" ?disabled=${this._busy} @click=${() => this._deletePerson(name)}>✕</button>`
           : nothing}
       </div>
+      ${note ? html`<div class="linkform"><div class="hint">${note}</div></div>` : nothing}
       ${open
         ? html`<div class="linkform">
             <div class="hint">${name}'s own Hubbubb API client. The pair is checked against Hubbubb before it is kept; the secret is never shown again.</div>

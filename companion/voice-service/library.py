@@ -9,6 +9,7 @@ shelf rather than at a copy of it.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import re
@@ -16,6 +17,7 @@ import secrets
 import tempfile
 import threading
 import time
+import wave
 from pathlib import Path
 
 import numpy as np
@@ -24,6 +26,54 @@ from wakeword import harvest
 from wakeword.harvest import RATE
 
 KINDS = ("wake", "ambient", "voice")
+
+# A browser upload is a stranger's bytes through Home Assistant's login: the
+# only kind allowed is the one whose microphone does not matter. 60 s of
+# 16 kHz mono is under 2 MB; the cap leaves room for a fat header, no more.
+UPLOAD_KINDS = ("voice",)
+UPLOAD_MAX_BYTES = 4 * 1024 * 1024
+UPLOAD_SECONDS = (1.0, 60.0)
+
+
+def parse_upload(kind: str, body: bytes) -> np.ndarray:
+    """An uploaded wav as int16 samples, or ValueError saying what is wrong.
+
+    The header is believed only where the bytes back it up: a data chunk
+    that claims more than the body holds is a cut-off upload, not a clip.
+    """
+    if kind not in UPLOAD_KINDS:
+        raise ValueError(
+            "only voice samples may be uploaded - wake-word and room-noise "
+            "samples must come from the microphone beside the puck, so the "
+            "training set hears the room the model will run in"
+        )
+    if len(body) > UPLOAD_MAX_BYTES:
+        raise ValueError(f"upload is over {UPLOAD_MAX_BYTES // 2**20} MB")
+    if body[:4] != b"RIFF" or body[8:12] != b"WAVE":
+        raise ValueError("not a wav file")
+    try:
+        with wave.open(io.BytesIO(body)) as handle:
+            rate, channels, width = (
+                handle.getframerate(), handle.getnchannels(), handle.getsampwidth()
+            )
+            frames = handle.getnframes()
+            data = handle.readframes(frames)
+    except (wave.Error, EOFError, ValueError) as err:
+        raise ValueError(f"not a wav file: {err}")
+    if (rate, channels, width) != (RATE, 1, 2):
+        raise ValueError(
+            f"want 16 kHz mono 16-bit, got {rate} Hz, {channels} channel(s), "
+            f"{width * 8}-bit"
+        )
+    if len(data) < frames * 2:
+        raise ValueError("wav is truncated")
+    seconds = len(data) / 2 / RATE
+    lo, hi = UPLOAD_SECONDS
+    if not lo <= seconds <= hi:
+        raise ValueError(
+            f"a sample is {lo:g} to {hi:g} seconds long; this is {seconds:.1f}"
+        )
+    return np.frombuffer(data, np.int16)
 
 
 def slug(label: str) -> str:
@@ -169,8 +219,10 @@ class Recorder:
         try:
             for block in self.source(self._stop):
                 self._blocks.append(block)
-                self.samples += len(block)
+                # Level before the count: a poller that sees the count move
+                # must find the level of that block already in place.
                 self.level = float(np.sqrt(np.mean((block / 32768.0) ** 2)))
+                self.samples += len(block)
         except Exception as err:  # no mic, no permission: surfaced by stop()
             self.error = f"{type(err).__name__}: {err}"
 

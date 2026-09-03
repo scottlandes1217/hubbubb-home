@@ -3,16 +3,40 @@
 Run from voice-service/:  .venv/bin/python tests/library_check.py
 """
 
+import io
 import sys
 import tempfile
 import time
+import wave
 from pathlib import Path
 
 import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from library import RATE, Library, Recorder, split_take  # noqa: E402
+from library import (  # noqa: E402
+    RATE, UPLOAD_MAX_BYTES, Library, Recorder, parse_upload, split_take,
+)
+
+
+def wav_bytes(rate=RATE, channels=1, width=2, seconds=2.0) -> bytes:
+    """What a browser (or anyone else) might POST to /clips/upload."""
+    out = io.BytesIO()
+    with wave.open(out, "wb") as handle:
+        handle.setnchannels(channels)
+        handle.setsampwidth(width)
+        handle.setframerate(rate)
+        handle.writeframes(bytes(int(seconds * rate) * channels * width))
+    return out.getvalue()
+
+
+def refused(kind: str, body: bytes, why: str) -> None:
+    try:
+        parse_upload(kind, body)
+    except ValueError as err:
+        assert why in str(err), (why, str(err))
+        return
+    raise AssertionError(f"accepted an upload that should fail: {why}")
 
 
 def canned(audio: np.ndarray):
@@ -121,6 +145,31 @@ def run() -> None:
         raise AssertionError("a dead source must surface")
     except OSError as err:
         assert "no input device" in str(err)
+
+    # A browser upload: the header is checked against the bytes, not believed.
+    good = wav_bytes(seconds=2.0)
+    audio = parse_upload("voice", good)
+    assert audio.dtype == np.int16 and len(audio) == 2 * RATE, len(audio)
+    filed = lib.add("voice", "Scott", audio, "heard")
+    assert filed["seconds"] == 2.0 and lib.get(filed["id"]) is not None
+    assert len(parse_upload("voice", wav_bytes(seconds=1.0))) == RATE, "one second is the floor"
+    assert len(parse_upload("voice", wav_bytes(seconds=60.0))) == 60 * RATE, "a minute is the ceiling"
+    refused("wake", good, "only voice")
+    refused("ambient", good, "only voice")
+    refused("", good, "only voice")
+    refused("voice", wav_bytes(rate=44100), "want 16 kHz")
+    refused("voice", wav_bytes(channels=2), "want 16 kHz mono")
+    refused("voice", wav_bytes(width=1), "8-bit")
+    refused("voice", good[:-1000], "truncated")
+    refused("voice", good[:30], "not a wav")
+    refused("voice", wav_bytes(seconds=0), "1 to 60 seconds")
+    refused("voice", wav_bytes(seconds=0.9), "1 to 60 seconds")
+    refused("voice", wav_bytes(seconds=61), "1 to 60 seconds")
+    refused("voice", wav_bytes(seconds=140), "over 4 MB")
+    assert len(wav_bytes(seconds=140)) > UPLOAD_MAX_BYTES
+    refused("voice", b"", "not a wav")
+    refused("voice", b"hello there " * 1000, "not a wav")
+    refused("voice", b"RIFF\0\0\0\0WAVE" + b"\0" * 100, "not a wav")
 
     print("library self-check ok")
 

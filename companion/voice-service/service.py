@@ -31,7 +31,9 @@ from wyoming.event import Event
 from wyoming.info import AsrModel, AsrProgram, Attribution, Describe, Info
 from wyoming.server import AsyncEventHandler, AsyncTcpServer
 
-from library import KINDS, Library, Recorder, split_take
+from library import (
+    KINDS, UPLOAD_MAX_BYTES, Library, Recorder, parse_upload, split_take,
+)
 from speakers import Profiles
 from wakeword import harvest
 
@@ -508,6 +510,28 @@ def admin_app(service: Service) -> web.Application:
             {"clips": library.list(req.query.get("kind"), req.query.get("label"))}
         )
 
+    async def clip_upload(req):
+        """A take recorded in the browser, filed as if the Mac had taken it.
+
+        Speaker enrolment is about the person's voice, not the room, and the
+        person may be nowhere near the Mac - so the panel records on the
+        device in hand and sends the wav here. Only ?kind=voice: the other
+        kinds need the puck's microphone, and parse_upload says so.
+        """
+        authorize(req)
+        kind = req.query.get("kind") or ""
+        label = " ".join((req.query.get("label") or "").split())
+        if not label:
+            raise web.HTTPBadRequest(text="label is required")
+        try:
+            audio = parse_upload(kind, await req.read())
+        except ValueError as err:
+            raise web.HTTPBadRequest(text=str(err))
+        loop = asyncio.get_running_loop()
+        async with service.lock:
+            text = await loop.run_in_executor(None, service.transcribe, _float(audio))
+        return web.json_response({"clip": library.add(kind, label, audio, text)})
+
     def clip_or_404(req) -> dict:
         clip = library.get(req.match_info["id"])
         if clip is None:
@@ -579,7 +603,8 @@ def admin_app(service: Service) -> web.Application:
     async def train_status(_req):
         return web.json_response(trainer.status)
 
-    app = web.Application()
+    # aiohttp's default body limit is 1 MB, under a full-length voice sample.
+    app = web.Application(client_max_size=UPLOAD_MAX_BYTES)
     app.add_routes(
         [
             web.get("/health", health),
@@ -593,6 +618,8 @@ def admin_app(service: Service) -> web.Application:
             web.post("/record/start", record_start),
             web.post("/record/stop", record_stop),
             web.get("/clips", clips),
+            # Before /clips/{id}: "upload" is a verb here, never an id.
+            web.post("/clips/upload", clip_upload),
             web.get("/clips/{id}/audio", clip_audio),
             web.post("/clips/{id}", clip_refile),
             web.delete("/clips/{id}", clip_delete),

@@ -8,25 +8,55 @@ pair against Hubbubb before it is kept, and rewrite one line without
 disturbing the others. Saving goes through async_update_entry, so the same
 update listener that serves the options form reloads the entry; there is no
 second path for a change to take effect.
+
+A kept pair is also asked who it is, and the answer is stored and shown
+beside the name, so the panel says "Scott Scott (scott@thehubbubb.com)"
+rather than "linked".
 """
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import re
 
 from aiohttp import web
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import CONF_HUBBUBB, CONF_HUBBUBB_PEOPLE, CONF_HUBBUBB_URL, DOMAIN
+from .const import (
+    CONF_HUBBUBB,
+    CONF_HUBBUBB_IDENTITIES,
+    CONF_HUBBUBB_PEOPLE,
+    CONF_HUBBUBB_URL,
+    DOMAIN,
+)
 from .hubbubb import HubbubbClient, HubbubbError
 from .speakers import refusal
 
 _LOGGER = logging.getLogger(__name__)
 
 LINKS_URL = f"/api/{DOMAIN}/people/links"
+
+# A green tick proves a credential works, not whose it is: paste the wrong
+# pair and the house quietly acts as somebody else. Hubbubb has no sign-in
+# to lean on - client credentials only - so the honest confirmation is to
+# ask its agent who the credential is and put the answer beside the name.
+_IDENTITY_QUESTION = (
+    "Which Hubbubb user am I authenticated as? Reply with just the user's "
+    "full name and email address, nothing else."
+)
+# Long enough for an agent run that only has to look up its own user, short
+# enough that an administrator is not left staring at "Checking…". The
+# answer is a nicety: past this the link is kept and the name is simply
+# unknown, because a slow CRM must never cost anybody their link.
+_IDENTITY_SECONDS = 10
+# "Full Name, email" and nothing else - what the agent gives when it does as
+# asked. Anything else (an apology, a paragraph, a refusal) is not shown as
+# a person.
+_IDENTITY = re.compile(r"^[^,\n]{1,80}, *[^\s,@]+@[^\s,@]+\.[^\s,@]+$")
 
 
 def split_line(line: str) -> tuple[str, str, str] | None:
@@ -84,6 +114,29 @@ def hint(client_id: str) -> str:
     return f"{client_id[:6]}… ({len(client_id)} characters)"
 
 
+def identity_of(answer: object) -> str | None:
+    """The agent's answer as a 'Name, email' identity, or None for anything else."""
+    text = " ".join(str(answer or "").split())
+    return text if _IDENTITY.match(text) else None
+
+
+async def _identity(client: HubbubbClient) -> str | None:
+    """Who Hubbubb says this credential is; None if it cannot say in time."""
+    try:
+        answer = await asyncio.wait_for(
+            client.async_ask(
+                _IDENTITY_QUESTION, wait=_IDENTITY_SECONDS, timeout=_IDENTITY_SECONDS
+            ),
+            _IDENTITY_SECONDS + 5,
+        )
+    except (HubbubbError, asyncio.TimeoutError) as err:
+        # HubbubbPending is a HubbubbError: a run still going is left to
+        # finish on its own, nobody is waiting for it.
+        _LOGGER.debug("Hubbubb did not say whose credential this is: %s", err)
+        return None
+    return identity_of(answer)
+
+
 def _hubbubb_entry(hass: HomeAssistant):
     """The entry whose people map this edits: the one with a Hubbubb URL.
 
@@ -138,12 +191,20 @@ async def async_links(
         return refusal(503, "Hubbubb is not configured")
     hub = entry.data[CONF_HUBBUBB]
     text = hub.get(CONF_HUBBUBB_PEOPLE) or ""
+    # Keyed by client id, not by name: the identity belongs to the
+    # credential. If the options form swaps Vega's pair for another, the old
+    # answer must not be shown against the new one.
+    identities = dict(entry.data.get(CONF_HUBBUBB_IDENTITIES) or {})
 
     if method == "GET":
         people = {}
         for line in text.splitlines():
             if parsed := split_line(line):
-                people[parsed[0]] = {"linked": True, "client_id_hint": hint(parsed[1])}
+                people[parsed[0]] = {
+                    "linked": True,
+                    "client_id_hint": hint(parsed[1]),
+                    "identity": identities.get(parsed[1]),
+                }
         for name in await _voice_people(hass):
             if not any(_same(name, known) for known in people):
                 people[name] = {"linked": False}
@@ -155,12 +216,22 @@ async def async_links(
     def _save(new_text: str) -> None:
         hass.config_entries.async_update_entry(
             entry,
-            data={**entry.data, CONF_HUBBUBB: {**hub, CONF_HUBBUBB_PEOPLE: new_text}},
+            data={
+                **entry.data,
+                CONF_HUBBUBB: {**hub, CONF_HUBBUBB_PEOPLE: new_text},
+                CONF_HUBBUBB_IDENTITIES: identities,
+            },
         )
+
+    def _forget(name: str) -> None:
+        for line in text.splitlines():
+            if (parsed := split_line(line)) and _same(parsed[0], name):
+                identities.pop(parsed[1], None)
 
     if method == "DELETE":
         if not (person or "").strip():
             return _plain(400, "which person?")
+        _forget(person)
         _save(remove_line(text, person))
         return _json({"person": person.strip(), "linked": False})
 
@@ -186,8 +257,19 @@ async def async_links(
         # The words, not the id or secret - this goes to the browser.
         _LOGGER.debug("Hubbubb refused a link for %s: %s", person, err)
         return _plain(400, f"Hubbubb refused these credentials: {err}")
+    identity = await _identity(client)
+    _forget(person)
+    if identity:
+        identities[client_id] = identity
     _save(set_line(text, person, client_id, secret))
-    return _json({"person": person, "linked": True, "client_id_hint": hint(client_id)})
+    return _json(
+        {
+            "person": person,
+            "linked": True,
+            "client_id_hint": hint(client_id),
+            "identity": identity,
+        }
+    )
 
 
 class PeopleLinksView(HomeAssistantView):
