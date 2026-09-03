@@ -71,6 +71,22 @@ class HubbubbAPI(llm.API):
             getattr(llm_context, "device_id", None)
         )
         prompt = f"{runtime.persona()}\n\n{speaker}"
+        # Home Assistant's own Assist API drops its timer tools and adds
+        # "This device is not able to start timers." whenever the request
+        # arrives without a timer-capable device - a dashboard, the phone
+        # app, an automation, a satellite whose firmware never claimed the
+        # feature. Models read that line, believe the house has no timers at
+        # all, and refuse instead of reaching for start_timer one section
+        # further down. Ours are house-wide and kept here, so say so.
+        prompt += (
+            "\n\nTimers here belong to the house, not to the device being "
+            "spoken to: this integration keeps them and the dashboard shows "
+            "them. Any claim elsewhere that this device cannot start or "
+            "track timers is about that device's own timers and never about "
+            "yours - use start_timer, cancel_timer and timer_status "
+            "whenever a countdown is asked for, from any device, and never "
+            "tell the speaker that timers are unavailable."
+        )
         # The persona's "say you can't" reads, to a 3B model, as license to
         # improvise a sentence of filler. When the companion exists, the rule
         # is escalate - never guess.
