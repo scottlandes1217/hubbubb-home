@@ -14,8 +14,10 @@ import asyncio
 import json
 import logging
 import os
+import re
 import secrets
 import time
+import wave
 from functools import partial
 from pathlib import Path
 
@@ -108,6 +110,8 @@ class Service:
                 None, self._transcribe_and_embed, audio, language
             )
             elapsed = time.monotonic() - started
+        if self.args.capture_dir:
+            self._capture(pcm, text)
         if self._is_self_echo(text, len(audio) / RATE):
             _LOGGER.info("self-echo dropped: %r", text)
             return {"person": None, "confidence": 0.0, "ts": time.time(),
@@ -137,6 +141,28 @@ class Service:
         if self.args.webhook:
             asyncio.ensure_future(self._post_webhook(event))
         return event
+
+    def _capture(self, pcm: bytes, text: str) -> None:
+        """Keep the clip, as the puck's own microphone heard it.
+
+        Wake-word training data that no amount of synthetic speech can
+        stand in for: this room, this microphone, this distance - and,
+        more valuable than the hits, the television and Jarvis's own
+        replies that the model must learn to sit through. Saved before
+        the self-echo and kill-phrase gates for exactly that reason.
+        """
+        try:
+            out = Path(self.args.capture_dir).expanduser()
+            out.mkdir(parents=True, exist_ok=True)
+            slug = re.sub(r"[^a-z0-9]+", "-", text.lower())[:40].strip("-")
+            name = f"{time.strftime('%Y%m%d-%H%M%S')}_{slug or 'silence'}.wav"
+            with wave.open(str(out / name), "wb") as handle:
+                handle.setnchannels(1)
+                handle.setsampwidth(2)
+                handle.setframerate(RATE)
+                handle.writeframes(pcm)
+        except OSError as err:  # a full disk must never cost us the answer
+            _LOGGER.warning("capture failed: %s", err)
 
     def _is_self_echo(self, text: str, audio_seconds: float) -> bool:
         """True when the transcript is the mic hearing our own TTS.
@@ -484,6 +510,12 @@ def parse_args(argv=None):
     parser.add_argument("--language", default="en")
     parser.add_argument(
         "--data-dir", default="~/.hubbubb-voice", help="profiles + last.json"
+    )
+    parser.add_argument(
+        "--capture-dir",
+        default="",
+        help="save every wake-triggered clip here as 16 kHz mono wav, for "
+        "wake-word retraining; off unless set",
     )
     parser.add_argument(
         "--webhook",

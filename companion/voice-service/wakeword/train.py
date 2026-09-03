@@ -114,6 +114,20 @@ def write_noise_clips(out_dir: Path, count: int, seconds: int) -> None:
             f.writeframes((pcm * 32767).astype(np.int16).tobytes())
 
 
+def copy_clips(src: Path, dest: Path) -> int:
+    """Real recordings into the clip tree. Returns how many landed there."""
+    wavs = sorted(src.glob("**/*.wav"))
+    if not wavs:
+        raise SystemExit(f"no .wav files under {src}")
+    dest.mkdir(parents=True, exist_ok=True)
+    for wav in wavs:
+        target = dest / wav.name
+        if not target.exists():
+            shutil.copy2(wav, target)
+    print(f"{len(wavs)} real clips from {src}")
+    return len(wavs)
+
+
 def build_features(clip_dir: Path, feature_dir: Path, augmenter, splits: dict,
                    split_seed: int | None = 10) -> None:
     """Wav clips -> ragged-mmap spectrogram sets microWakeWord trains from.
@@ -232,6 +246,15 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=10000, help="training steps")
     parser.add_argument("--samples", type=int, default=1000, help="positive clips to generate")
     parser.add_argument("--cutoff", type=float, default=0.97, help="manifest probability cutoff; raise if it false-triggers, lower if it misses wakes")
+    parser.add_argument("--extra-positives", default=None,
+                        help="directory of real recordings of the phrase (this "
+                             "room, this microphone) to train on alongside the "
+                             "generated ones")
+    parser.add_argument("--extra-negatives", default=None,
+                        help="directory of real audio the model must sit "
+                             "through - the television, Jarvis's own replies. "
+                             "Used for training and for the false-accept "
+                             "measurement the cutoff table is read from")
     parser.add_argument("--smoke", action="store_true", help="tiny fast run proving the pipeline; the model itself will be poor")
     args = parser.parse_args()
 
@@ -248,6 +271,10 @@ def main() -> None:
 
     # --- audio -> features ---------------------------------------------------
     generate_clips([args.phrase], work / "positive_clips", args.samples, 50)
+    if args.extra_positives:
+        # Straight into the generated pile: same augmentation, same split.
+        copy_clips(Path(args.extra_positives).expanduser(),
+                   work / "positive_clips" / "real")
 
     if args.smoke:
         background, impulses = None, PIPER / "impulses"
@@ -300,6 +327,24 @@ def main() -> None:
             "features_dir": str(negatives / "dinner_party_eval"),
             "sampling_weight": 0.0, "penalty_weight": 1.0, "truth": False,
             "truncation_strategy": "split", "type": "mmap"})
+
+    if args.extra_negatives:
+        # Twice over: as training negatives, and as an ambient set, so the
+        # false-accepts-per-hour table at the end is measured against this
+        # room's own television rather than a stranger's dinner party.
+        house = work / "house_negative_clips"
+        copy_clips(Path(args.extra_negatives).expanduser(), house)
+        build_features(house, work / "features" / "house_negative", plain, {
+            "training": ("train", 1, 10),
+            "validation": ("validation", 1, 10),
+            "testing": ("test", 1, 1),
+            "validation_ambient": ("train", 1, 1),
+            "testing_ambient": ("train", 1, 1),
+        }, split_seed=None)
+        features.append({
+            "features_dir": str(work / "features" / "house_negative"),
+            "sampling_weight": 20.0, "penalty_weight": 1.0, "truth": False,
+            "truncation_strategy": "random", "type": "mmap"})
 
     # --- train ---------------------------------------------------------------
     import yaml
