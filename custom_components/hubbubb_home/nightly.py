@@ -5,11 +5,16 @@ quiet - a television that reports `off` rather than `unavailable` when its
 token dies, a sensor that keeps returning its last value after the battery
 goes. Nothing alerts on those, and they are noticed days later.
 
-Two checks, and they are deliberately the two that survive being moved to
-somebody else's house:
+Three checks. The first two survive being moved to somebody else's house;
+the third is this house's own configuration, and only fires where those files
+exist:
 
   dead   Parked at unavailable/unknown for longer than a few hours.
   quiet  Used to change on most days and now changes on none.
+  drift  Configuration that has to hold a value and no longer does. Ported
+         from the Mac's jarvis-watchdog on 2026-09-04 - it ran the identical
+         dead/quiet thresholds on the same 03:30 schedule, so one house had
+         two sweeps reporting two different numbers.
 
 Aggregation happens in Python rather than SQL because a recorder can be
 SQLite, MariaDB or PostgreSQL, and date bucketing is spelled differently in
@@ -24,12 +29,15 @@ from __future__ import annotations
 
 import fnmatch
 import logging
+import re
 from collections import defaultdict
 from datetime import timedelta
 from typing import Any
 
 from homeassistant.components.recorder import get_instance, history
 from homeassistant.core import CALLBACK_TYPE, HomeAssistant, callback
+from homeassistant.exceptions import HomeAssistantError
+from homeassistant.helpers import device_registry as dr, entity_registry as er
 from homeassistant.helpers.storage import Store
 from homeassistant.util import dt as dt_util
 
@@ -116,12 +124,17 @@ class FindingsReport:
             return "Nothing went quiet overnight."
         dead = sum(1 for f in self.items if f["kind"] == "dead")
         quiet = sum(1 for f in self.items if f["kind"] == "quiet")
+        drift = sum(1 for f in self.items if f["kind"] == "drift")
         parts = []
         if dead:
             parts.append(f"{dead} {'thing' if dead == 1 else 'things'} offline")
         if quiet:
             parts.append(
                 f"{quiet} {'has' if quiet == 1 else 'have'} gone quiet"
+            )
+        if drift:
+            parts.append(
+                f"{drift} configuration {'problem' if drift == 1 else 'problems'}"
             )
         sentence = "Overnight I found " + " and ".join(parts) + "."
         # Anything carried over is the more useful fact: it says nobody has
@@ -142,11 +155,129 @@ def _ignored(entity_id: str, patterns: list[str]) -> bool:
 async def async_sweep(
     hass: HomeAssistant, ignore: list[str] | None = None
 ) -> list[dict]:
-    """Run both checks. Read-only; returns findings worst-first."""
+    """Run all three checks. Returns findings worst-first.
+
+    Read-only except for one repair: a newly paired Hue bulb missing from the
+    all-lights group is added to it, because that failure is silent - "turn
+    off all the lights" leaves the new bulb burning and still says it turned
+    everything off.
+    """
     ignore = ignore or []
     findings = _check_dead(hass, ignore)
     findings.extend(await _check_quiet(hass, ignore))
+    findings.extend(await _check_drift(hass, ignore))
     return findings
+
+
+# The all-lights group's entity list, so a newly paired bulb can be merged in.
+GROUP_ENTITIES = re.compile(
+    r"(unique_id: jarvis_all_lights\n\s*entities:\n)((?:\s*- light\.\S+\n)+)"
+)
+
+
+def group_with(conf: str, missing: list[str]) -> str | None:
+    """configuration.yaml with `missing` merged into the all_lights group.
+
+    None if the entity list is not where we expect. Pure text, so it is
+    testable without a Home Assistant or a reload.
+    """
+    match = GROUP_ENTITIES.search(conf)
+    if not match:
+        return None
+    indent = re.match(r"\s*", match.group(2)).group(0)
+    merged = sorted(
+        set(re.findall(r"- (light\.\S+)", match.group(2))) | set(missing)
+    )
+    block = "".join(f"{indent}- {entity}\n" for entity in merged)
+    return conf[: match.start(2)] + block + conf[match.end(2) :]
+
+
+async def _check_drift(hass: HomeAssistant, ignore: list[str]) -> list[dict]:
+    """Configuration that has to hold a value. Each of these has burned us."""
+    out: list[dict] = []
+
+    # Arlo cameras cannot be read by go2rtc natively; the option is the only
+    # thing keeping live view working.
+    for entry in hass.config_entries.async_entries("eisenberg"):
+        if entry.options.get("ffmpeg_stream"):
+            continue
+        out.append(
+            {
+                "kind": "drift",
+                "entity_id": f"config_entry.{entry.entry_id}",
+                "name": "Eisenberg live stream",
+                "state": "off",
+                "days": 0,
+                "detail": (
+                    "Eisenberg's 'route live stream through ffmpeg' is off. "
+                    "go2rtc cannot read these Arlo cameras natively, so live "
+                    "view will break."
+                ),
+            }
+        )
+
+    # Every Hue bulb belongs in light.all_lights, or "all the lights" quietly
+    # stops meaning all of them.
+    entities = er.async_get(hass)
+    devices = dr.async_get(hass)
+    bulbs = set()
+    for entry in entities.entities.values():
+        if not entry.entity_id.startswith("light.") or entry.platform != "hue":
+            continue
+        device = devices.async_get(entry.device_id) if entry.device_id else None
+        if device and device.model in ("Room", "Zone"):   # containers, not bulbs
+            continue
+        if not _ignored(entry.entity_id, ignore):
+            bulbs.add(entry.entity_id)
+
+    path = hass.config.path("configuration.yaml")
+
+    def _read() -> str:
+        with open(path, encoding="utf-8") as handle:
+            return handle.read()
+
+    try:
+        conf = await hass.async_add_executor_job(_read)
+    except OSError as err:
+        _LOGGER.debug("drift: cannot read configuration.yaml (%s)", err)
+        return out
+
+    missing = sorted(bulb for bulb in bulbs if bulb not in conf)
+    if not missing:
+        return out
+
+    detail = "Hue bulbs missing from light.all_lights: " + ", ".join(missing)
+    fixed = group_with(conf, missing)
+    if fixed is None:
+        detail += " (could not find the group's entity list to repair it)"
+    else:
+        def _write() -> None:
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(fixed)
+
+        try:
+            await hass.async_add_executor_job(_write)
+            await hass.services.async_call(
+                "homeassistant", "reload_all", blocking=False
+            )
+            detail = (
+                "Added " + ", ".join(missing) + " to light.all_lights and "
+                "reloaded - a newly paired Hue bulb was not in the group."
+            )
+        except (OSError, HomeAssistantError) as err:
+            detail += f" (repair failed: {err})"
+
+    out.append(
+        {
+            "kind": "drift",
+            "entity_id": "light.all_lights",
+            "name": "All lights group",
+            "state": "incomplete",
+            "days": 0,
+            "detail": detail,
+        }
+    )
+    return out
 
 
 def _check_dead(hass: HomeAssistant, ignore: list[str]) -> list[dict]:
