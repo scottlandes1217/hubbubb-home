@@ -92,3 +92,8 @@ agent_permission:
     id: { required: true, selector: { text: } }
     mode: { selector: { text: } }
 agent_models:
+run_review:
+  name: Run the nightly review
+  description: >-
+    Review yesterday's coding sessions now instead of waiting for tonight.
+    Needs a companion; it runs the agent there and can take several minutes.

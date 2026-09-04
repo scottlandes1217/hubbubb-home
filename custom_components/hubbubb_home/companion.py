@@ -46,7 +46,11 @@ class CompanionClient:
         return bool(self._url)
 
     async def async_call(
-        self, endpoint: str, payload: dict | None = None, method: str = "POST"
+        self,
+        endpoint: str,
+        payload: dict | None = None,
+        method: str = "POST",
+        timeout: int | None = None,
     ) -> Any:
         if not self._url:
             raise CompanionError(NOT_CONFIGURED)
@@ -54,7 +58,12 @@ class CompanionClient:
         if self._token:
             headers["Authorization"] = f"Bearer {self._token}"
         # Reads are GETs with query parameters, writes are POSTs with a body.
-        kwargs: dict = {"headers": headers, "timeout": _TIMEOUT}
+        # The nightly review runs a coding agent over a day of transcripts;
+        # 90 seconds is right for a keypress and nowhere near enough for that.
+        kwargs: dict = {
+            "headers": headers,
+            "timeout": aiohttp.ClientTimeout(total=timeout) if timeout else _TIMEOUT,
+        }
         if method == "GET":
             kwargs["params"] = {
                 k: str(v) for k, v in (payload or {}).items() if v is not None

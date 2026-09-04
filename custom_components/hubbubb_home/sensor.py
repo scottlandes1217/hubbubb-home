@@ -21,6 +21,7 @@ async def async_setup_entry(
         [
             TimersSensor(entry, runtime),
             FindingsSensor(entry, runtime),
+            ReviewSensor(entry, runtime),
         ]
     )
 
@@ -85,4 +86,41 @@ class FindingsSensor(HubbubbEntity, SensorEntity):
             "findings": report.items,
             "last_run": report.last_run,
             "summary": report.summary,
+        }
+
+
+class ReviewSensor(HubbubbEntity, SensorEntity):
+    """What the nightly review of the code found, and what it staged."""
+
+    _attr_name = "Review"
+    _attr_icon = "mdi:clipboard-text-search-outline"
+
+    def __init__(self, entry: ConfigEntry, runtime) -> None:
+        super().__init__(entry, runtime.name)
+        self._runtime = runtime
+        self._attr_unique_id = f"{entry.entry_id}_review"
+
+    async def async_added_to_hass(self) -> None:
+        self.async_on_remove(
+            self._runtime.review.async_add_listener(self._changed)
+        )
+
+    @callback
+    def _changed(self) -> None:
+        self.async_write_ha_state()
+
+    @property
+    def native_value(self) -> int | None:
+        return self._runtime.review.findings
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        review = self._runtime.review
+        return {
+            "report": review.report,
+            "drafts": review.drafts,
+            "draft_count": len(review.drafts),
+            "last_run": review.last_run,
+            "detail": review.detail,
+            "summary": review.spoken(),
         }

@@ -100,6 +100,10 @@ CONF_QUIET_FINDINGS = "quiet_findings"
 CONF_IGNORE = "ignore"
 CONF_DRIFT_FINDINGS = "drift_findings"
 CONF_DRIFT_REPAIR = "drift_repair"
+CONF_REVIEW_ENABLED = "review_enabled"
+CONF_REVIEW_TIME = "review_time"
+CONF_REVIEW_HOURS = "review_hours"
+CONF_REVIEW_PROJECTS = "review_projects"
 CONF_BRIEFING_TIME = "briefing_time"
 CONF_BRIEFING_ENABLED = "briefing_enabled"
 CONF_BRIEFING_TARGET = "briefing_target"
@@ -115,6 +119,8 @@ DEFAULT_NAME = "Hubbubb"
 # Half three: late enough that the house has settled, early enough that the
 # findings are ready before anyone asks for them.
 DEFAULT_NIGHTLY_TIME = "03:30:00"
+DEFAULT_REVIEW_TIME = "04:00:00"
+DEFAULT_REVIEW_HOURS = 24
 DEFAULT_BRIEFING_TIME = "09:00:00"
 
 TIMER_SLOTS = 5

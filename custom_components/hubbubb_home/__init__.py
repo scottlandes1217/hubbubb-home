@@ -58,6 +58,10 @@ from .const import (
     CONF_NIGHTLY_TIME,
     CONF_DRIFT_FINDINGS,
     CONF_DRIFT_REPAIR,
+    CONF_REVIEW_ENABLED,
+    CONF_REVIEW_HOURS,
+    CONF_REVIEW_PROJECTS,
+    CONF_REVIEW_TIME,
     CONF_QUIET_FINDINGS,
     CONF_PERSON_CALENDARS,
     CONF_PROMPT,
@@ -67,6 +71,8 @@ from .const import (
     DEFAULT_BRIEFING_TIME,
     DEFAULT_NAME,
     DEFAULT_NIGHTLY_TIME,
+    DEFAULT_REVIEW_HOURS,
+    DEFAULT_REVIEW_TIME,
     CONF_ANNOUNCE,
     CONF_NOTIFY,
     CONF_QUIET_END,
@@ -115,6 +121,7 @@ from .speakers import (
     async_register_webhook as _speaker_webhook,
 )
 from .nightly import FindingsReport, async_sweep
+from .review import ReviewReport, async_review
 from .timers import TimerPool
 
 _LOGGER = logging.getLogger(__name__)
@@ -150,6 +157,7 @@ class Runtime:
     memory: Memory
     timers: TimerPool
     findings: FindingsReport
+    review: ReviewReport
     hubbubb: HubbubbClient | None
     companion: CompanionClient
     speakers: SpeakerBook
@@ -194,6 +202,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     findings = FindingsReport(hass)
     await findings.async_load()
+
+    review = ReviewReport(hass)
+    await review.async_load()
 
     hub_conf = entry.data.get(CONF_HUBBUBB) or {}
     hubbubb = None
@@ -255,6 +266,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         memory=memory,
         timers=None,  # set below; the pool needs a callback that needs runtime
         findings=findings,
+        review=review,
         hubbubb=hubbubb,
         companion=companion,
         speakers=speakers,
@@ -539,6 +551,7 @@ SERVICE_SCHEMAS: dict[str, vol.Schema] = {
     ),
     "ask_hubbubb": vol.Schema({vol.Required("request"): str}),
     "run_sweep": vol.Schema({}),
+    "run_review": vol.Schema({}),
     "speak_briefing": vol.Schema(
         {vol.Optional("target"): vol.Any(str, [str])}
     ),
@@ -600,6 +613,26 @@ def _async_register_services(hass: HomeAssistant, runtime: Runtime) -> None:
         await _sweep(runtime)
         return {"findings": runtime.findings.items}
 
+    async def run_review(call: ServiceCall) -> dict:
+        """Review yesterday's work now, rather than waiting for tonight."""
+        raw = runtime.option("overnight", CONF_REVIEW_PROJECTS, "") or ""
+        await async_review(
+            runtime.hass,
+            runtime.companion,
+            runtime.review,
+            hours=int(
+                runtime.option("overnight", CONF_REVIEW_HOURS, DEFAULT_REVIEW_HOURS)
+            ),
+            projects=[
+                p.strip() for p in raw.replace(",", "\n").splitlines() if p.strip()
+            ],
+        )
+        return {
+            "findings": runtime.review.findings,
+            "drafts": len(runtime.review.drafts),
+            "detail": runtime.review.detail,
+        }
+
     async def speak_briefing(call: ServiceCall) -> ServiceResponse:
         text = await _briefing_text(runtime)
         await _announce(runtime, text, call.data.get("target"))
@@ -614,6 +647,7 @@ def _async_register_services(hass: HomeAssistant, runtime: Runtime) -> None:
         "timer_add": timer_add,
         "ask_hubbubb": ask_hubbubb,
         "run_sweep": run_sweep,
+        "run_review": run_review,
         "speak_briefing": speak_briefing,
     }
     for name, handler in handlers.items():
@@ -784,6 +818,34 @@ def _async_schedule(hass: HomeAssistant, runtime: Runtime) -> None:
             )
         )
 
+    # The review runs after the sweep so the morning has both, and so the
+    # brief it sends carries findings the sweep has already recorded.
+    if runtime.option("overnight", CONF_REVIEW_ENABLED, False):
+        hour, minute, second = _hms(
+            runtime.option("overnight", CONF_REVIEW_TIME, DEFAULT_REVIEW_TIME)
+        )
+
+        async def _review(_now) -> None:
+            raw = runtime.option("overnight", CONF_REVIEW_PROJECTS, "") or ""
+            projects = [
+                p.strip() for p in raw.replace(",", "\n").splitlines() if p.strip()
+            ]
+            await async_review(
+                runtime.hass,
+                runtime.companion,
+                runtime.review,
+                hours=int(
+                    runtime.option("overnight", CONF_REVIEW_HOURS, DEFAULT_REVIEW_HOURS)
+                ),
+                projects=projects,
+            )
+
+        runtime.unsubscribe.append(
+            async_track_time_change(
+                hass, _review, hour=hour, minute=minute, second=second
+            )
+        )
+
     if runtime.option("briefing", CONF_BRIEFING_ENABLED, False):
         hour, minute, second = _hms(
             runtime.option("briefing", CONF_BRIEFING_TIME, DEFAULT_BRIEFING_TIME)
@@ -886,6 +948,10 @@ async def _briefing_text(runtime: Runtime) -> str:
             )
 
     parts.append(runtime.findings.spoken(runtime.name))
+    # The review's own line, so the drafts it staged get mentioned. They
+    # existed for four mornings before anything said so.
+    if line := runtime.review.spoken():
+        parts.append(line)
     return " ".join(parts)
 
 

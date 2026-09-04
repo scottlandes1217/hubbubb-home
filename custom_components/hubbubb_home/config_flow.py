@@ -25,6 +25,8 @@ from homeassistant.helpers.selector import (
     BooleanSelector,
     EntitySelector,
     EntitySelectorConfig,
+    NumberSelector,
+    NumberSelectorConfig,
     TextSelector,
     TextSelectorConfig,
     TextSelectorType,
@@ -60,6 +62,10 @@ from .const import (
     CONF_NIGHTLY_TIME,
     CONF_DRIFT_FINDINGS,
     CONF_DRIFT_REPAIR,
+    CONF_REVIEW_ENABLED,
+    CONF_REVIEW_HOURS,
+    CONF_REVIEW_PROJECTS,
+    CONF_REVIEW_TIME,
     CONF_QUIET_FINDINGS,
     CONF_NOTIFY,
     CONF_PROMPT,
@@ -80,6 +86,8 @@ from .const import (
     DEFAULT_BRIEFING_TIME,
     DEFAULT_NAME,
     DEFAULT_NIGHTLY_TIME,
+    DEFAULT_REVIEW_HOURS,
+    DEFAULT_REVIEW_TIME,
     DEFAULT_PROMPT,
     DOMAIN,
     SENTENCE_FILES,
@@ -287,6 +295,20 @@ class HubbubbHomeOptionsFlow(OptionsFlow):
                             vol.Optional(
                                 CONF_DRIFT_REPAIR, default=True
                             ): BooleanSelector(),
+                            vol.Optional(
+                                CONF_REVIEW_ENABLED, default=False
+                            ): BooleanSelector(),
+                            vol.Optional(
+                                CONF_REVIEW_TIME, default=DEFAULT_REVIEW_TIME
+                            ): TimeSelector(),
+                            vol.Optional(
+                                CONF_REVIEW_HOURS, default=DEFAULT_REVIEW_HOURS
+                            ): NumberSelector(
+                                NumberSelectorConfig(min=1, max=168, step=1)
+                            ),
+                            vol.Optional(
+                                CONF_REVIEW_PROJECTS, default=""
+                            ): TextSelector(),
                             vol.Optional(CONF_IGNORE, default=""): TextSelector(
                                 TextSelectorConfig(
                                     type=TextSelectorType.TEXT, multiline=True
