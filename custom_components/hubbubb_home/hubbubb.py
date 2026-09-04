@@ -56,6 +56,17 @@ class HubbubbPending(HubbubbError):
         self.run_id = run_id
 
 
+def origin(url: str) -> str:
+    """Where Hubbubb's OAuth endpoints live: the configured URL's origin.
+
+    The configured URL is the MCP endpoint (…/api/v1/<org>/mcp); /oauth/token
+    has always been reached by taking its scheme and host, and /oauth/authorize
+    sits beside it, so the same rule serves both rather than a second field.
+    """
+    parts = urlsplit(url)
+    return f"{parts.scheme}://{parts.netloc}"
+
+
 class HubbubbClient:
     """Minimal runs-API client for one Hubbubb organisation."""
 
@@ -76,8 +87,7 @@ class HubbubbClient:
         self._runs_url = f"{base}/ai/runs"
         self._id = client_id
         self._secret = client_secret
-        parts = urlsplit(url)
-        self._token_url = f"{parts.scheme}://{parts.netloc}/oauth/token"
+        self._token_url = f"{origin(url)}/oauth/token"
         self._token: str | None = None
         self._expires = 0.0
         self._lock = asyncio.Lock()
@@ -213,6 +223,81 @@ class HubbubbClient:
         if run.get("status") == "failed" or run.get("error"):
             raise HubbubbError(str(run.get("error") or "the Hubbubb run failed"))
         return str(run.get("summary") or "").strip()
+
+
+class HubbubbUserClient(HubbubbClient):
+    """The runs API as one signed-in person, on the token their consent earned.
+
+    The record is read through `load` on every call and written back through
+    `save`, never cached here: a fresh sign-in from the panel replaces the
+    record under a running client, and the next turn simply uses it. The
+    house's OAuth client id and secret only ever appear in the refresh call.
+    """
+
+    def __init__(
+        self,
+        session: aiohttp.ClientSession,
+        url: str,
+        client_id: str,
+        client_secret: str,
+        load: Callable[[], dict | None],
+        save: Callable[[dict], None],
+    ) -> None:
+        super().__init__(session, url, client_id, client_secret)
+        self._load = load
+        self._save = save
+
+    async def _bearer(self, force: bool = False) -> str:
+        async with self._lock:
+            record = dict(self._load() or {})
+            if record.get("needs_reauth") or not record.get("refresh_token"):
+                raise HubbubbError(NEEDS_SIGN_IN)
+            token = record.get("access_token")
+            if not force and token and time.time() < record.get("expires", 0) - _SKEW:
+                return token
+            try:
+                async with self._session.post(
+                    self._token_url,
+                    data={
+                        "grant_type": "refresh_token",
+                        "refresh_token": record["refresh_token"],
+                        "client_id": self._id,
+                        "client_secret": self._secret,
+                    },
+                    timeout=_TIMEOUT,
+                ) as resp:
+                    status = resp.status
+                    data = await resp.json() if status == 200 else None
+            except aiohttp.ClientError as err:
+                # Unreachable is not revoked; the token may be fine tomorrow.
+                raise HubbubbError(f"cannot reach Hubbubb: {err}") from err
+            if status >= 500:
+                raise HubbubbError(f"token endpoint returned {status}")
+            if status != 200:
+                # invalid_grant: the refresh token is spent, expired or
+                # revoked, and no retry will bring it back. Say so once in
+                # the record, so the panel can offer the button and no voice
+                # turn burns a call finding out.
+                self._save({**record, "needs_reauth": True})
+                raise HubbubbError(NEEDS_SIGN_IN)
+            # Rotation: the token just used is dead the moment this one
+            # exists, so it is persisted before anything can fail.
+            self._save(fresh_record(record, data))
+            return data["access_token"]
+
+
+NEEDS_SIGN_IN = "this person needs to sign in to Hubbubb again"
+
+
+def fresh_record(record: dict, grant: dict) -> dict:
+    """The stored record after a token response, identity and all kept."""
+    return {
+        **record,
+        "access_token": grant["access_token"],
+        "refresh_token": grant.get("refresh_token") or record.get("refresh_token"),
+        "expires": time.time() + int(grant.get("expires_in", 3600)),
+        "needs_reauth": False,
+    }
 
 
 def parse_people(text: str) -> dict[str, tuple[str, str]]:

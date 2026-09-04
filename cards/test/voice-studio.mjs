@@ -20,6 +20,8 @@ import {
   meterPct,
   micPlan,
   peopleRows,
+  signedIn,
+  SIGNIN_SECONDS,
   validPhrase,
 } from "../src/hubbubb-voice-studio.js";
 
@@ -48,6 +50,7 @@ assert.equal(audioPath("c 1"), "/api/hubbubb_home/voice/clips/c%201/audio");
 assert.deepEqual(api.links(), ["GET", "/api/hubbubb_home/people/links"]);
 assert.deepEqual(api.link("Scott", "hbbc_x", "s3cret"), ["POST", "/api/hubbubb_home/people/links", { person: "Scott", client_id: "hbbc_x", client_secret: "s3cret" }]);
 assert.deepEqual(api.unlink("Scott Landes"), ["DELETE", "/api/hubbubb_home/people/links/Scott%20Landes"]);
+assert.deepEqual(api.signIn("Scott Landes"), ["GET", "/api/hubbubb_home/oauth/start?person=Scott%20Landes"], "sign-in is minted by the integration, opened by the panel");
 
 // --- error text: the proxy's JSON message wins, then plain text, then the code ---
 assert.equal(errMessage(503, '{"message":"voice service unreachable"}'), "voice service unreachable");
@@ -63,7 +66,7 @@ assert.equal(errMessage(400, "Hubbubb refused these credentials: token endpoint 
   const links = { Scott: { linked: true, client_id_hint: "hbbc_s… (10 characters)" }, Guest: { linked: false } };
   assert.deepEqual(peopleRows(people, links), [
     { name: "Guest", samples: 0, link: { linked: false } },
-    { name: "scott", samples: 4, link: { linked: true, hint: "hbbc_s… (10 characters)", identity: null } },
+    { name: "scott", samples: 4, link: { linked: true, via: "key", hint: "hbbc_s… (10 characters)", identity: null, needsReauth: false } },
     { name: "Vega", samples: 2, link: null },
   ], "case-blind match, map-only people listed, sorted by name");
   assert.deepEqual(peopleRows(people, null), [
@@ -71,15 +74,34 @@ assert.equal(errMessage(400, "Hubbubb refused these credentials: token endpoint 
     { name: "Vega", samples: 2, link: null },
   ], "no Hubbubb: nothing said about links");
   assert.deepEqual(peopleRows(null, null), []);
-  assert.deepEqual(peopleRows({}, { Scott: { linked: true } })[0].link, { linked: true, hint: "", identity: null }, "a hint is never undefined");
+  assert.deepEqual(peopleRows({}, { Scott: { linked: true } })[0].link, { linked: true, via: "key", hint: "", identity: null, needsReauth: false }, "a hint is never undefined; an old server means a pasted key");
+  assert.deepEqual(
+    peopleRows({}, { Scott: { linked: true, via: "signin", identity: "S S, s@x.com", needs_reauth: true } })[0].link,
+    { linked: true, via: "signin", hint: "", identity: "S S, s@x.com", needsReauth: true },
+    "a sign-in carries how, and whether it lapsed",
+  );
   const who = peopleRows({}, { Scott: { linked: true, client_id_hint: "h", identity: "Scott Scott, scott@thehubbubb.com" } })[0].link;
   assert.equal(who.identity, "Scott Scott, scott@thehubbubb.com");
   // What the row says: who the credential is, else the hint, else nothing.
-  assert.equal(linkText(who), "Hubbubb: Scott Scott (scott@thehubbubb.com)");
+  assert.equal(linkText(who), "Hubbubb: Scott Scott (scott@thehubbubb.com) · pasted key");
   assert.equal(linkText({ linked: true, hint: "hbbc_s… (10 characters)", identity: null }), "Hubbubb: linked · hbbc_s… (10 characters)");
-  assert.equal(linkText({ linked: true, hint: "", identity: "Scott Scott" }), "Hubbubb: Scott Scott", "no email: the name alone");
+  assert.equal(linkText({ linked: true, hint: "", identity: "Scott Scott" }), "Hubbubb: Scott Scott", "no email, no via: the name alone");
   assert.equal(linkText({ linked: false }), "Hubbubb: not linked");
   assert.equal(linkText(null), "", "no Hubbubb: nothing said");
+  // How they were linked is on the row: signed in, or a pasted key; a lapsed
+  // sign-in says so instead of pretending.
+  assert.equal(linkText({ linked: true, via: "signin", identity: "Scott Scott, scott@thehubbubb.com", needsReauth: false }), "Hubbubb: Scott Scott (scott@thehubbubb.com) · signed in");
+  assert.equal(linkText({ linked: true, via: "signin", identity: null, hint: "", needsReauth: false }), "Hubbubb: linked · signed in", "a sign-in has no client id to hint at");
+  assert.equal(linkText({ linked: true, via: "signin", identity: "Scott Scott, scott@thehubbubb.com", needsReauth: true }), "Hubbubb: sign-in lapsed, sign in again");
+  assert.equal(linkText({ linked: true, via: "key", identity: "Scott Scott, scott@thehubbubb.com", needsReauth: false }), "Hubbubb: Scott Scott (scott@thehubbubb.com) · pasted key");
+
+  // What the poll after "Sign in with Hubbubb" waits for, on the server's row shape.
+  assert.equal(signedIn({ linked: true, via: "signin", identity: null, needs_reauth: false }), true);
+  assert.equal(signedIn({ linked: true, via: "signin", needs_reauth: true }), false, "the lapsed sign-in that prompted the button");
+  assert.equal(signedIn({ linked: true, via: "key", client_id_hint: "h" }), false, "a pasted key was there before the button was pressed");
+  assert.equal(signedIn({ linked: false }), false);
+  assert.equal(signedIn(undefined), false);
+  assert.equal(SIGNIN_SECONDS, 600, "the poll gives up when the code would have");
 }
 
 // --- filtering and grouping ---

@@ -293,10 +293,15 @@ voice takes the same tap — so a stranger cannot train themselves into
 someone else's profile. The *shared token* closes the plumbing: speaker
 events that do not carry it are dropped.
 
-And people can act as **themselves** in Hubbubb: give each person their own
-client in the Hubbubb options (one line per person,
-`Name: client_id : client_secret` — each client belongs to that person's own
-Hubbubb user). With any line set, voice requests to Hubbubb run only as the
+And people can act as **themselves** in Hubbubb. The easy way: register one
+OAuth client for the house in Hubbubb (redirect URI
+`<your Home Assistant>/api/hubbubb_home/oauth/callback`), put its id and
+secret in the Hubbubb options, and each person presses *Sign in with Hubbubb*
+beside their name in the Voice Studio — their own login is the proof of who
+they are, and the house keeps the token their consent earned. The older way
+still works: a line per person in the same options
+(`Name: client_id : client_secret` — each client belongs to that person's own
+Hubbubb user). With anyone linked either way, voice requests to Hubbubb run only as the
 verified speaker — someone with no linked account gets a polite no rather
 than the shared client, so the CRM's own permissions are the boundary and a
 reply sent by voice is sent as the person who asked. The dashboard's inbox

@@ -29,7 +29,10 @@ from homeassistant.helpers.aiohttp_client import async_get_clientsession
 from .const import (
     CONF_HUBBUBB,
     CONF_HUBBUBB_IDENTITIES,
+    CONF_HUBBUBB_OAUTH_ID,
+    CONF_HUBBUBB_OAUTH_SECRET,
     CONF_HUBBUBB_PEOPLE,
+    CONF_HUBBUBB_TOKENS,
     CONF_HUBBUBB_URL,
     DOMAIN,
 )
@@ -44,9 +47,15 @@ LINKS_URL = f"/api/{DOMAIN}/people/links"
 # pair and the house quietly acts as somebody else. Hubbubb has no sign-in
 # to lean on - client credentials only - so the honest confirmation is to
 # ask its agent who the credential is and put the answer beside the name.
+# One line, no prose. Asked loosely, a capable agent explains itself at
+# length and the answer has to be thrown away; asked this way it answers in
+# the shape the matcher accepts. The email is optional on purpose - the
+# agent cannot always reach it, and the name alone still confirms who.
 _IDENTITY_QUESTION = (
-    "Which Hubbubb user am I authenticated as? Reply with just the user's "
-    "full name and email address, nothing else."
+    "Which Hubbubb user am I authenticated as? Answer on one line, in the "
+    "form 'Full Name, email@address'. If you cannot find the email address, "
+    "answer with the full name alone. No other words, no explanation, no "
+    "apology."
 )
 # Long enough for an agent run that only has to look up its own user, short
 # enough that an administrator is not left staring at "Checking…". The
@@ -56,7 +65,14 @@ _IDENTITY_SECONDS = 10
 # "Full Name, email" and nothing else - what the agent gives when it does as
 # asked. Anything else (an apology, a paragraph, a refusal) is not shown as
 # a person.
+# "Scott Landes, scott@…" is the answer asked for, but a real agent run does
+# not always have the address to hand - the local instance replies with the
+# name alone, in bold, wrapped in an apology about the email. A name is still
+# the thing being confirmed, so take the first line, drop the markdown, and
+# accept a bare name of a few words. Anything longer is the agent thinking
+# aloud, and a person's row must never quote that back as their identity.
 _IDENTITY = re.compile(r"^[^,\n]{1,80}, *[^\s,@]+@[^\s,@]+\.[^\s,@]+$")
+_NAME_ONLY = re.compile(r"^[^\W\d_][\w'\-.]*(?: [^\W\d_][\w'\-.]*){0,3}$")
 
 
 def split_line(line: str) -> tuple[str, str, str] | None:
@@ -116,8 +132,11 @@ def hint(client_id: str) -> str:
 
 def identity_of(answer: object) -> str | None:
     """The agent's answer as a 'Name, email' identity, or None for anything else."""
-    text = " ".join(str(answer or "").split())
-    return text if _IDENTITY.match(text) else None
+    first = str(answer or "").strip().splitlines()[0] if str(answer or "").strip() else ""
+    text = " ".join(first.replace("*", "").replace("`", "").split()).strip(" .")
+    if _IDENTITY.match(text):
+        return text
+    return text if _NAME_ONLY.match(text) else None
 
 
 async def _identity(client: HubbubbClient) -> str | None:
@@ -195,6 +214,8 @@ async def async_links(
     # credential. If the options form swaps Vega's pair for another, the old
     # answer must not be shown against the new one.
     identities = dict(entry.data.get(CONF_HUBBUBB_IDENTITIES) or {})
+    # A person's own sign-in, kept apart from the pasted map (oauth.py).
+    tokens = dict(entry.data.get(CONF_HUBBUBB_TOKENS) or {})
 
     if method == "GET":
         people = {}
@@ -202,13 +223,26 @@ async def async_links(
             if parsed := split_line(line):
                 people[parsed[0]] = {
                     "linked": True,
+                    "via": "key",
                     "client_id_hint": hint(parsed[1]),
                     "identity": identities.get(parsed[1]),
                 }
+        # A sign-in outranks a pasted line for the same name, as it does at
+        # runtime; a lapsed one still shows, flagged, so the row can say why
+        # the house stopped acting as them and offer the button again.
+        for key, record in tokens.items():
+            name = next((n for n in people if _same(n, key)), record.get("person") or key)
+            people[name] = {
+                "linked": True,
+                "via": "signin",
+                "identity": record.get("identity"),
+                "needs_reauth": bool(record.get("needs_reauth")),
+            }
         for name in await _voice_people(hass):
             if not any(_same(name, known) for known in people):
                 people[name] = {"linked": False}
-        return _json({"people": people})
+        signin = bool(hub.get(CONF_HUBBUBB_OAUTH_ID) and hub.get(CONF_HUBBUBB_OAUTH_SECRET))
+        return _json({"people": people, "signin": signin})
 
     if not is_admin:
         return _plain(403, "only an administrator can link people to Hubbubb")
@@ -220,6 +254,7 @@ async def async_links(
                 **entry.data,
                 CONF_HUBBUBB: {**hub, CONF_HUBBUBB_PEOPLE: new_text},
                 CONF_HUBBUBB_IDENTITIES: identities,
+                CONF_HUBBUBB_TOKENS: tokens,
             },
         )
 
@@ -232,6 +267,10 @@ async def async_links(
         if not (person or "").strip():
             return _plain(400, "which person?")
         _forget(person)
+        # Unlinking is unlinking: the sign-in goes with the pasted line, or
+        # the house would go on acting as them on the token.
+        for key in [k for k in tokens if _same(k, person)]:
+            del tokens[key]
         _save(remove_line(text, person))
         return _json({"person": person.strip(), "linked": False})
 

@@ -49,6 +49,8 @@ from .const import (
     CONF_HOUSEHOLD_LIST,
     CONF_HUBBUBB,
     CONF_HUBBUBB_ID,
+    CONF_HUBBUBB_OAUTH_ID,
+    CONF_HUBBUBB_OAUTH_SECRET,
     CONF_HUBBUBB_PEOPLE,
     CONF_HUBBUBB_SECRET,
     CONF_HUBBUBB_URL,
@@ -380,6 +382,11 @@ class HubbubbHomeOptionsFlow(OptionsFlow):
                                     type=TextSelectorType.TEXT, multiline=True
                                 )
                             ),
+                            # The house's OAuth client, for "Sign in with
+                            # Hubbubb" in the Voice Studio. Not checked here:
+                            # there is no grant to try without a person.
+                            vol.Optional(CONF_HUBBUBB_OAUTH_ID): str,
+                            vol.Optional(CONF_HUBBUBB_OAUTH_SECRET): _PASSWORD,
                         }
                     ),
                     {"collapsed": True},

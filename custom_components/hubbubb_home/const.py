@@ -20,6 +20,19 @@ CONF_HUBBUBB_PEOPLE = "people"
 # the people line and not a key inside the hubbubb section: parse_people
 # reads the line and the options form rewrites the section wholesale.
 CONF_HUBBUBB_IDENTITIES = "hubbubb_identities"
+# The house's one OAuth client at Hubbubb, for "Sign in with Hubbubb": an
+# administrator registers it there once, with this Home Assistant's
+# /api/hubbubb_home/oauth/callback as its redirect URI. Blank = the button
+# is not offered and linking is by pasted key only.
+CONF_HUBBUBB_OAUTH_ID = "oauth_client_id"
+CONF_HUBBUBB_OAUTH_SECRET = "oauth_client_secret"
+# {person (lowercased): {"access_token", "refresh_token", "expires",
+# "identity", "needs_reauth"}} - what a person's own sign-in earned. Beside
+# the identities and apart from the people map for the same reason: the map
+# stays a text field that parse_people reads unchanged, and the options form
+# rewrites the hubbubb section wholesale. A consented token outranks a pasted
+# line for the same name.
+CONF_HUBBUBB_TOKENS = "hubbubb_tokens"
 
 CONF_COMPANION = "companion"
 CONF_COMPANION_URL = "companion_url"

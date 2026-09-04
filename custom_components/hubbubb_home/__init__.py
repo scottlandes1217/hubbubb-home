@@ -51,6 +51,7 @@ from .const import (
     CONF_HUBBUBB_ID,
     CONF_HUBBUBB_PEOPLE,
     CONF_HUBBUBB_SECRET,
+    CONF_HUBBUBB_TOKENS,
     CONF_HUBBUBB_URL,
     CONF_IGNORE,
     CONF_NIGHTLY_ENABLED,
@@ -89,7 +90,7 @@ from .const import (
 )
 from . import appletv
 from .approvals import Approvals
-from .hubbubb import HubbubbClient, HubbubbError, parse_people
+from .hubbubb import HubbubbClient, HubbubbError, HubbubbUserClient, parse_people
 from .intents import (
     ALL_INTENTS,
     async_register_all,
@@ -97,6 +98,13 @@ from .intents import (
     parse_calendar_map,
 )
 from .links import PeopleLinksView
+from .oauth import (
+    OAuthCallbackView,
+    OAuthStartView,
+    oauth_client,
+    token_io,
+    tokens_only_change,
+)
 from .llm_api import HubbubbAPI
 from .memory import Memory
 from .speakers import (
@@ -147,6 +155,9 @@ class Runtime:
     # person (lowercased) -> that person's own HubbubbClient. Non-empty means
     # the voice path must act as the verified speaker, never the shared account.
     hubbubb_people: dict = field(default_factory=dict)
+    # The entry as it was set up from, so the reload listener can tell a
+    # rotated token (leave it) from a real change (reload).
+    seen: tuple = ()
     # Set after construction: tools speak through the same announcement policy
     # as the message webhook (quiet hours included) without importing __init__.
     announce_message: Any = None
@@ -217,6 +228,14 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
                 "per-person Hubbubb lines are configured but there is no "
                 "Hubbubb URL; they will be ignored"
             )
+    # A person's own sign-in wins over a pasted line of the same name: the
+    # token is theirs by consent, the line by an administrator's say-so.
+    if oauth := oauth_client(entry):
+        for person in entry.data.get(CONF_HUBBUBB_TOKENS) or {}:
+            hubbubb_people[person.lower()] = HubbubbUserClient(
+                session, hub_conf[CONF_HUBBUBB_URL], oauth[1], oauth[2],
+                *token_io(hass, entry, person),
+            )
 
     voice_conf = entry.options.get(CONF_VOICE) or {}
     speakers = SpeakerBook(
@@ -239,6 +258,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         speakers=speakers,
         approvals=approvals,
         hubbubb_people=hubbubb_people,
+        seen=(dict(entry.data), dict(entry.options)),
     )
 
     async def _timer_finished(timer) -> None:
@@ -278,6 +298,13 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 
 async def _async_reload(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    runtime = hass.data.get(DOMAIN, {}).get(entry.entry_id)
+    if runtime and runtime.seen and runtime.seen[1] == dict(entry.options) and tokens_only_change(
+        runtime.seen[0], dict(entry.data)
+    ):
+        # An hourly token refresh must not cost the house its timers.
+        runtime.seen = (dict(entry.data), runtime.seen[1])
+        return
     await hass.config_entries.async_reload(entry.entry_id)
 
 
@@ -373,6 +400,8 @@ async def _async_serve_cards(hass: HomeAssistant) -> None:
     hass.http.register_view(_CardsView())
     hass.http.register_view(VoiceProxyView(hass))
     hass.http.register_view(PeopleLinksView(hass))
+    hass.http.register_view(OAuthStartView(hass))
+    hass.http.register_view(OAuthCallbackView(hass))
 
     resources = getattr(hass.data.get("lovelace"), "resources", None)
     if resources is None or not hasattr(resources, "async_create_item"):

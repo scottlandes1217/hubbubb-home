@@ -22,6 +22,8 @@ export const API_BASE = "/api/hubbubb_home/voice/";
 /* The integration's own endpoint, not the voice service's: who is linked to
    their own Hubbubb user. Given whole, so _api can tell it from a proxied path. */
 export const LINKS_PATH = "/api/hubbubb_home/people/links";
+/* Sign in with Hubbubb: mints a flow and hands back the URL to open. */
+export const SIGNIN_PATH = "/api/hubbubb_home/oauth/start";
 
 export const KINDS = [
   { id: "wake", name: "Wake word", hint: "the phrase, said the way you say it" },
@@ -58,6 +60,7 @@ export const api = {
   links: () => ["GET", LINKS_PATH],
   link: (person, client_id, client_secret) => ["POST", LINKS_PATH, { person, client_id, client_secret }],
   unlink: (person) => ["DELETE", `${LINKS_PATH}/${enc(person)}`],
+  signIn: (person) => ["GET", `${SIGNIN_PATH}${query({ person })}`],
 };
 
 export const audioPath = (id) => `${API_BASE}clips/${enc(id)}/audio`;
@@ -105,7 +108,9 @@ export function peopleRows(people, links) {
   for (const [name, row] of Object.entries(links || {})) {
     const key = name.toLowerCase();
     const have = rows.get(key) || { name, samples: 0, link: null };
-    have.link = row?.linked ? { linked: true, hint: row.client_id_hint || "", identity: row.identity || null } : { linked: false };
+    have.link = row?.linked
+      ? { linked: true, via: row.via === "signin" ? "signin" : "key", hint: row.client_id_hint || "", identity: row.identity || null, needsReauth: Boolean(row.needs_reauth) }
+      : { linked: false };
     rows.set(key, have);
   }
   return [...rows.values()].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" }));
@@ -118,11 +123,18 @@ export function peopleRows(people, links) {
 export function linkText(link) {
   if (!link) return "";
   if (!link.linked) return "Hubbubb: not linked";
-  if (!link.identity) return `Hubbubb: linked · ${link.hint}`;
+  if (link.needsReauth) return "Hubbubb: sign-in lapsed, sign in again";
+  const how = link.via === "signin" ? " · signed in" : link.via === "key" ? " · pasted key" : "";
+  if (!link.identity) return link.via === "signin" ? `Hubbubb: linked${how}` : `Hubbubb: linked · ${link.hint}`;
   const at = link.identity.lastIndexOf(",");
-  if (at < 0) return `Hubbubb: ${link.identity}`;
-  return `Hubbubb: ${link.identity.slice(0, at).trim()} (${link.identity.slice(at + 1).trim()})`;
+  if (at < 0) return `Hubbubb: ${link.identity}${how}`;
+  return `Hubbubb: ${link.identity.slice(0, at).trim()} (${link.identity.slice(at + 1).trim()})${how}`;
 }
+
+/* Has this person's sign-in landed? What the poll after "Sign in with
+   Hubbubb" waits for: a row that says signed in and is not lapsed - a pasted
+   key already there does not count, nor does the old, expired sign-in. */
+export const signedIn = (row) => Boolean(row?.linked && row.via === "signin" && !row.needs_reauth);
 
 export function labelsOf(clips, kind) {
   const n = new Map();
@@ -297,6 +309,10 @@ export function makePlayer({ fetchBytes, audio, urls = URL, onstate = () => {} }
 
 const POLL_MS = 500;
 const TRAIN_POLL_MS = 60000;
+/* The sign-in poll: a Hubbubb code lives ten minutes, so past that the other
+   window cannot finish and the wait is called off rather than spun forever. */
+const SIGNIN_POLL_MS = 2000;
+export const SIGNIN_SECONDS = 600;
 
 class HubbubbVoiceStudio extends LitElement {
   static build = BUILD;
@@ -319,6 +335,11 @@ class HubbubbVoiceStudio extends LitElement {
     _linkSecret: { state: true },
     _linkErr: { state: true },
     _linkNote: { state: true },
+    _signin: { state: true },
+    _signing: { state: true },
+    _signUrl: { state: true },
+    _signRedirect: { state: true },
+    _signErr: { state: true },
     _train: { state: true },
     _kind: { state: true },
     _label: { state: true },
@@ -352,6 +373,11 @@ class HubbubbVoiceStudio extends LitElement {
     this._linkSecret = "";
     this._linkErr = "";
     this._linkNote = null;
+    this._signin = false;
+    this._signing = "";
+    this._signUrl = "";
+    this._signRedirect = "";
+    this._signErr = "";
     this._train = null;
     this._kind = "wake";
     this._label = "";
@@ -387,6 +413,7 @@ class HubbubbVoiceStudio extends LitElement {
     this._releaseMic(); // the take goes with the page; a stream left open lights the tab forever
     this._stopPolling();
     clearInterval(this._trainTimer);
+    this._cancelSignIn();
     this._trainTimer = null;
     this._player?.dispose();
     this._player = null;
@@ -479,8 +506,10 @@ class HubbubbVoiceStudio extends LitElement {
     try {
       const r = await this._api(api.links());
       this._links = r?.people || {};
+      this._signin = Boolean(r?.signin);
     } catch (e) {
       this._links = null;
+      this._signin = false;
     }
   }
 
@@ -738,6 +767,58 @@ class HubbubbVoiceStudio extends LitElement {
     }
   }
 
+  /* Sign in with Hubbubb. The window is opened before the first await: a
+     browser only lets a click open one, and the click is over by the time
+     the URL arrives. Then poll the links until the row says signed in. */
+  async _signIn(name) {
+    this._cancelSignIn();
+    const win = window.open("about:blank", "_blank");
+    this._signing = name;
+    this._signErr = "";
+    this._signUrl = "";
+    this._linkNote = null;
+    let r;
+    try {
+      r = await this._api(api.signIn(name));
+    } catch (e) {
+      win?.close();
+      this._signing = "";
+      this._signErr = e?.message || String(e);
+      return;
+    }
+    this._signUrl = r?.url || "";
+    this._signRedirect = r?.redirect_uri || "";
+    if (win) win.location = this._signUrl;
+    this._signStarted = Date.now();
+    this._signTimer = setInterval(() => this._checkSignIn(), SIGNIN_POLL_MS);
+  }
+
+  async _checkSignIn() {
+    const name = this._signing;
+    if (!name) return;
+    await this._loadLinks();
+    const row = Object.entries(this._links || {}).find(([k]) => k.toLowerCase() === name.toLowerCase())?.[1];
+    if (signedIn(row)) {
+      this._cancelSignIn();
+      this._linkNote = {
+        person: name,
+        text: row.identity
+          ? `${name} signed in to Hubbubb as ${linkText({ linked: true, identity: row.identity }).slice("Hubbubb: ".length)}.`
+          : `${name} signed in to Hubbubb, but it did not say as whom.`,
+      };
+    } else if (Date.now() - this._signStarted > SIGNIN_SECONDS * 1000) {
+      this._cancelSignIn();
+      this._signErr = `Hubbubb did not come back within ten minutes for ${name}. Press Sign in with Hubbubb to try again.`;
+    }
+  }
+
+  _cancelSignIn() {
+    clearInterval(this._signTimer);
+    this._signTimer = null;
+    this._signing = "";
+    this._signUrl = "";
+  }
+
   async _unlink(name) {
     if (!confirm(`Unlink ${name} from Hubbubb? The house stops acting as them there.`)) return;
     const row = await this._try(() => this._api(api.unlink(name)));
@@ -980,26 +1061,46 @@ class HubbubbVoiceStudio extends LitElement {
      administrators; everyone else sees the state and nothing to press. */
   _renderPerson({ name, samples, link }, admin) {
     const open = admin && this._linking === name;
+    const waiting = admin && this._signing === name;
     const state = linkText(link);
     const note = this._linkNote?.person === name ? this._linkNote.text : "";
+    const signErr = this._signErr && !this._signing && this._signErr.includes(name) ? this._signErr : "";
+    // The button, when the house has an OAuth client: for anyone not signed
+    // in, and again for a sign-in that lapsed. A pasted key can be upgraded.
+    const offerSignIn = admin && link && this._signin && !(link.linked && link.via === "signin" && !link.needsReauth);
     return html`<div class="row">
         <div class="body">
           <div class="text">${name}</div>
           <div class="meta">${samples ? `${samples} sample${samples === 1 ? "" : "s"}` : "no voice samples"}${link ? html` · ${state}` : nothing}</div>
         </div>
-        ${admin && link && !open
-          ? link.linked
-            ? html`<button class="btn" ?disabled=${this._busy} @click=${() => this._unlink(name)}>Unlink</button>`
-            : html`<button class="btn" ?disabled=${this._busy} @click=${() => this._openLink(name)}>Link</button>`
+        ${admin && link && !open && !waiting
+          ? html`${offerSignIn
+                ? html`<button class="btn" ?disabled=${this._busy} @click=${() => this._signIn(name)}>${link.needsReauth ? "Sign in again" : "Sign in with Hubbubb"}</button>`
+                : nothing}
+              ${link.linked
+                ? html`<button class="btn" ?disabled=${this._busy} @click=${() => this._unlink(name)}>Unlink</button>`
+                : html`<button class="btn ${this._signin ? "quiet" : ""}" ?disabled=${this._busy} @click=${() => this._openLink(name)}>${this._signin ? "Paste a key instead" : "Link"}</button>`}`
           : nothing}
         ${samples
           ? html`<button class="btn icon danger" title="Forget" ?disabled=${this._busy} @click=${() => this._deletePerson(name)}>✕</button>`
           : nothing}
       </div>
       ${note ? html`<div class="linkform"><div class="hint">${note}</div></div>` : nothing}
+      ${signErr ? html`<div class="linkform"><div class="warn">${signErr}</div></div>` : nothing}
+      ${waiting
+        ? html`<div class="linkform">
+            <div class="hint">Waiting for ${name} to sign in to Hubbubb in the other window…</div>
+            ${this._signUrl ? html`<div class="hint">If no window opened, <a href=${this._signUrl} target="_blank" rel="noopener">open the Hubbubb sign-in</a>.</div>` : nothing}
+            ${this._signRedirect ? html`<div class="hint">If Hubbubb rejects the redirect address, register <code>${this._signRedirect}</code> on the house's OAuth client.</div>` : nothing}
+            <div class="chips">
+              <button class="btn" @click=${() => this._checkSignIn()}>Check now</button>
+              <button class="btn" @click=${() => this._cancelSignIn()}>Cancel</button>
+            </div>
+          </div>`
+        : nothing}
       ${open
         ? html`<div class="linkform">
-            <div class="hint">${name}'s own Hubbubb API client. The pair is checked against Hubbubb before it is kept; the secret is never shown again.</div>
+            <div class="hint">${name}'s own Hubbubb API client${this._signin ? " - the older way; signing in needs no key" : ""}. The pair is checked against Hubbubb before it is kept; the secret is never shown again.</div>
             <input class="input" placeholder="client id" autocomplete="off" .value=${this._linkId} @input=${(e) => (this._linkId = e.target.value)} />
             <input class="input" type="password" placeholder="client secret" autocomplete="new-password" .value=${this._linkSecret} @input=${(e) => (this._linkSecret = e.target.value)} />
             ${this._linkErr ? html`<div class="warn">${this._linkErr}</div>` : nothing}
@@ -1253,6 +1354,11 @@ class HubbubbVoiceStudio extends LitElement {
     .btn.danger {
       background: rgba(var(--rgb-error-color, 219, 68, 55), 0.12);
       color: var(--error-color, #db4437);
+    }
+    /* The lesser path: there when wanted, not competing with the sign-in. */
+    .btn.quiet {
+      border-color: transparent;
+      color: var(--secondary-text-color);
     }
     .btn.icon {
       min-width: 44px;

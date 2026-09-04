@@ -48,6 +48,7 @@ except ImportError:
         web=types.SimpleNamespace(Request=object),
         ClientTimeout=lambda **k: None,
         ClientError=Exception,
+        ContentTypeError=ValueError,
     )
 
 _stub("homeassistant")
@@ -783,9 +784,10 @@ def test_people_links_endpoint_decisions():
     assert status == 200
     assert listed == {
         "people": {
-            "Scott": {"linked": True, "client_id_hint": "hbbc_s… (10 characters)", "identity": None},
+            "Scott": {"linked": True, "via": "key", "client_id_hint": "hbbc_s… (10 characters)", "identity": None},
             "Vega": {"linked": False},
-        }
+        },
+        "signin": False,
     }
     assert "sekrit" not in json.dumps(listed) and "hbbc_scott" not in json.dumps(listed)
 
@@ -814,6 +816,7 @@ def test_people_links_endpoint_decisions():
         "client_id_hint": "hbbc_v… (9 characters)",
         "identity": "Vega Landes, vega@example.com",
     }
+    assert writes[0].get("hubbubb_tokens") == {}, "the pasted path never invents a token record"
     assert _Verify.made[-1] == ("https://hub.example/api/v1/org/mcp", "hbbc_vega", "right")
     assert len(writes) == 1
     assert writes[0]["assistant_name"] == "Jarvis"
@@ -842,7 +845,8 @@ def test_people_links_endpoint_decisions():
     # The voice service being down only shortens the list; it is not an error.
     down = SpeakerBook(_ProxySession(sys.modules["aiohttp"].ClientError("refused")), "http://mac:10301", "")
     assert call(_hass([entry], down), False, "GET")[1] == {
-        "people": {"Vega": {"linked": True, "client_id_hint": "hbbc_v… (9 characters)", "identity": "Vega Landes, vega@example.com"}}
+        "people": {"Vega": {"linked": True, "via": "key", "client_id_hint": "hbbc_v… (9 characters)", "identity": "Vega Landes, vega@example.com"}},
+        "signin": False,
     }
 
     # The identity is a nicety, never a gate: whatever the ask does - fails,
@@ -876,12 +880,27 @@ def test_people_links_endpoint_decisions():
         "hbbc_other": "Guest Person, guest@example.com",
     }
 
-    # What counts as an identity: one line, a name, a comma, an address.
+    # What counts as an identity: one line naming a person, with or without
+    # their address. A name alone counts because a live run does not always
+    # have the email to hand - measured against the local instance, which
+    # answers with the name in bold and an apology about the address.
     from hubbubb_home.links import identity_of
 
     assert identity_of("Scott Scott, scott@thehubbubb.com") == "Scott Scott, scott@thehubbubb.com"
     assert identity_of("  Scott Scott,scott@thehubbubb.com\n") == "Scott Scott,scott@thehubbubb.com"
-    for junk in ("Scott Scott", "scott@thehubbubb.com", "You are Scott. Email: scott@x.com", "a, b", "x, y@z", None, 3):
+    assert identity_of("Scott Landes") == "Scott Landes"
+    assert identity_of("**Scott Landes**") == "Scott Landes"
+    assert identity_of("Scott Landes\nand some waffle after it") == "Scott Landes"
+    for junk in (
+        "scott@thehubbubb.com",
+        "You are Scott. Email: scott@x.com",
+        "**Scott Landes** - but I cannot retrieve your email address from the tools I have",
+        "I'm sorry, I cannot determine that",
+        "a, b",
+        "x, y@z",
+        None,
+        3,
+    ):
         assert identity_of(junk) is None, junk
 
 
@@ -1548,6 +1567,334 @@ def test_spoken_questions_are_answered_out_loud_whatever_the_toggle():
     # No message is a no-op rather than an empty announcement.
     assert delivery_for({"voice": True}, announcements_on=True, quiet=False) == "nothing"
     assert delivery_for({"message": ""}, announcements_on=True, quiet=False) == "nothing"
+
+
+# --- sign in with Hubbubb: PKCE, state, the two views, tokens and refresh ---
+
+class _TokenResp:
+    """One answer from an OAuth token endpoint."""
+
+    def __init__(self, status, payload):
+        self.status, self._payload = status, payload
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *args):
+        return False
+
+    async def json(self):
+        if self._payload is None:
+            raise ValueError("not json")
+        return self._payload
+
+
+class _TokenSession:
+    """Records every POST, answers from a queue (an Exception is raised)."""
+
+    def __init__(self, *answers):
+        self.answers, self.posts = list(answers), []
+
+    def post(self, url, **kwargs):
+        self.posts.append((url, kwargs))
+        answer = self.answers.pop(0)
+        if isinstance(answer, Exception):
+            raise answer
+        return _TokenResp(*answer)
+
+
+def test_pkce_and_state_are_what_hubbubb_expects():
+    import base64
+    import hashlib
+    import re
+
+    from hubbubb_home import oauth
+
+    verifier, challenge = oauth.pkce()
+    b64url = re.compile(r"^[A-Za-z0-9_-]+$")
+    assert 43 <= len(verifier) <= 128 and b64url.match(verifier), "RFC 7636 verifier"
+    assert len(challenge) == 43 and b64url.match(challenge), "unpadded base64url of a SHA-256"
+    digest = hashlib.sha256(verifier.encode()).digest()
+    assert challenge == base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+    assert oauth.pkce()[0] != verifier, "fresh every time"
+
+    # A state is single-use, and not for keeps.
+    oauth._pending.clear()
+    state, chal = oauth.begin("Scott", "http://ha:8123/api/hubbubb_home/oauth/callback", now=1000.0)
+    assert len(state) >= 40 and b64url.match(state)
+    assert oauth.take("nope", now=1001.0) is None
+    assert oauth.take(None, now=1001.0) is None
+    flow = oauth.take(state, now=1001.0)
+    assert flow["person"] == "Scott" and flow["challenge"] == chal
+    assert flow["redirect_uri"] == "http://ha:8123/api/hubbubb_home/oauth/callback"
+    assert hashlib.sha256(flow["verifier"].encode()).digest() == base64.urlsafe_b64decode(chal + "=")
+    assert oauth.take(state, now=1001.0) is None, "a replay finds nothing"
+    late, _ = oauth.begin("Scott", "r", now=1000.0)
+    assert oauth.take(late, now=1000.0 + oauth.FLOW_SECONDS) is None, "a code lives ten minutes; so does the flow"
+    stale, _ = oauth.begin("Scott", "r", now=1000.0)
+    oauth.begin("Vega", "r", now=1000.0 + oauth.FLOW_SECONDS + 1)
+    assert stale not in oauth._pending, "starting a flow sweeps the dead ones"
+    oauth._pending.clear()
+
+    url = oauth.authorize_url("https://hub.example", "hbbo_house", "http://ha:8123/cb", "st", "ch")
+    assert url == (
+        "https://hub.example/oauth/authorize?response_type=code&client_id=hbbo_house"
+        "&redirect_uri=http%3A%2F%2Fha%3A8123%2Fcb&state=st&code_challenge=ch&code_challenge_method=S256"
+    )
+    assert oauth.redirect_uri("https", "home.example:8123") == "https://home.example:8123/api/hubbubb_home/oauth/callback"
+
+    # What a reload listener may ignore: one existing person's record changing.
+    before = {"hubbubb": {"a": 1}, "hubbubb_tokens": {"scott": {"access_token": "x"}}}
+    assert oauth.tokens_only_change(before, {"hubbubb": {"a": 1}, "hubbubb_tokens": {"scott": {"access_token": "y", "needs_reauth": True}}})
+    assert oauth.tokens_only_change(before, before)
+    assert not oauth.tokens_only_change(before, {"hubbubb": {"a": 1}, "hubbubb_tokens": {}}), "a person leaving reloads"
+    assert not oauth.tokens_only_change(before, {"hubbubb": {"a": 1}, "hubbubb_tokens": {"scott": {}, "vega": {}}}), "a person arriving reloads"
+    assert not oauth.tokens_only_change(before, {"hubbubb": {"a": 2}, "hubbubb_tokens": before["hubbubb_tokens"]}), "anything else reloads"
+    assert oauth.tokens_only_change({"hubbubb": {}}, {"hubbubb": {}, "hubbubb_tokens": {}})
+
+
+def test_sign_in_start_and_callback_decisions():
+    import asyncio
+    import json
+
+    from hubbubb_home import oauth
+    from hubbubb_home.hubbubb import parse_people
+    from hubbubb_home.links import async_links
+    from hubbubb_home.oauth import OAuthCallbackView, OAuthStartView, async_callback, async_start
+
+    assert OAuthStartView.requires_auth is True
+    assert OAuthCallbackView.requires_auth is False, "Hubbubb redirects a browser here; the state is the credential"
+    assert OAuthCallbackView.url == "/api/hubbubb_home/oauth/callback"
+
+    writes = []
+
+    def _hass(entries, session=None):
+        def update(entry, data):
+            writes.append(data)
+            entry.data = data
+
+        return types.SimpleNamespace(
+            config_entries=types.SimpleNamespace(async_entries=lambda d: entries, async_update_entry=update),
+            data={},
+            session=session,
+        )
+
+    oauth.async_get_clientsession = lambda hass: hass.session
+    identity_asked = []
+
+    async def _identity(client):
+        identity_asked.append(client._load())
+        return "Scott Scott, scott@thehubbubb.com"
+
+    oauth._identity = _identity
+
+    def start(hass, user, admin, person, scheme="http", host="ha.local:8123"):
+        status, ctype, payload = asyncio.run(async_start(hass, user, admin, person, scheme, host))
+        return status, (json.loads(payload) if "json" in ctype else payload.decode())
+
+    def callback(hass, **query):
+        status, ctype, payload = asyncio.run(async_callback(hass, query))
+        assert ctype.startswith("text/html")
+        return status, payload.decode()
+
+    people_text = "Scott: hbbc_scott : sekrit\nVega : hbbc_vega:with:colons\n"
+    entry = types.SimpleNamespace(
+        data={"hubbubb": {"hubbubb_url": "https://hub.example/api/v1/1/mcp", "hubbubb_client_id": "house", "hubbubb_client_secret": "hs", "people": people_text}},
+        options={},
+    )
+    # No Hubbubb at all, then Hubbubb without an OAuth client: the panel gets
+    # a refusal it can hide the button on, and nothing is minted.
+    assert start(_hass([]), "Scott", True, "Scott")[0] == 503
+    status, body = start(_hass([entry]), "Scott", True, "Scott")
+    assert status == 503 and "OAuth client id" in body["detail"]
+    assert oauth._pending == {}
+    assert asyncio.run(async_links(_hass([entry]), False, "GET"))[2].endswith(b'"signin": false}')
+
+    entry.data["hubbubb"].update({"oauth_client_id": "hbbo_house", "oauth_client_secret": "hbbo_secret"})
+    hass = _hass([entry])
+    assert asyncio.run(async_links(hass, False, "GET"))[2].endswith(b'"signin": true}')
+
+    # Who may start a flow: an administrator for anyone, anyone for themselves.
+    assert start(hass, "Vega", False, "Scott")[0] == 403
+    assert start(hass, None, False, "Scott")[0] == 403
+    assert start(hass, "Scott", True, "")[0] == 400
+    assert start(hass, "Scott", True, "x" * 81)[0] == 400
+    status, own = start(hass, "scott", False, " Scott ")
+    assert status == 200 and own["person"] == "Scott"
+    status, body = start(hass, "Admin", True, "Vega", scheme="https", host="home.example")
+    assert status == 200
+    assert body["redirect_uri"] == "https://home.example/api/hubbubb_home/oauth/callback"
+    assert body["url"].startswith("https://hub.example/oauth/authorize?response_type=code&client_id=hbbo_house&redirect_uri=https%3A%2F%2Fhome.example%2Fapi%2Fhubbubb_home%2Foauth%2Fcallback&state=")
+    assert "code_challenge_method=S256" in body["url"]
+    assert "hbbo_secret" not in body["url"], "the secret never leaves the server"
+    [state] = [s for s, f in oauth._pending.items() if f["person"] == "Vega"]
+    verifier = oauth._pending[state]["verifier"]
+    assert "state" not in body, "the state travels only through Hubbubb"
+
+    # A callback nobody asked for, or asked for twice, links nobody.
+    status, page = callback(hass, code="hbba_x", state="forged")
+    assert status == 400 and "not one this house asked for" in page and writes == []
+    status, page = callback(hass, state=state, error="access_denied")
+    assert status == 200 and "was declined" in page and "Nothing was linked" in page
+    assert writes == [] and oauth.take(state) is None, "a denial spends the state too"
+
+    # The real thing: code for tokens, then who, then kept beside the map.
+    oauth._pending.clear()
+    status, body = start(hass, "Admin", True, "Vega")
+    [state] = list(oauth._pending)
+    verifier = oauth._pending[state]["verifier"]
+    hass.session = _TokenSession((200, {"access_token": "hbbt_1", "token_type": "Bearer", "expires_in": 3600, "refresh_token": "hbbr_1", "scope": "member"}))
+    status, page = callback(hass, code="hbba_code", state=state)
+    assert status == 200, page
+    assert "Signed in" in page and "Vega" in page and "Scott Scott (scott@thehubbubb.com)" not in page
+    assert "Scott Scott, scott@thehubbubb.com" in page and "close this window" in page and "window.close()" in page
+    [(url, kwargs)] = hass.session.posts
+    assert url == "https://hub.example/oauth/token"
+    assert kwargs["data"] == {
+        "grant_type": "authorization_code",
+        "code": "hbba_code",
+        "redirect_uri": "http://ha.local:8123/api/hubbubb_home/oauth/callback",
+        "code_verifier": verifier,
+        "client_id": "hbbo_house",
+        "client_secret": "hbbo_secret",
+    }
+    assert identity_asked[-1]["access_token"] == "hbbt_1", "who-am-I is asked on the new token"
+    assert len(writes) == 1
+    record = writes[0]["hubbubb_tokens"]["vega"]
+    assert record["person"] == "Vega" and record["access_token"] == "hbbt_1" and record["refresh_token"] == "hbbr_1"
+    assert record["identity"] == "Scott Scott, scott@thehubbubb.com" and record["needs_reauth"] is False
+    assert record["expires"] > _time_now() + 3000
+    # The map is untouched, byte for byte, and parses as it always did.
+    assert writes[0]["hubbubb"]["people"] == people_text
+    assert parse_people(writes[0]["hubbubb"]["people"]) == {"scott": ("hbbc_scott", "sekrit"), "vega": ("hbbc_vega", "with:colons")}
+    assert "hbbt_1" not in page and "hbbr_1" not in page and "hbba_code" not in page
+    assert callback(hass, code="hbba_code", state=state)[0] == 400, "a replayed callback is a stranger"
+
+    # The panel now sees Vega as signed in - over her pasted line - and never a token.
+    status, ctype, payload = asyncio.run(async_links(hass, False, "GET"))
+    listed = json.loads(payload)
+    assert listed["people"]["Vega"] == {"linked": True, "via": "signin", "identity": "Scott Scott, scott@thehubbubb.com", "needs_reauth": False}
+    assert listed["people"]["Scott"]["via"] == "key"
+    assert "hbbt_1" not in payload.decode() and "hbbr_1" not in payload.decode()
+
+    # Hubbubb refusing the exchange, or being away, links nobody and says so.
+    for answer, status_wanted, words in (
+        ((400, {"error": "invalid_grant"}), 400, "invalid_grant"),
+        ((502, None), 400, "502"),
+        (sys.modules["aiohttp"].ClientError("refused"), 502, "could not be reached"),
+    ):
+        start(hass, "Admin", True, "Guest")
+        [state] = list(oauth._pending)
+        hass.session = _TokenSession(answer)
+        status, page = callback(hass, code="hbba_bad", state=state)
+        assert status == status_wanted and words in page and "Nothing was linked" in page, (answer, page)
+    assert len(writes) == 1
+
+    # A person's name goes on the page as text, never as markup.
+    start(hass, "Admin", True, "<b>Eve</b>")
+    [state] = list(oauth._pending)
+    hass.session = _TokenSession((200, {"access_token": "t", "expires_in": 60, "refresh_token": "r"}))
+    assert "&lt;b&gt;Eve&lt;/b&gt;" in callback(hass, code="c", state=state)[1]
+    writes.clear()
+
+    # Unlinking a signed-in person takes the token record with the line.
+    status, ctype, payload = asyncio.run(async_links(hass, True, "DELETE", "vega"))
+    assert status == 200
+    assert "vega" not in writes[-1]["hubbubb_tokens"] and "<b>eve</b>" in writes[-1]["hubbubb_tokens"]
+    assert writes[-1]["hubbubb"]["people"] == "Scott: hbbc_scott : sekrit\n"
+    oauth._pending.clear()
+
+
+def _time_now():
+    import time
+
+    return time.time()
+
+
+def test_user_client_refreshes_rotates_and_marks_reauth():
+    import asyncio
+
+    from hubbubb_home.hubbubb import NEEDS_SIGN_IN, HubbubbError, HubbubbUserClient
+    from hubbubb_home.oauth import token_io
+
+    saved = []
+    record = {"person": "Scott", "access_token": "old", "refresh_token": "hbbr_1", "expires": _time_now() + 3600, "identity": "S, s@x.com", "needs_reauth": False}
+
+    def make(session, rec=None):
+        rec = rec if rec is not None else record
+        return HubbubbUserClient(session, "https://hub.example/api/v1/1/mcp", "hbbo_house", "hbbo_secret", lambda: rec, saved.append)
+
+    # A live token is used as it is; nothing is posted.
+    session = _TokenSession()
+    assert asyncio.run(make(session)._bearer()) == "old" and session.posts == [] and saved == []
+
+    # An expiring one is refreshed, and the rotated refresh token is kept at
+    # once - the old one is dead the moment the new one exists.
+    stale = {**record, "expires": _time_now() + 10}
+    session = _TokenSession((200, {"access_token": "hbbt_2", "refresh_token": "hbbr_2", "expires_in": 3600, "token_type": "Bearer", "scope": "member"}))
+    assert asyncio.run(make(session, stale)._bearer()) == "hbbt_2"
+    [(url, kwargs)] = session.posts
+    assert url == "https://hub.example/oauth/token"
+    assert kwargs["data"] == {"grant_type": "refresh_token", "refresh_token": "hbbr_1", "client_id": "hbbo_house", "client_secret": "hbbo_secret"}
+    assert len(saved) == 1
+    assert saved[0]["refresh_token"] == "hbbr_2" and saved[0]["access_token"] == "hbbt_2"
+    assert saved[0]["identity"] == "S, s@x.com" and saved[0]["person"] == "Scott", "the rest of the record survives"
+    assert saved[0]["needs_reauth"] is False and saved[0]["expires"] > _time_now() + 3000
+    # A 401 mid-request forces a refresh even on a token that looked fine.
+    session = _TokenSession((200, {"access_token": "hbbt_3", "refresh_token": "hbbr_3", "expires_in": 3600}))
+    assert asyncio.run(make(session)._bearer(force=True)) == "hbbt_3"
+
+    # A dead refresh token: marked, said, not raised as a crash - and not
+    # tried again until somebody signs in.
+    session = _TokenSession((400, {"error": "invalid_grant"}))
+    try:
+        asyncio.run(make(session, stale)._bearer())
+    except HubbubbError as err:
+        assert str(err) == NEEDS_SIGN_IN
+    else:
+        raise AssertionError("a dead token must be a speakable error")
+    assert saved[-1]["needs_reauth"] is True and saved[-1]["refresh_token"] == "hbbr_1"
+    marked = saved[-1]
+    session = _TokenSession()
+    try:
+        asyncio.run(make(session, marked)._bearer())
+    except HubbubbError as err:
+        assert str(err) == NEEDS_SIGN_IN and session.posts == []
+    else:
+        raise AssertionError()
+    # Hubbubb being down or broken is not a revocation: nothing is marked.
+    n = len(saved)
+    for answer in ((503, None), sys.modules["aiohttp"].ClientError("refused")):
+        session = _TokenSession(answer)
+        try:
+            asyncio.run(make(session, stale)._bearer())
+        except HubbubbError as err:
+            assert NEEDS_SIGN_IN not in str(err), answer
+        else:
+            raise AssertionError()
+    assert len(saved) == n
+    # No record at all (unlinked under a running client) is the same answer.
+    try:
+        asyncio.run(make(_TokenSession(), {})._bearer())
+    except HubbubbError as err:
+        assert str(err) == NEEDS_SIGN_IN
+
+    # token_io reads the entry live and writes one person's record back with
+    # everything else in the entry intact.
+    entry = types.SimpleNamespace(data={"hubbubb": {"people": "Scott: a : b\n"}, "hubbubb_tokens": {"scott": {"access_token": "x"}, "vega": {"access_token": "v"}}})
+    writes = []
+
+    def update(e, data):
+        writes.append(data)
+        e.data = data
+
+    hass = types.SimpleNamespace(config_entries=types.SimpleNamespace(async_update_entry=update))
+    load, save = token_io(hass, entry, "scott")
+    assert load() == {"access_token": "x"}
+    save({"access_token": "y"})
+    assert load() == {"access_token": "y"}
+    assert writes[-1] == {"hubbubb": {"people": "Scott: a : b\n"}, "hubbubb_tokens": {"scott": {"access_token": "y"}, "vega": {"access_token": "v"}}}
+    assert token_io(hass, entry, "nobody")[0]() is None
 
 
 if __name__ == "__main__":

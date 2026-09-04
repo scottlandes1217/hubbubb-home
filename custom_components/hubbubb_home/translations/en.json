@@ -141,10 +141,13 @@
               "hubbubb_url": "MCP endpoint",
               "hubbubb_client_id": "Client ID",
               "hubbubb_client_secret": "Client secret",
-              "people": "Per-person clients"
+              "people": "Per-person clients",
+              "oauth_client_id": "OAuth client ID (Sign in with Hubbubb)",
+              "oauth_client_secret": "OAuth client secret"
             },
             "data_description": {
-              "people": "One line per person: Name: client_id : client_secret. Each maps to that person's own Hubbubb user; when any line is set, voice requests run as the verified speaker and never as the shared client."
+              "people": "One line per person: Name: client_id : client_secret. Each maps to that person's own Hubbubb user; when any line is set, voice requests run as the verified speaker and never as the shared client.",
+              "oauth_client_id": "One OAuth client for the whole house, registered by an administrator in Hubbubb with this Home Assistant's /api/hubbubb_home/oauth/callback as a redirect URI (the Voice Studio shows the exact address). With it set, people link themselves by signing in to Hubbubb from the Voice Studio instead of pasting a key."
             }
           },
           "companion": {
