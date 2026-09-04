@@ -98,6 +98,8 @@ CONF_NIGHTLY_ENABLED = "nightly_enabled"
 # find "changed most days, now doesn't" more noise than signal.
 CONF_QUIET_FINDINGS = "quiet_findings"
 CONF_IGNORE = "ignore"
+CONF_DRIFT_FINDINGS = "drift_findings"
+CONF_DRIFT_REPAIR = "drift_repair"
 CONF_BRIEFING_TIME = "briefing_time"
 CONF_BRIEFING_ENABLED = "briefing_enabled"
 CONF_BRIEFING_TARGET = "briefing_target"

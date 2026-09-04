@@ -84,10 +84,14 @@
               "nightly_enabled": "Run the overnight sweep",
               "nightly_time": "Time",
               "ignore": "Ignore these (one entity ID or pattern per line)",
-              "quiet_findings": "Report devices that go quiet"
+              "quiet_findings": "Report devices that go quiet",
+              "drift_findings": "Check the configuration too",
+              "drift_repair": "Repair the all-lights group automatically"
             },
             "data_description": {
-              "quiet_findings": "Off: only devices stuck unavailable or unknown are reported; the went-quiet-versus-its-habits detector is muted."
+              "quiet_findings": "Off: only devices stuck unavailable or unknown are reported; the went-quiet-versus-its-habits detector is muted.",
+              "drift_findings": "Also check settings that have to hold a value: the Arlo cameras' ffmpeg option, and whether every Hue bulb is in the all-lights group.",
+              "drift_repair": "Add a newly paired Hue bulb to the group and reload. This writes to configuration.yaml. Turn it off to be told instead of fixed."
             }
           },
           "briefing": {

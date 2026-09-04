@@ -56,6 +56,8 @@ from .const import (
     CONF_IGNORE,
     CONF_NIGHTLY_ENABLED,
     CONF_NIGHTLY_TIME,
+    CONF_DRIFT_FINDINGS,
+    CONF_DRIFT_REPAIR,
     CONF_QUIET_FINDINGS,
     CONF_PERSON_CALENDARS,
     CONF_PROMPT,
@@ -821,7 +823,12 @@ async def _sweep(runtime: Runtime) -> None:
     """Look the house over and record what it found. Changes nothing."""
     raw = runtime.option("overnight", CONF_IGNORE, "") or ""
     ignore = [line.strip() for line in raw.replace(",", "\n").splitlines() if line.strip()]
-    findings = await async_sweep(runtime.hass, ignore)
+    findings = await async_sweep(
+        runtime.hass,
+        ignore,
+        drift=runtime.option("overnight", CONF_DRIFT_FINDINGS, True),
+        repair=runtime.option("overnight", CONF_DRIFT_REPAIR, True),
+    )
     if not runtime.option("overnight", CONF_QUIET_FINDINGS, True):
         findings = [f for f in findings if f.get("kind") != "quiet"]
     await runtime.findings.async_update(findings)

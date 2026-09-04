@@ -58,6 +58,8 @@ from .const import (
     CONF_PERSON_LISTS,
     CONF_NIGHTLY_ENABLED,
     CONF_NIGHTLY_TIME,
+    CONF_DRIFT_FINDINGS,
+    CONF_DRIFT_REPAIR,
     CONF_QUIET_FINDINGS,
     CONF_NOTIFY,
     CONF_PROMPT,
@@ -278,6 +280,12 @@ class HubbubbHomeOptionsFlow(OptionsFlow):
                             ): TimeSelector(),
                             vol.Optional(
                                 CONF_QUIET_FINDINGS, default=True
+                            ): BooleanSelector(),
+                            vol.Optional(
+                                CONF_DRIFT_FINDINGS, default=True
+                            ): BooleanSelector(),
+                            vol.Optional(
+                                CONF_DRIFT_REPAIR, default=True
                             ): BooleanSelector(),
                             vol.Optional(CONF_IGNORE, default=""): TextSelector(
                                 TextSelectorConfig(

@@ -153,7 +153,10 @@ def _ignored(entity_id: str, patterns: list[str]) -> bool:
 
 
 async def async_sweep(
-    hass: HomeAssistant, ignore: list[str] | None = None
+    hass: HomeAssistant,
+    ignore: list[str] | None = None,
+    drift: bool = True,
+    repair: bool = True,
 ) -> list[dict]:
     """Run all three checks. Returns findings worst-first.
 
@@ -165,7 +168,8 @@ async def async_sweep(
     ignore = ignore or []
     findings = _check_dead(hass, ignore)
     findings.extend(await _check_quiet(hass, ignore))
-    findings.extend(await _check_drift(hass, ignore))
+    if drift:
+        findings.extend(await _check_drift(hass, ignore, repair))
     return findings
 
 
@@ -192,8 +196,14 @@ def group_with(conf: str, missing: list[str]) -> str | None:
     return conf[: match.start(2)] + block + conf[match.end(2) :]
 
 
-async def _check_drift(hass: HomeAssistant, ignore: list[str]) -> list[dict]:
-    """Configuration that has to hold a value. Each of these has burned us."""
+async def _check_drift(
+    hass: HomeAssistant, ignore: list[str], repair: bool = True
+) -> list[dict]:
+    """Configuration that has to hold a value. Each of these has burned us.
+
+    `repair` is the only thing in this module that writes to the config
+    directory, so it is a setting rather than an assumption.
+    """
     out: list[dict] = []
 
     # Arlo cameras cannot be read by go2rtc natively; the option is the only
@@ -247,10 +257,12 @@ async def _check_drift(hass: HomeAssistant, ignore: list[str]) -> list[dict]:
         return out
 
     detail = "Hue bulbs missing from light.all_lights: " + ", ".join(missing)
-    fixed = group_with(conf, missing)
-    if fixed is None:
+    fixed = group_with(conf, missing) if repair else None
+    if not repair:
+        detail += " (repair is switched off)"
+    if fixed is None and repair:
         detail += " (could not find the group's entity list to repair it)"
-    else:
+    elif fixed is not None:
         def _write() -> None:
             with open(path, "w", encoding="utf-8") as handle:
                 handle.write(fixed)
