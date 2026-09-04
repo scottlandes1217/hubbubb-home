@@ -41,10 +41,44 @@ Hubbubb Home exposes each of these as a service that returns
 | `hubbubb_home.agent_upload` | `POST` | `/upload` | `name`, `data` (base64) |
 | `hubbubb_home.agent_key` | `POST` | `/key` | `key` |
 | `hubbubb_home.agent_kill` | `POST` | `/kill` | `window` |
+| — | `POST` | `/review` | `brief`, `hours`, `projects` |
 
 Answer with JSON. A non-2xx status, or a body carrying `{"ok": false,
 "detail": "..."}`, is surfaced to the card as an error rather than a blank
 screen. Anything that is not JSON comes back as `{"content": "<the body>"}`.
+
+## The nightly review
+
+`/review` is the one endpoint Hubbubb Home calls on a schedule rather than
+because somebody tapped something. It exists because two things live on the
+developer's machine and cannot be moved: the transcripts of your coding
+sessions, and the agent CLI itself.
+
+Everything else about the review belongs in Home Assistant - when it runs,
+whether it runs, what the model is asked, what is kept, what is spoken. So
+the request carries the whole brief, including the house inventory, and the
+companion adds only what it alone can supply:
+
+    POST /review
+    {"brief": "<task, rules and inventory>", "hours": 24,
+     "projects": ["jarvis", "claude-hooks"]}
+
+    -> {"ok": true, "detail": "ok", "report": "<the reply>",
+        "digest_chars": 11369}
+
+The companion appends `--- digest of the last N hours ---` and the digest to
+the brief, runs it through the agent, and returns the reply verbatim. It does
+not parse the report: staging drafts, counting findings and storing history
+are Home Assistant's job, so changing any of that is a Hubbubb Home update
+rather than a companion one.
+
+`projects` filters which transcript folders are read; omit it for all of them.
+Lines that look like pasted credentials are dropped from the digest, and the
+count of dropped lines is reported in it.
+
+Answer `{"ok": false, "detail": "..."}` if there is no agent CLI to run - the
+review is then recorded as skipped, with the reason, rather than as a night
+with no findings.
 
 ## Projects
 

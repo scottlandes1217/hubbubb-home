@@ -10,6 +10,8 @@ Binds to the LAN so Home Assistant can reach it; every request must carry the
 token, and only private-network clients are accepted.
 """
 import base64
+import datetime
+import glob
 import importlib.util
 import ipaddress
 import json
@@ -17,7 +19,6 @@ import os
 import plistlib
 import re
 import secrets
-import sqlite3
 import subprocess
 import sys
 import time
@@ -28,7 +29,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 HOST = os.environ.get("CLAUDE_VOICE_HOST", "0.0.0.0")
 PORT = int(os.environ.get("CLAUDE_VOICE_PORT", "8787"))
 TMUX = "/opt/homebrew/bin/tmux"
-PASTE_BUFFER = "companion-prompt"  # named, so we never clobber the user's tmux buffer 0
+PASTE_BUFFER = "jarvis-prompt"  # named, so we never clobber the user's tmux buffer 0
 
 # Which tmux session dictated prompts go to. Sessions run side by side; this
 # just names the one currently being spoken to.
@@ -82,7 +83,7 @@ UPLOAD_KEEP = 40
 # whoever runs osascript. Wrapping the script in an osacompile'd .app for a
 # friendlier permission name was tried and abandoned - ad-hoc signatures would
 # not hold a TCC grant.
-MIRROR_SCRIPT = os.path.expanduser("~/.claude/hooks/screen-mirror.applescript")
+MIRROR_SCRIPT = os.path.expanduser("~/.claude/hooks/jarvis-screen-mirror.applescript")
 MIRROR_DEFAULT_DEVICE = "Living Room"  # the living room Apple TV's AirPlay name
 MIRROR_TIMEOUT = 45
 
@@ -515,6 +516,7 @@ def collect_status():
             "target": w["id"] == target,
             "modes": modes_for(w["id"], tree, w["pid"]),
             "model": session_model(w["id"]),
+            "owner": session_owner(w["id"]),
         })
     # Most recently active first. Labels were numbered in window order above,
     # so a session keeps its name no matter where sorting puts it.
@@ -1302,7 +1304,7 @@ def open_terminal_for(session):
         path = os.path.join(ATTACH_DIR, f"{session}.terminal")
         with open(path, "wb") as handle:
             plistlib.dump({
-                "name": f"Voice {session}",
+                "name": f"Jarvis {session}",
                 "type": "Window Settings",
                 "CommandString": f"{TMUX} attach -t {session}",
                 "RunCommandAsShell": True,
@@ -1500,7 +1502,7 @@ def start_and_send(project, text):
     if not ok:
         return False, f"Started a new {name} session but could not send it. {detail}"
     write_ask_target(created, path)
-    # Spoken (or narrated by the assistant) the moment the handoff lands,
+    # Spoken (or narrated by the Jarvis agent) the moment the handoff lands,
     # so it must promise the follow-up: the answer arrives by itself through
     # the Stop hook, and "started a session, no response yet" invites the
     # agent to tell the user to check back.
@@ -1582,6 +1584,7 @@ def deliver(text, session, ask=False):
     time.sleep(0.4)
     subprocess.run([TMUX, "send-keys", "-t", session, "Enter"], check=True)
     mark_voice_prompt(session, ask=ask)
+    tag_owner(session)
     return True, "sent"
 
 
@@ -1631,30 +1634,116 @@ def switch_session(project):
     return True, f"You are now talking to {name}.{extra}"
 
 
+# --- Who is speaking ---------------------------------------------------------
+# The voice service (companion/voice-service in hubbubb-home, same Mac) writes
+# its verdict on every utterance to last.json and takes enrollment labels on
+# its admin port. This end only ever reads the file and forwards labels.
+SPEAKER_STATE = os.path.expanduser("~/.hubbubb-voice/last.json")
+VOICE_ADMIN = "http://127.0.0.1:10301"
+OWNERS_PATH = os.path.expanduser("~/.claude/hooks/.session-owners.json")
+DEFAULT_OWNER = "Scott"
+# An utterance verdict older than this says nothing about who is talking now.
+SPEAKER_FRESH = 120
+
+
+def speaker_guess():
+    """(person, confidence) from the voice service's last utterance, or (None, 0)."""
+    try:
+        with open(SPEAKER_STATE) as handle:
+            data = json.load(handle)
+        if time.time() - float(data.get("ts", 0)) > SPEAKER_FRESH:
+            return None, 0.0
+        return data.get("person"), float(data.get("confidence") or 0)
+    except Exception:
+        return None, 0.0
+
+
+def current_speaker():
+    """Best name for who is talking right now; the house default when unknown."""
+    person, _ = speaker_guess()
+    return person or DEFAULT_OWNER
+
+
+def label_speaker(name):
+    """Tell the voice service the last utterance belonged to `name`."""
+    body = json.dumps({"person": name}).encode()
+    headers = {"Content-Type": "application/json"}
+    try:
+        headers["X-Voice-Service-Token"] = open(
+            os.path.expanduser("~/.hubbubb-voice/token")).read().strip()
+    except OSError:
+        pass  # an old service without a token still accepts the call
+    request = urllib.request.Request(
+        f"{VOICE_ADMIN}/label", data=body, headers=headers, method="POST")
+    with urllib.request.urlopen(request, timeout=5):
+        pass
+
+
+# Enrollment approvals: saying "this is Scott" trains Scott's voice profile,
+# so the claim is confirmed on Scott's computer (this Mac) first - a spoken
+# assertion alone must not be able to poison a profile. One approval covers
+# ten minutes, so a round of enrollment sentences is one dialog, not five.
+# ponytail: single shared window, per-person windows when a second person
+# actually enrolls here.
+APPROVAL_WINDOW = 600
+_approval = {"name": "", "at": 0.0}
+
+
+def enrollment_approved(name):
+    if _approval["name"] == name and time.time() - _approval["at"] < APPROVAL_WINDOW:
+        return True
+    try:
+        run = subprocess.run(
+            ["/usr/bin/osascript", "-e",
+             'display dialog "Enroll the voice that just spoke as %s?" '
+             'with title "Jarvis voice enrollment" '
+             'buttons {"Deny", "Approve"} default button "Approve" '
+             'giving up after 30' % name.replace('"', "")],
+            capture_output=True, text=True, timeout=40)
+    except Exception:
+        return False
+    approved = ("Approve" in run.stdout and "gave up:true" not in run.stdout
+                and run.returncode == 0)
+    if approved:
+        _approval.update(name=name, at=time.time())
+    return approved
+
+
+def tag_owner(session):
+    """Record who a session belongs to: first voice contact claims it."""
+    try:
+        try:
+            with open(OWNERS_PATH) as handle:
+                owners = json.load(handle)
+        except Exception:
+            owners = {}
+        entry = owners.get(session) or {"owner": current_speaker()}
+        entry["last"] = current_speaker()
+        entry["at"] = time.time()
+        owners[session] = entry
+        if len(owners) > 50:  # windows come and go; keep the newest
+            for stale in sorted(owners, key=lambda s: owners[s].get("at", 0))[:-50]:
+                del owners[stale]
+        with open(OWNERS_PATH, "w") as handle:
+            json.dump(owners, handle)
+    except Exception:
+        pass  # attribution is a convenience; never fail a send for it
+
+
+def session_owner(session):
+    try:
+        with open(OWNERS_PATH) as handle:
+            return (json.load(handle).get(session) or {}).get("owner") or ""
+    except Exception:
+        return ""
+
+
 # --- House memory ------------------------------------------------------------
-# Long-term household memories ("remember that the garage code is 4821").
-# SQLite FTS5: instant keyword search at thousands of rows, no services, no
-# embeddings. Voice reads/writes hit this synchronously via /memory (as fast
-# as any local intent); Claude Code sessions query the same file themselves
-# with the sqlite3 CLI when a house question needs context (see the House
-# memory section in ~/.claude/CLAUDE.md).
-# ponytail: BM25 keyword match, not semantic - swap memory_search for an
-# embedding lookup if paraphrased recall ever misses too often.
-MEMORY_DB_PATH = os.path.expanduser("~/.claude/hooks/house-memory.db")
-
-
-def memory_db():
-    db = sqlite3.connect(MEMORY_DB_PATH)
-    db.execute(
-        "CREATE VIRTUAL TABLE IF NOT EXISTS memories USING fts5(text, created UNINDEXED)"
-    )
-    return db
-
-
-def fts_match(query):
-    """A user phrase as a safe FTS5 query: quoted terms, OR'd together."""
-    words = re.findall(r"[A-Za-z0-9']+", query.lower())
-    return " OR ".join('"{}"'.format(w.replace("'", "''")) for w in words)
+# Moved 2026-08-31: the hubbubb_home integration on Home Assistant owns the
+# house memory store (hubbubb_home_memory.db in the HA config dir), written
+# only by HA - voice via the Hubbubb* memory intents and the agent's tools,
+# the Mac via the "Jarvis - remember webhook" automation. This listener keeps
+# only the speaker actions (identify/whoami) on /memory.
 
 
 def screen_mirror(action, device):
@@ -1687,67 +1776,125 @@ def screen_mirror(action, device):
     return False, err.split("execution error:")[-1].strip() or "The screen mirroring script failed."
 
 
-# Spoken replies carry no comma before "sir": measured on Cloud TTS
-# RyanNeural, that comma is a 150-240ms silence, and a pause before "sir"
-# turns a butler into a sarcastic one.
-def memory_add(text):
-    text = " ".join(text.split()).strip().rstrip(".")
-    if not text:
-        return False, "There was nothing to remember sir."
-    db = memory_db()
+# --- Nightly review ----------------------------------------------------------
+#
+# The transcripts of your coding sessions live on this machine, and so does the
+# Claude Code CLI. Everything else about the nightly review - when it runs,
+# whether it runs, what it is asked, what is kept - belongs in Home Assistant,
+# so this endpoint is deliberately thin: it turns a brief into a report and
+# gives it back. Hubbubb Home sends the task and the house inventory; this adds
+# the one thing only this machine can supply.
+
+CLAUDE_BIN = os.environ.get(
+    "CLAUDE_BIN", os.path.expanduser("~/.local/bin/claude"))
+REVIEW_TIMEOUT = int(os.environ.get("REVIEW_TIMEOUT", "1800"))
+PROJECTS_DIR = os.path.expanduser("~/.claude/projects")
+MAX_DIGEST = 60_000
+
+# Redacted rather than withheld wholesale: the digest is otherwise a verbatim
+# copy of what was typed, and it ends up in a prompt and in stored findings.
+SECRET = re.compile(
+    r"client[_ ]?secret|consumer[_ ]?secret|api[_ ]?key|secret[_ ]?key"
+    r"|access[_ ]?token|bearer\s+[A-Za-z0-9._-]{16}|password\s*[:=]"
+    r"|hbb[cs]_[A-Za-z0-9]|sk-[A-Za-z0-9]{16}|ghp_[A-Za-z0-9]{16}"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY", re.I)
+
+
+def _recent(stamp, cutoff):
+    """True if an ISO-8601 record timestamp falls inside the window.
+
+    Per message, never per file: a session touched today carries months of
+    older messages, and filtering on the file's mtime let all of them through
+    as "the last 24 hours".
+    """
+    if not stamp:
+        return True
     try:
-        dup = db.execute(
-            "SELECT 1 FROM memories WHERE lower(text) = ?", (text.lower(),)
-        ).fetchone()
-        if dup:
-            return True, "I have that one already sir."
-        db.execute(
-            "INSERT INTO memories (text, created) VALUES (?, ?)",
-            (text, time.strftime("%Y-%m-%d")),
-        )
-        db.commit()
-        return True, "Noted sir."
-    finally:
-        db.close()
+        when = datetime.datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    return when.timestamp() >= cutoff
 
 
-def memory_search(query, limit=3):
-    db = memory_db()
+def build_digest(hours=24, projects=()):
+    """The user's own words and every tool error, from the local transcripts.
+
+    Assistant prose is dropped entirely - it is the model's account of events,
+    and feeding a model its own reasoning back is how a mistake gets confirmed
+    rather than caught.
+    """
+    cutoff = time.time() - hours * 3600
+    users, errors, withheld = [], [], 0
+    wanted = tuple(p.lower() for p in projects if p)
+    for path in glob.glob(os.path.join(PROJECTS_DIR, "*", "*.jsonl")):
+        project = os.path.basename(os.path.dirname(path))
+        if wanted and not any(w in project.lower() for w in wanted):
+            continue
+        try:
+            handle = open(path, errors="ignore")
+        except OSError:
+            continue
+        with handle:
+            for line in handle:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get("type") != "user" or not _recent(
+                        rec.get("timestamp"), cutoff):
+                    continue
+                content = rec.get("message", {}).get("content")
+                if isinstance(content, str):
+                    text = content.strip()
+                    # Hook output and system reminders are not the user talking.
+                    if text and not text.startswith("<"):
+                        if SECRET.search(text):
+                            withheld += 1
+                            continue
+                        users.append("[%s] %s" % (project[-28:], text))
+                elif isinstance(content, list):
+                    for chunk in content:
+                        if not isinstance(chunk, dict) or not chunk.get("is_error"):
+                            continue
+                        body = chunk.get("content")
+                        if isinstance(body, list):
+                            body = " ".join(b.get("text", "") for b in body
+                                            if isinstance(b, dict))
+                        body = str(body or "")[:300]
+                        if SECRET.search(body):
+                            withheld += 1
+                            continue
+                        errors.append(body)
+
+    out = ["## What the user said (%d)" % len(users)]
+    out += ["- " + u.replace("\n", " ")[:600] for u in users]
+    out += ["", "## Tool errors (%d)" % len(errors)]
+    out += ["- " + e.replace("\n", " ") for e in errors]
+    if withheld:
+        out += ["", "(%d line(s) withheld: they look like pasted credentials.)"
+                % withheld]
+    return "\n".join(out)[:MAX_DIGEST]
+
+
+def run_review(brief, hours=24, projects=()):
+    """Assemble the brief with this machine's digest and run it through Claude."""
+    if not os.path.exists(CLAUDE_BIN):
+        return False, "no Claude Code CLI at %s" % CLAUDE_BIN, "", 0
+    digest = build_digest(hours, projects)
+    prompt = "%s\n--- digest of the last %d hours ---\n%s" % (
+        brief, hours, digest)
     try:
-        if not query.strip():
-            count = db.execute("SELECT count(*) FROM memories").fetchone()[0]
-            return True, f"I have {count} {'memory' if count == 1 else 'memories'} stored sir."
-        match = fts_match(query)
-        if not match:
-            return True, "I didn't catch what to look for sir."
-        rows = db.execute(
-            "SELECT text FROM memories WHERE memories MATCH ? ORDER BY bm25(memories) LIMIT ?",
-            (match, limit),
-        ).fetchall()
-        if not rows:
-            return True, f"I have nothing about {query} sir."
-        return True, "Here's what I have sir: " + ". ".join(r[0] for r in rows) + "."
-    finally:
-        db.close()
-
-
-def memory_forget(query):
-    if not query.strip():
-        return True, "Tell me what to forget sir."
-    db = memory_db()
-    try:
-        match = fts_match(query)
-        row = db.execute(
-            "SELECT rowid, text FROM memories WHERE memories MATCH ? ORDER BY bm25(memories) LIMIT 1",
-            (match,),
-        ).fetchone() if match else None
-        if not row:
-            return True, f"I couldn't find a memory about {query} sir."
-        db.execute("DELETE FROM memories WHERE rowid = ?", (row[0],))
-        db.commit()
-        return True, f"Forgotten sir: {row[1]}."
-    finally:
-        db.close()
+        result = subprocess.run(
+            [CLAUDE_BIN, "-p", prompt, "--permission-mode", "plan"],
+            capture_output=True, text=True, timeout=REVIEW_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        return False, "Claude did not finish within %ds" % REVIEW_TIMEOUT, "", len(digest)
+    except OSError as exc:
+        return False, "could not run Claude: %s" % exc, "", len(digest)
+    report = (result.stdout or result.stderr or "").strip()
+    if not report:
+        return False, "Claude returned nothing", "", len(digest)
+    return True, "ok", report, len(digest)
 
 
 # -------------------------------------------------------------- hubbubb ----
@@ -1897,7 +2044,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
-        # The ring card fetches these endpoints straight from the Home
+        # The Jarvis ring card fetches these endpoints straight from the Home
         # Assistant dashboard. Private-network + token still gate everything;
         # CORS only lets the browser see the responses it already got.
         self.send_header("Access-Control-Allow-Origin", "*")
@@ -1972,14 +2119,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.path not in ("/prompt", "/session", "/target", "/pending", "/memory",
                              "/kill", "/key", "/upload", "/mirror", "/hubbubb",
-                             "/await", "/answer", "/model", "/permission"):
+                             "/await", "/answer", "/model", "/permission",
+                             "/review"):
             return self.reply(404, {"error": "not found"})
         if not is_private(self.client_address[0]):
             return self.reply(403, {"error": "non-private client"})
 
         # Only the upload route gets the big ceiling; everything else stays on
         # the small one, so a stray oversized body cannot tie up the listener.
-        cap = MAX_UPLOAD_BODY if self.path == "/upload" else MAX_BODY
+        cap = (MAX_UPLOAD_BODY if self.path in ("/upload", "/review")
+               else MAX_BODY)
         length = int(self.headers.get("Content-Length") or 0)
         if length <= 0 or length > cap:
             return self.reply(400, {"error": "bad length"})
@@ -1998,7 +2147,7 @@ class Handler(BaseHTTPRequestHandler):
 
         if self.path in ("/session", "/target"):
             # Build mode points the voice target at the exact window it has
-            # open, so "hey <assistant>, ..." lands in the session on screen.
+            # open, so "hey Jarvis, ..." lands in the session on screen.
             window = (data.get("id") or "").strip()
             if self.path == "/target" and window:
                 if not window_exists(window):
@@ -2033,16 +2182,84 @@ class Handler(BaseHTTPRequestHandler):
             action = (data.get("action") or "search").strip().lower()
             text = (data.get("text") or "").strip()
             try:
-                if action == "add":
-                    ok, detail = memory_add(text)
-                elif action == "forget":
-                    ok, detail = memory_forget(text)
+                if action == "identify":
+                    # "This is Scott" - label the last utterance for training.
+                    # An open mic appends whatever else was audible to the
+                    # wildcard capture ("Scott. I'm very lucky that..."), so
+                    # keep only the opening sentence and at most three words -
+                    # a name is never longer than that.
+                    # STT often runs sentences together with no punctuation
+                    # ("scott how are you doing"), so also stop at the first
+                    # word that cannot be part of a name.
+                    words = re.split(r"[.,!?;]", text)[0].split()
+                    for stop, w in enumerate(words):
+                        if w.lower() in ("how", "are", "is", "the", "and",
+                                         "what", "can", "you", "i", "my",
+                                         "please", "turn", "set", "hey"):
+                            words = words[:stop]
+                            break
+                    name = " ".join(words[:3]).title()
+                    if not name:
+                        ok, detail = False, "I didn't catch the name sir."
+                    elif name.lower() == "jarvis":
+                        # A mis-split wake word ("Jarvis, this is Scott")
+                        # captures the assistant's own name; a profile called
+                        # Jarvis then swallows everybody's matches.
+                        ok, detail = True, "That's my name sir - tell me yours."
+                    elif not enrollment_approved(name):
+                        ok, detail = True, (
+                            f"I need approval on the MacBook to learn a voice "
+                            f"as {name}, and it wasn't given.")
+                    else:
+                        try:
+                            label_speaker(name)
+                            ok, detail = True, (
+                                f"Understood {name}. I'll learn your voice as we talk.")
+                        except Exception:
+                            ok, detail = True, (
+                                f"Noted {name}, but the voice trainer isn't "
+                                "running, so I couldn't save this sample.")
+                elif action == "whoami":
+                    person, confidence = speaker_guess()
+                    if person and confidence >= 0.75:
+                        ok, detail = True, f"You are {person} sir."
+                    elif person:
+                        ok, detail = True, f"I believe you're {person} but I'm not certain."
+                    else:
+                        ok, detail = True, (
+                            "I don't recognize this voice yet. "
+                            "Tell me who you are by saying, this is, and your name.")
                 else:
-                    ok, detail = memory_search(text)
+                    # add/search/forget moved to the hubbubb_home store on
+                    # Home Assistant on 2026-08-31; answer honestly instead
+                    # of consulting a database that no longer exists here.
+                    ok, detail = True, (
+                        "House memory lives with Home Assistant now sir - "
+                        "just ask Jarvis to remember, recall or forget it.")
             except Exception as exc:
                 ok, detail = False, f"{type(exc).__name__}: {exc}"
             log(f"{self.client_address[0]} /memory {action} {text[:80]!r} [{detail[:80]}]")
             return self.reply(200 if ok else 503, {"ok": ok, "detail": detail})
+
+        if self.path == "/review":
+            brief = (data.get("brief") or "").strip()
+            if not brief:
+                return self.reply(400, {"ok": False, "detail": "empty brief"})
+            hours = int(data.get("hours") or 24)
+            projects = data.get("projects") or []
+            if isinstance(projects, str):
+                projects = [p.strip() for p in projects.split(",") if p.strip()]
+            log(f"{self.client_address[0]} /review hours={hours} "
+                f"projects={projects or 'all'}")
+            try:
+                ok, detail, report, size = run_review(brief, hours, projects)
+            except Exception as exc:
+                ok, detail, report, size = (
+                    False, f"{type(exc).__name__}: {exc}", "", 0)
+            log(f"  /review [{detail}] digest={size} report={len(report)}")
+            return self.reply(200 if ok else 503,
+                              {"ok": ok, "detail": detail,
+                               "report": report, "digest_chars": size})
 
         if self.path == "/hubbubb":
             try:
