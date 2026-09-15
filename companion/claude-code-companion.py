@@ -1526,7 +1526,7 @@ def resolve_pending(action, project=None):
         return ok, ("Added it to the current session." if ok else detail)
 
     # Default: a new session, in the same project unless told otherwise.
-    return start_and_send(project or held.get("project"), text)
+    return start_and_send(project or held.get("project"), text)[:2]
 
 
 def start_and_send(project, text):
@@ -1537,7 +1537,7 @@ def start_and_send(project, text):
     """
     name, path = resolve_project(project or current_project())
     if not name:
-        return False, f"I don't know a project called {project}."
+        return False, f"I don't know a project called {project}.", None
 
     # A follow-up belongs in the session that answered the question before it.
     recent = read_ask_target()
@@ -1549,7 +1549,7 @@ def start_and_send(project, text):
             write_target(recent["id"])
             write_ask_target(recent["id"], path)
             return True, ("Looking into this for you sir. "
-                          "I will speak the answer as soon as it is ready.")
+                          "I will speak the answer as soon as it is ready."), recent["id"]
 
     created, placement, session = open_claude_window(name, path)
     write_target(created)
@@ -1566,7 +1566,7 @@ def start_and_send(project, text):
     # is owed out loud whatever the bell says.
     ok, detail = deliver(text, created, ask=True)
     if not ok:
-        return False, f"Started a new {name} session but could not send it. {detail}"
+        return False, f"Started a new {name} session but could not send it. {detail}", created
     write_ask_target(created, path)
     # Spoken (or narrated by the Jarvis agent) the moment the handoff lands,
     # so it must promise the follow-up: the answer arrives by itself through
@@ -1575,7 +1575,7 @@ def start_and_send(project, text):
     where = ("I could not open a terminal for it, so run tmux attach -t "
              f"{session} to see it. " if placement == "detached" else "")
     return True, (f"{where}Looking into this for you sir. "
-                  "I will speak the answer as soon as it is ready.")
+                  "I will speak the answer as soon as it is ready."), created
 
 
 def windows_in(path):
@@ -2537,14 +2537,14 @@ class Handler(BaseHTTPRequestHandler):
         # "code ..." / "claude ..." is an explicit instruction to use the
         # coding session, so it skips the home-control guard.
         try:
-            ok, detail = send_to_claude(
+            ok, detail, *rest = send_to_claude(
                 text,
                 force=bool(data.get("force")),
                 project=(data.get("project") or "").strip() or None,
                 new_session=bool(data.get("new_session")),
             )
         except Exception as exc:
-            ok, detail = False, f"{type(exc).__name__}: {exc}"
+            ok, detail, rest = False, f"{type(exc).__name__}: {exc}", []
 
         log(f"{self.client_address[0]} -> {text[:120]!r} [{detail}]")
         # 200 whatever the outcome. "Claude is already working, say start a new
@@ -2555,7 +2555,12 @@ class Handler(BaseHTTPRequestHandler):
         # seconds, re-parking it and speaking an acknowledgement each time.
         # The `ok` field carries the outcome; the status code carries transport
         # health, and only that.
-        self.reply(200, {"ok": ok, "detail": detail})
+        body = {"ok": ok, "detail": detail}
+        # A new session reports its window id, the same as /session does, so
+        # the phone Shortcut can open the build screen straight on it.
+        if rest and rest[0]:
+            body["id"] = rest[0]
+        self.reply(200, body)
 
     def log_message(self, *args):
         pass  # keep stdout clean; we log ourselves

@@ -404,6 +404,10 @@ class HubbubbRingCard extends LitElement {
   set hass(hass) {
     this._hass = hass;
     if (!this._config) return;
+    if (!this._linked) {
+      this._linked = true;
+      this._openLinked();
+    }
     const stateObj = hass?.states?.[this._config.entity];
     const state = stateObj ? stateObj.state : "unavailable";
     const prevState = this._state;
@@ -2073,28 +2077,45 @@ class HubbubbRingCard extends LitElement {
     try {
       const started = await this._api("agent_start_session", { project });
       this._err = "";
-      // Claude takes a beat to boot and the listener only lists windows with a
-      // live Claude in them, so the new session isn't in the very next status.
-      // Wait for the exact window the listener says it made. Waiting on "the
-      // one wearing the target" instead can open somebody else's session: until
-      // Claude boots there is no live Claude in the new window, so the target
-      // falls back to whatever else is already on screen.
-      const want = started?.id;
-      for (let i = 0; i < 20; i++) {
-        await this._poll(true);
-        const fresh = (this._sessions || []).find((s) =>
-          want ? s.id === want : s.target
-        );
-        if (fresh) {
-          this._select(fresh.id);
-          break;
-        }
-        await new Promise((r) => setTimeout(r, 600));
-      }
+      await this._awaitSession(started?.id);
     } catch (e) {
       this._err = this._errText(e);
     }
     this._pending = false;
+  }
+
+  /* Claude takes a beat to boot and the listener only lists windows with a
+     live Claude in them, so a new session isn't in the very next status. Wait
+     for the exact window the listener says it made. Waiting on "the one
+     wearing the target" instead can open somebody else's session: until Claude
+     boots there is no live Claude in the new window, so the target falls back
+     to whatever else is already on screen. */
+  async _awaitSession(want) {
+    for (let i = 0; i < 20; i++) {
+      await this._poll(true);
+      const fresh = (this._sessions || []).find((s) =>
+        want ? s.id === want : s.target
+      );
+      if (fresh) {
+        this._select(fresh.id);
+        return true;
+      }
+      await new Promise((r) => setTimeout(r, 600));
+    }
+    return false;
+  }
+
+  /* <dashboard>/<view>/session/<id> is a session's address: the console opens
+     on it. The phone Shortcut lands here after agent_prompt_direct hands back
+     the id of the session it started. A path segment rather than a query
+     string because the companion app drops everything after "?" from its
+     navigate URLs. */
+  _openLinked() {
+    const m = location.pathname.match(/\/session\/([^/]+)$/);
+    if (!m) return;
+    this._restored = true; // the address wins over whatever was open last
+    if (!this._build) this._setBuild(true, false);
+    this._awaitSession(decodeURIComponent(m[1]));
   }
 
   /* Assist on THIS device. Inside the companion app, ask the app to open its

@@ -253,6 +253,12 @@ voice pipeline at it and anything Home Assistant cannot answer itself is
 typed straight into your coding agent, with the reply spoken when the turn
 actually finishes.
 
+Every session has an address: `/<dashboard>/<view>/session/<id>` opens the
+build screen on that session, and `agent_prompt_direct` with `new_session:
+true` answers with the `id` of the one it started. A phone Shortcut can call
+the service, then open `homeassistant://navigate/<dashboard>/0/session/<id>`
+and land in the conversation it just began.
+
 ### Speaker identification (optional)
 
 The voice pipeline hands every agent a transcript with no idea who said it.
