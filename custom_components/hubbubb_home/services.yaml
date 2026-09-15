@@ -56,6 +56,17 @@ ask_hubbubb:
       example: "what did the Fletchers ask for last week"
       selector: { text: }
 run_sweep:
+review_decide:
+  name: Decide on a nightly proposal
+  description: >-
+    Accept, reject, or mark done one proposal from the nightly review. The
+    Repairs panel does accepted on submit and rejected on ignore; done is what
+    the session that applied it says afterwards.
+  fields:
+    id: { required: true, selector: { text: } }
+    decision:
+      required: true
+      selector: { select: { options: [accepted, rejected, done, pending] } }
 speak_briefing:
   fields:
     target:
@@ -92,6 +103,10 @@ agent_permission:
     id: { required: true, selector: { text: } }
     mode: { selector: { text: } }
 agent_models:
+agent_file:
+  fields:
+    id: { selector: { text: } }
+    path: { required: true, selector: { text: } }
 run_review:
   name: Run the nightly review
   description: >-

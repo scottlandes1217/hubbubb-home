@@ -142,6 +142,7 @@ CARDS = (
     "hubbubb-ring-card.js",
     "hubbubb-remote-card.js",
     "hubbubb-timers-card.js",
+    "hubbubb-review-card.js",
 )
 # The Voice Studio sidebar panel. Served from the same versioned URL as the
 # cards but not registered as a Lovelace resource: a panel loads its own

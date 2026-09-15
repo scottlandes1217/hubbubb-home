@@ -37,6 +37,10 @@ from library import (
 from speakers import Profiles
 from wakeword import harvest
 
+# What a Transcribe event calls itself when the audio came off a phone call
+# rather than the puck's microphone. Matches call-service/service.py.
+CALL_CLIENT = "call"
+
 _LOGGER = logging.getLogger("hubbubb-voice")
 
 RATE = 16000
@@ -72,8 +76,28 @@ class Service:
     def __init__(self, args) -> None:
         self.args = args
         self.profiles = Profiles(Path(args.data_dir))
-        _LOGGER.info("loading whisper %r (int8, cpu)...", args.model)
-        self.model = WhisperModel(args.model, device="cpu", compute_type="int8")
+        # mlx runs the same Whisper weights on the M1's GPU. It is both faster
+        # and, at large-v3-turbo, markedly more accurate than the CPU-bound
+        # `small` that fits in the CPU's time budget: "turn off peter" became
+        # "turn off, heater", "sun timer for 15 minutes" became "set a timer
+        # for 15 minutes". Missed commands cost more than milliseconds.
+        # faster-whisper stays as the fallback so a broken mlx install, or a
+        # machine without a GPU, still has a working voice pipeline.
+        self.mlx_repo = None
+        self.model = None
+        if args.mlx_model:
+            try:
+                import mlx_whisper  # noqa: F401
+                self.mlx_repo = args.mlx_model
+                _LOGGER.info("loading whisper %r (mlx, gpu)...", self.mlx_repo)
+            except Exception:
+                _LOGGER.warning("mlx-whisper unavailable; falling back to "
+                                "faster-whisper on the cpu")
+        if self.mlx_repo is None:
+            _LOGGER.info("loading whisper %r (int8, cpu)...", args.model)
+            self.model = WhisperModel(args.model, device="cpu",
+                                      compute_type="int8")
+
         _LOGGER.info("loading voice encoder...")
         self.encoder = VoiceEncoder("cpu")
         # ponytail: one utterance at a time - a single house, mostly one puck.
@@ -83,6 +107,24 @@ class Service:
         self.last_embedding: np.ndarray | None = None
         self.http: ClientSession | None = None
         self._vocab: tuple[float, str] = (0.0, "")
+        # Warm the GPU last: transcribe() reads self._vocab, so this has to
+        # come after every attribute exists. Placed above, it threw on each
+        # boot and silently disabled mlx altogether - the fallback dutifully
+        # served from the cpu and nothing looked wrong from outside.
+        # Doing it here also means mlx downloads and compiles now rather than
+        # on the first thing said to the house, and a bad repo name becomes a
+        # startup failure in the log instead of a house that has quietly
+        # stopped understanding anybody.
+        if self.mlx_repo is not None:
+            try:
+                self.transcribe(np.zeros(RATE // 2, dtype=np.float32))
+                _LOGGER.info("whisper ready on the gpu (%s)", self.mlx_repo)
+            except Exception:
+                _LOGGER.exception("mlx whisper %r will not run; using the cpu",
+                                  self.mlx_repo)
+                self.mlx_repo = None
+                self.model = WhisperModel(self.args.model, device="cpu",
+                                          compute_type="int8")
 
     def vocabulary(self) -> str:
         """Whisper priming text from the household's proper nouns.
@@ -105,15 +147,30 @@ class Service:
             self._vocab = (mtime, prompt)
         return self._vocab[1]
 
-    async def process(self, pcm: bytes, language: str | None) -> dict:
+    async def process(self, pcm: bytes, language: str | None,
+                      house: bool = True) -> dict:
         audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
         loop = asyncio.get_running_loop()
         async with self.lock:
             started = time.monotonic()
-            text, embedding = await loop.run_in_executor(
-                None, self._transcribe_and_embed, audio, language
-            )
+            if house:
+                text, embedding = await loop.run_in_executor(
+                    None, self._transcribe_and_embed, audio, language
+                )
+            else:  # nobody to fingerprint on a phone line - skip the embed
+                text = await loop.run_in_executor(
+                    None, self.transcribe, audio, language
+                )
             elapsed = time.monotonic() - started
+        if not house:
+            # A caller is not this room. There is no speaker-to-microphone
+            # echo path to fence, no household voice to identify, this is not
+            # wake-word training data, and HA must not be told that someone
+            # spoke in the house. Transcribe and get out.
+            _LOGGER.info("%.1fs call audio -> %r in %.2fs",
+                         len(audio) / RATE, text, elapsed)
+            return {"person": None, "confidence": 0.0, "ts": time.time(),
+                    "text": text, "candidates": [], "token": self.args.token}
         if self.args.capture_dir:
             self._capture(pcm, text)
         if self._is_self_echo(text, len(audio) / RATE):
@@ -207,6 +264,22 @@ class Service:
         """Blocking; run under self.lock in an executor. audio is float32."""
         # Pipelines send a locale ("en-US"); whisper wants the bare code.
         language = (language or self.args.language).split("-")[0]
+        if self.mlx_repo is not None:
+            import mlx_whisper
+            try:
+                return mlx_whisper.transcribe(
+                    audio, path_or_hf_repo=self.mlx_repo, language=language,
+                    initial_prompt=self.vocabulary() or None,
+                )["text"].strip()
+            except Exception:
+                # One bad turn must not cost every later one. Drop to the cpu
+                # for good and say so; a house that mishears is recoverable,
+                # a house that raises on every utterance is not.
+                _LOGGER.exception("mlx whisper failed; falling back to the cpu")
+                self.mlx_repo = None
+                if self.model is None:
+                    self.model = WhisperModel(self.args.model, device="cpu",
+                                              compute_type="int8")
         segments, _info = self.model.transcribe(
             audio, language=language, beam_size=1,
             initial_prompt=self.vocabulary() or None,
@@ -260,13 +333,18 @@ class SttHandler(AsyncEventHandler):
         self.wyoming_info = wyoming_info
         self.audio = bytearray()
         self.language: str | None = None
+        self.house = True
 
     async def handle_event(self, event: Event) -> bool:
         if Describe.is_type(event.type):
             await self.write_event(self.wyoming_info.event())
             return True
         if Transcribe.is_type(event.type):
-            self.language = Transcribe.from_event(event).language
+            request = Transcribe.from_event(event)
+            self.language = request.language
+            # The call service identifies itself by name; everything else on
+            # this port is the puck, in the house.
+            self.house = request.name != CALL_CLIENT
             return True
         if AudioStart.is_type(event.type):
             self.audio.clear()
@@ -276,7 +354,9 @@ class SttHandler(AsyncEventHandler):
             self.audio.extend(_to_16k_mono(chunk))
             return True
         if AudioStop.is_type(event.type):
-            result = await self.service.process(bytes(self.audio), self.language)
+            result = await self.service.process(
+                bytes(self.audio), self.language, house=self.house
+            )
             await self.write_event(Transcript(text=result["text"]).event())
             return False
         return True
@@ -670,7 +750,12 @@ def parse_args(argv=None):
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=10300, help="Wyoming STT")
     parser.add_argument("--admin-port", type=int, default=10301)
-    parser.add_argument("--model", default="base", help="faster-whisper model")
+    parser.add_argument("--model", default="base",
+                        help="faster-whisper model (the cpu fallback)")
+    parser.add_argument("--mlx-model", default=None,
+                        help="mlx-whisper repo to run on the GPU, e.g. "
+                             "mlx-community/whisper-large-v3-turbo. Falls back "
+                             "to --model if mlx-whisper will not import")
     parser.add_argument("--language", default="en")
     parser.add_argument(
         "--data-dir", default="~/.hubbubb-voice", help="profiles + last.json"

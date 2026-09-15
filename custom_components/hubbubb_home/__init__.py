@@ -121,7 +121,7 @@ from .speakers import (
     async_register_webhook as _speaker_webhook,
 )
 from .nightly import FindingsReport, async_sweep
-from .review import ReviewReport, async_review
+from .review import PROPOSAL_STATES, ReviewReport, async_review
 from .timers import TimerPool
 
 _LOGGER = logging.getLogger(__name__)
@@ -144,6 +144,7 @@ AGENT_SERVICES = {
     "agent_model": ("model", "POST"),
     "agent_permission": ("permission", "POST"),
     "agent_models": ("models", "GET"),
+    "agent_file": ("file", "GET"),
 }
 
 
@@ -205,6 +206,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     review = ReviewReport(hass)
     await review.async_load()
+    await review.async_sync_issues()
 
     hub_conf = entry.data.get(CONF_HUBBUBB) or {}
     hubbubb = None
@@ -552,6 +554,12 @@ SERVICE_SCHEMAS: dict[str, vol.Schema] = {
     "ask_hubbubb": vol.Schema({vol.Required("request"): str}),
     "run_sweep": vol.Schema({}),
     "run_review": vol.Schema({}),
+    "review_decide": vol.Schema(
+        {
+            vol.Required("id"): str,
+            vol.Required("decision"): vol.In(PROPOSAL_STATES),
+        }
+    ),
     "speak_briefing": vol.Schema(
         {vol.Optional("target"): vol.Any(str, [str])}
     ),
@@ -633,6 +641,16 @@ def _async_register_services(hass: HomeAssistant, runtime: Runtime) -> None:
             "detail": runtime.review.detail,
         }
 
+    async def review_decide(call: ServiceCall) -> ServiceResponse:
+        """What the Repairs panel does on submit, for sessions and scripts."""
+        try:
+            proposal = await runtime.review.async_decide(
+                call.data["id"], call.data["decision"]
+            )
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
+        return {"proposal": proposal}
+
     async def speak_briefing(call: ServiceCall) -> ServiceResponse:
         text = await _briefing_text(runtime)
         await _announce(runtime, text, call.data.get("target"))
@@ -648,6 +666,7 @@ def _async_register_services(hass: HomeAssistant, runtime: Runtime) -> None:
         "ask_hubbubb": ask_hubbubb,
         "run_sweep": run_sweep,
         "run_review": run_review,
+        "review_decide": review_decide,
         "speak_briefing": speak_briefing,
     }
     for name, handler in handlers.items():
@@ -820,7 +839,9 @@ def _async_schedule(hass: HomeAssistant, runtime: Runtime) -> None:
 
     # The review runs after the sweep so the morning has both, and so the
     # brief it sends carries findings the sweep has already recorded.
-    if runtime.option("overnight", CONF_REVIEW_ENABLED, False):
+    # On unless switched off: the option was added after most entries were
+    # saved, and an absent key meant the review silently never ran.
+    if runtime.option("overnight", CONF_REVIEW_ENABLED, True):
         hour, minute, second = _hms(
             runtime.option("overnight", CONF_REVIEW_TIME, DEFAULT_REVIEW_TIME)
         )
@@ -947,7 +968,8 @@ async def _briefing_text(runtime: Runtime) -> str:
                 f"{person.title()}: " + ", then ".join(titles) + "."
             )
 
-    parts.append(runtime.findings.spoken(runtime.name))
+    if line := runtime.findings.spoken(runtime.name):
+        parts.append(line)
     # The review's own line, so the drafts it staged get mentioned. They
     # existed for four mornings before anything said so.
     if line := runtime.review.spoken():

@@ -123,4 +123,7 @@ class ReviewSensor(HubbubbEntity, SensorEntity):
             "last_run": review.last_run,
             "detail": review.detail,
             "summary": review.spoken(),
+            "proposals": review.proposals,
+            "pending": len(review.by_status("pending")),
+            "accepted": len(review.by_status("accepted")),
         }

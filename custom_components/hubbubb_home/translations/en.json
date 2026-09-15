@@ -369,6 +369,20 @@
           "description": "Which session."
         }
       }
+    },
+    "review_decide": {
+      "name": "Decide on a nightly proposal",
+      "description": "Accept, reject, or mark done one proposal from the nightly review.",
+      "fields": {
+        "id": {
+          "name": "Proposal",
+          "description": "The proposal's id, from the review sensor."
+        },
+        "decision": {
+          "name": "Decision",
+          "description": "accepted, rejected, done, or pending."
+        }
+      }
     }
   },
   "entity": {
@@ -389,6 +403,19 @@
       },
       "findings": {
         "name": "Findings"
+      }
+    }
+  },
+  "issues": {
+    "proposal": {
+      "title": "Nightly review: {title}",
+      "fix_flow": {
+        "step": {
+          "confirm": {
+            "title": "{title}",
+            "description": "A {kind} from the overnight review.\n\n{body}\n\nSubmit to accept it: accepted proposals are applied the next time you say \"apply the nightly findings\". To drop it instead, close this and choose Ignore."
+          }
+        }
       }
     }
   }

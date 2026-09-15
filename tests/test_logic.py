@@ -116,6 +116,12 @@ for _name, _attrs in {
     "config_validation": {"string": str},
     "intent": {"IntentHandler": _IntentHandler, "async_register": lambda *a: None},
     "aiohttp_client": {"async_get_clientsession": lambda hass: None},
+    "issue_registry": {
+        "IssueSeverity": types.SimpleNamespace(WARNING="warning"),
+        "async_create_issue": lambda *a, **k: None,
+        "async_delete_issue": lambda *a, **k: None,
+        "async_get": lambda hass: None,
+    },
 }.items():
     setattr(_helpers, _name, _stub(f"homeassistant.helpers.{_name}", **_attrs))
 
@@ -158,6 +164,7 @@ from hubbubb_home.memory import Memory  # noqa: E402
 from hubbubb_home.speakers import SpeakerBook  # noqa: E402
 from hubbubb_home.timers import TimerPool  # noqa: E402
 from hubbubb_home.nightly import FindingsReport, _days  # noqa: E402
+from hubbubb_home.review import ReviewReport, parse_proposals  # noqa: E402
 from hubbubb_home.appletv import _TEMPLATE, _match_source, decide_plan  # noqa: E402
 
 
@@ -1226,11 +1233,13 @@ def test_builtin_timer_slot_resolution():
 
 # --- findings ----------------------------------------------------------------
 
-def test_findings_speech_counts_both_kinds():
+def test_findings_speech_only_mentions_what_was_repaired():
+    """Offline and gone-quiet counts are kept, not read out - they were the
+    morning's least useful sentence for a month."""
     import asyncio
 
     report = FindingsReport(None)
-    assert "Nothing" in report.spoken("Athena")
+    assert report.spoken("Athena") == ""
     asyncio.run(
         report.async_update(
             [
@@ -1240,9 +1249,88 @@ def test_findings_speech_counts_both_kinds():
             ]
         )
     )
-    speech = report.spoken("Athena")
-    assert "1 thing offline" in speech, speech
-    assert "2 have gone quiet" in speech, speech
+    assert report.spoken("Athena") == "", report.spoken("Athena")
+    assert len(report.items) == 3
+    asyncio.run(
+        report.async_update([{"kind": "drift", "entity_id": "light.all_lights", "detail": "d"}])
+    )
+    assert "1 configuration problem" in report.spoken("Athena")
+
+
+# --- review: every proposal kept, and decided on separately ------------------
+
+_REPORT = """# Nightly review
+
+## Defects
+
+**1. The digest re-ingests its own brief**
+Digest bullet 2 begins with the PREAMBLE. Skip it.
+
+**2. Whisper hears lights as weights.**
+"Turn all weights to 50%" three times.
+
+## SUGGESTIONS
+
+**1. Named timers by voice**
+Asked a dozen times.
+
+```yaml-draft
+- id: jarvis_draft_named_timers
+  alias: "Jarvis draft - named timers"
+  initial_state: false
+```
+
+FINDINGS: 2
+"""
+
+
+def test_review_parses_items_and_keeps_decisions_across_nights():
+    import asyncio
+
+    items = parse_proposals(_REPORT)
+    assert [i["id"] for i in items] == [
+        "defect_the_digest_re_ingests_its_own_brief",
+        "defect_whisper_hears_lights_as_weights",
+        "suggestion_named_timers_by_voice",
+    ], items
+    assert items[0]["body"] == "Digest bullet 2 begins with the PREAMBLE. Skip it."
+    assert "FINDINGS" not in items[2]["body"]
+    assert items[2]["yaml"].startswith("- id: jarvis_draft_named_timers")
+    assert items[1]["yaml"] == ""
+
+    report = ReviewReport(None)
+    asyncio.run(report.async_update(report=_REPORT, findings=2, drafts=[], detail=""))
+    assert len(report.by_status("pending")) == 3
+    asyncio.run(report.async_decide("defect_whisper_hears_lights_as_weights", "rejected"))
+    asyncio.run(report.async_decide("suggestion_named_timers_by_voice", "accepted"))
+    # The same report the next night neither duplicates nor resets anything.
+    asyncio.run(report.async_update(report=_REPORT, findings=2, drafts=[], detail=""))
+    assert len(report.proposals) == 3
+    assert report.get("suggestion_named_timers_by_voice")["status"] == "accepted"
+    speech = report.spoken()
+    assert "1 proposal is waiting" in speech, speech
+    assert "1 accepted one is ready" in speech, speech
+    try:
+        asyncio.run(report.async_decide("nope", "accepted"))
+        raise AssertionError("unknown proposal must raise")
+    except ValueError:
+        pass
+
+    # A store reloaded after a restart still has every decision.
+    again = ReviewReport(None)
+    asyncio.run(again.async_load())
+    assert again.get("defect_whisper_hears_lights_as_weights")["status"] == "rejected"
+
+
+def test_review_says_so_when_it_has_stopped_running():
+    import asyncio
+
+    report = ReviewReport(None)
+    assert report.spoken() == "The overnight review has not run since never sir."
+    asyncio.run(report.async_update(report=_REPORT, findings=2, drafts=[], detail=""))
+    assert report.spoken().startswith("Also sir - overnight I left 2 defects.")
+    report.last_run = "2026-08-01T04:00:00+00:00"
+    assert report.spoken() == "The overnight review has not run since August 1 sir."
 
 
 def test_findings_survive_a_restart_and_keep_their_first_seen():

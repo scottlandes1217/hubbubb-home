@@ -17,6 +17,7 @@ console.info(`hubbubb-ring-card ${BUILD}`);
 // live DOM value instead of the last rendered one.
 import { live } from "lit/directives/live.js";
 import { rmsEnvelope } from "./envelope.js";
+import { promptKey, splitPaths } from "./paths.js";
 import {
   clearCore,
   coalesce,
@@ -383,6 +384,8 @@ class HubbubbRingCard extends LitElement {
     _queue: { state: true },
     _swipe: { state: true },
     _details: { state: true },
+    _view: { state: true },
+    _sideW: { state: true },
     _files: { state: true },
     _dragging: { state: true },
     _uploading: { state: true },
@@ -970,6 +973,7 @@ class HubbubbRingCard extends LitElement {
     this._build = on;
     if (on) {
       this._err = "";
+      this._sideW = this._recall("sidew", 365 * 864e5) || 0;
       this._loadModels();
       this._poll(true);
       this._startPolling();
@@ -991,6 +995,7 @@ class HubbubbRingCard extends LitElement {
       this._confirmKill = null;
       this._picking = false;
       this._details = false;
+      this._view = null;
       this._swipe = null;
       if (this._vvHandler && window.visualViewport) {
         window.visualViewport.removeEventListener("resize", this._vvHandler);
@@ -1289,17 +1294,17 @@ class HubbubbRingCard extends LitElement {
         // lock must not survive the round trip.
         if (this._ask && this._ask.multi) this._askSent = null;
 
-        // A dispatched message is done once the transcript records it. The
-        // transcript caps long messages, so exact equality left a long chip
-        // stuck at the bottom until the timeout — compare on a shared prefix
-        // instead. And once the send was accepted, a chip that never matches
-        // is furniture: two minutes is time enough for the turn to record it.
+        // A dispatched message is done once the transcript records it — by
+        // promptKey, since the recorded text is not the sent text (attached
+        // paths become "[Image #n]", long messages are capped). And once the
+        // send was accepted, a chip that never matches is furniture: two
+        // minutes is time enough for the turn to record it.
         if (this._queue?.length) {
           const seen = (this._msgs || [])
             .filter((m) => m.role === "user")
-            .map((m) => this._collapse(m.text).slice(0, 200));
+            .map((m) => promptKey(m.text));
           const recorded = (q) => {
-            const cq = this._collapse(q.text).slice(0, 200);
+            const cq = promptKey(q.text);
             return cq && seen.includes(cq);
           };
           const before = this._queue.length;
@@ -1382,6 +1387,32 @@ class HubbubbRingCard extends LitElement {
     }
   }
 
+  /* The list column's width is a preference, so it lives with the other ones
+     in localStorage. Pointer capture keeps the drag alive when the cursor
+     outruns the 6px handle. */
+  _gripDown(e) {
+    const side = this.renderRoot.querySelector(".side");
+    if (!side) return;
+    e.preventDefault();
+    const grip = e.currentTarget;
+    const x0 = e.clientX;
+    const w0 = side.getBoundingClientRect().width;
+    const max = this.renderRoot.querySelector(".panel").clientWidth * 0.6;
+    const move = (ev) => {
+      this._sideW = Math.round(Math.min(max, Math.max(140, w0 + ev.clientX - x0)));
+    };
+    const up = () => {
+      grip.removeEventListener("pointermove", move);
+      grip.removeEventListener("pointerup", up);
+      grip.removeEventListener("pointercancel", up);
+      this._store("sidew", this._sideW);
+    };
+    grip.setPointerCapture(e.pointerId);
+    grip.addEventListener("pointermove", move);
+    grip.addEventListener("pointerup", up);
+    grip.addEventListener("pointercancel", up);
+  }
+
   _recall(key, maxAgeMs) {
     try {
       const raw = localStorage.getItem(`jrc:${key}`);
@@ -1427,12 +1458,81 @@ class HubbubbRingCard extends LitElement {
     const out = [];
     let i = 0;
     for (const hit of m.text.matchAll(MD_RE)) {
-      if (hit.index > i) out.push(m.text.slice(i, hit.index));
-      out.push(hit[1] ? html`<code>${hit[1]}</code>` : html`<b>${hit[2]}</b>`);
+      if (hit.index > i) out.push(this._linkPaths(m.text.slice(i, hit.index)));
+      out.push(
+        hit[1] ? html`<code>${this._linkPaths(hit[1])}</code>` : html`<b>${hit[2]}</b>`
+      );
       i = hit.index + hit[0].length;
     }
-    out.push(m.text.slice(i));
+    out.push(this._linkPaths(m.text.slice(i)));
     return out;
+  }
+
+  _linkPaths(text) {
+    return splitPaths(text).map((part) =>
+      typeof part === "string"
+        ? part
+        : html`<a
+            class="flink"
+            href="#"
+            data-ai="open-file"
+            @click=${(e) => {
+              e.preventDefault();
+              this._openFile(part.path, part.line);
+            }}
+          >${part.path}${part.line}</a>`
+    );
+  }
+
+  /* A path in a reply opens in the viewer column. Relative paths are the
+     session's, so the listener resolves them against its working directory. */
+  async _openFile(path, line) {
+    const ln = line ? parseInt(line.slice(1), 10) : 0;
+    this._view = { path, line: ln, loading: true };
+    try {
+      const res = await this._api("agent_file", { id: this._sel || "", path });
+      this._view = { ...res, path: res.path || path, line: ln };
+    } catch (e) {
+      this._view = { path, line: ln, error: this._errText(e) };
+      return;
+    }
+    await this.updateComplete;
+    this.renderRoot.querySelector(".vline.hit")?.scrollIntoView({ block: "center" });
+  }
+
+  _renderViewer() {
+    const v = this._view;
+    const name = v.path.replace(/\/$/, "").split("/").pop() || v.path;
+    return html`
+      <div class="phead">
+        <span class="ptitle" title=${v.path}>${name}${v.line ? `:${v.line}` : ""}</span>
+        <button class="hbtn" data-ai="close-file" @click=${() => (this._view = null)}>✕</button>
+      </div>
+      <div class="vpath">${v.path}</div>
+      <div class="vbody">
+        ${v.loading
+          ? html`<div class="dim pad">Loading…</div>`
+          : v.error
+            ? html`<div class="dim pad">${v.error}</div>`
+            : v.image
+              ? html`<img class="vimg" src=${v.image} alt=${name} />`
+              : v.dir
+                ? v.dir.map(
+                    (n) => html`<a
+                      class="flink vent"
+                      href="#"
+                      @click=${(e) => {
+                        e.preventDefault();
+                        this._openFile(`${v.path}/${n}`, "");
+                      }}
+                    >${n}</a>`
+                  )
+                : html`<pre class="vtext">${(v.text || "").split("\n").map(
+                    (l, i) => html`<div class="vline ${i + 1 === v.line ? "hit" : ""}"><span class="vno">${i + 1}</span>${l || " "}</div>`
+                  )}</pre>`}
+        ${v.truncated ? html`<div class="dim pad">Showing the first 512 KB.</div>` : nothing}
+      </div>
+    `;
   }
 
   /* Cheap equality for a transcript: same length and an unchanged last entry.
@@ -1447,10 +1547,6 @@ class HubbubbRingCard extends LitElement {
 
   /* The listener collapses whitespace before typing, so transcript matching
      has to compare the collapsed form. */
-  _collapse(text) {
-    return text.split(/\s+/).join(" ");
-  }
-
   /* Messages that have never been on screen only have an estimated height, so
      one jump can land short of the end. Each pass renders what it scrolled to,
      which firms up the estimate for the next — three frames is enough to settle
@@ -4027,7 +4123,7 @@ class HubbubbRingCard extends LitElement {
                       @click=${() => this._killSession(s.id)}
                     >${this._confirmKill === s.id ? "Sure?" : "End"}</button>
                     <button
-                      class="row"
+                      class="row ${this._sel === s.id ? "sel" : ""}"
                       data-ai="open-session"
                       @click=${() => this._rowTap(s.id)}
                       @touchstart=${(e) => this._swipeStart(e, s.id)}
@@ -4069,7 +4165,7 @@ class HubbubbRingCard extends LitElement {
     const s = (this._sessions || []).find((x) => x.id === this._sel);
     return html`
       <div class="phead">
-        <button class="hbtn" data-ai="close-session-view" @click=${() => this._select(null)}>‹</button>
+        <button class="hbtn back" data-ai="close-session-view" @click=${() => this._select(null)}>‹</button>
         <button
           class="ptitle tappable"
           data-ai="session-details"
@@ -4336,9 +4432,16 @@ class HubbubbRingCard extends LitElement {
                 </svg>
               </button>`}
           ${build && !this._config.build_dashboard
-            ? html`<div class="panel">
-                ${this._sel ? this._renderSession() : this._renderList()}
-                ${this._err ? html`<div class="perr">${this._err}</div>` : nothing}
+            ? html`<div class="panel ${this._sel ? "open" : ""} ${this._view ? "view" : ""}">
+                <div class="side" style=${this._sideW ? `flex-basis:${this._sideW}px` : ""}>${this._renderList()}</div>
+                <div class="grip" title="Drag to resize" @pointerdown=${this._gripDown}></div>
+                <div class="main">
+                  ${this._sel
+                    ? this._renderSession()
+                    : html`<div class="dim pad empty">Pick a session, or start a new one.</div>`}
+                  ${this._err ? html`<div class="perr">${this._err}</div>` : nothing}
+                </div>
+                ${this._view ? html`<div class="viewer">${this._renderViewer()}</div>` : nothing}
               </div>`
             : nothing}
           <div class="ring ${this._config.animation === "jarvis-v1" ? "" : "bubbles"}" data-ai="activate-assistant" @click=${this._ringTap}>
@@ -4509,11 +4612,109 @@ class HubbubbRingCard extends LitElement {
          the composer hung 56px off the bottom of the screen. The background
          is 97% opaque; the blur was invisible anyway. */
     }
+    /* Build mode is a console: sessions on the left, the conversation in the
+       middle, a file the reply pointed at on the right. The ring sits it out —
+       it was decoration that cost a quarter of the width. */
     .wrap.build .ring {
-      order: 1;
-      width: clamp(90px, 24%, 170px);
-      align-self: center;
+      display: none;
+    }
+    .side,
+    .main,
+    .viewer {
+      display: flex;
+      flex-direction: column;
+      min-height: 0;
+      min-width: 0;
+    }
+    .side {
+      flex: 0 0 clamp(180px, 28%, 280px);
+    }
+    .grip {
       flex: none;
+      width: 6px;
+      margin: 0 9px 0 9px;
+      border-left: 1px solid rgba(53, 154, 210, 0.3);
+      cursor: col-resize;
+      touch-action: none;
+      transition: border-color 0.2s;
+    }
+    .grip:hover,
+    .grip:active {
+      border-color: var(--jr-color);
+    }
+    .main {
+      flex: 1;
+    }
+    .main .hbtn.back {
+      display: none;
+    }
+    .empty {
+      margin: auto;
+      text-align: center;
+    }
+    .row.sel {
+      background: rgba(46, 157, 245, 0.14);
+    }
+    .viewer {
+      flex: 0 0 min(44%, 600px);
+      padding-left: 12px;
+      margin-left: 12px;
+      border-left: 1px solid rgba(53, 154, 210, 0.3);
+    }
+    .flink {
+      color: var(--jr-color);
+      text-decoration: underline dotted;
+      text-underline-offset: 2px;
+      cursor: pointer;
+    }
+    .vpath {
+      flex: none;
+      font-size: 11px;
+      color: rgba(160, 200, 220, 0.55);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      direction: rtl;
+      text-align: left;
+      padding-bottom: 6px;
+    }
+    .vbody {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      user-select: text;
+      -webkit-user-select: text;
+    }
+    .vtext {
+      margin: 0;
+      font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace;
+      white-space: pre;
+      min-width: max-content;
+    }
+    .vline {
+      display: flex;
+    }
+    .vline.hit {
+      background: rgba(46, 157, 245, 0.18);
+    }
+    .vno {
+      flex: none;
+      width: 3.5em;
+      padding-right: 1em;
+      text-align: right;
+      color: rgba(160, 200, 220, 0.4);
+      user-select: none;
+      -webkit-user-select: none;
+    }
+    .vimg {
+      display: block;
+      max-width: 100%;
+      height: auto;
+    }
+    .vent {
+      display: block;
+      padding: 3px 0;
+      font-size: 13px;
     }
     .mode {
       position: absolute;
@@ -4590,7 +4791,7 @@ class HubbubbRingCard extends LitElement {
       flex: 1;
       min-width: 0;
       display: flex;
-      flex-direction: column;
+      flex-direction: row;
       background: var(
         --jr-panel-bg,
         linear-gradient(160deg, rgba(10, 24, 32, 0.92), rgba(4, 10, 14, 0.96))
@@ -5498,8 +5699,26 @@ class HubbubbRingCard extends LitElement {
        viewport — the keyboard shrinks it instead of scrolling the dashboard,
        so the composer always sits right on top of the keyboard. */
     @media (max-width: 620px) {
-      .wrap.build .ring {
+      .panel {
+        flex-direction: column;
+      }
+      .side,
+      .main,
+      .viewer {
+        flex: 1;
+        padding: 0;
+        margin: 0;
+        border: none;
+      }
+      .grip,
+      .panel.open .side,
+      .panel.view .side,
+      .panel:not(.open) .main,
+      .panel.view .main {
         display: none;
+      }
+      .main .hbtn.back {
+        display: block;
       }
       .wrap.build {
         /* inline build mode: the fixed overlay below is the real UI */

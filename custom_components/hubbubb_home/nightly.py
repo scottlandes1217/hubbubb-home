@@ -119,33 +119,19 @@ class FindingsReport:
             listener()
 
     def spoken(self, name: str) -> str:
-        """One sentence, for the briefing."""
-        if not self.items:
-            return "Nothing went quiet overnight."
-        dead = sum(1 for f in self.items if f["kind"] == "dead")
-        quiet = sum(1 for f in self.items if f["kind"] == "quiet")
+        """One sentence for the briefing, and only when something was fixed.
+
+        Offline and gone-quiet counts stay on the sensor but are no longer
+        read out: a morning of "eleven things offline" never once changed
+        what anyone did that day.
+        """
         drift = sum(1 for f in self.items if f["kind"] == "drift")
-        parts = []
-        if dead:
-            parts.append(f"{dead} {'thing' if dead == 1 else 'things'} offline")
-        if quiet:
-            parts.append(
-                f"{quiet} {'has' if quiet == 1 else 'have'} gone quiet"
-            )
-        if drift:
-            parts.append(
-                f"{drift} configuration {'problem' if drift == 1 else 'problems'}"
-            )
-        sentence = "Overnight I found " + " and ".join(parts) + "."
-        # Anything carried over is the more useful fact: it says nobody has
-        # dealt with it, which a nightly count never does.
-        today = dt_util.now().date().isoformat()
-        carried = sum(
-            1 for f in self.items if f.get("first_seen") and f["first_seen"] != today
+        if not drift:
+            return ""
+        return (
+            f"Overnight I found {drift} configuration "
+            f"{'problem' if drift == 1 else 'problems'}."
         )
-        if carried:
-            sentence += f" {carried} of them {'was' if carried == 1 else 'were'} there yesterday too."
-        return sentence
 
 
 def _ignored(entity_id: str, patterns: list[str]) -> bool:

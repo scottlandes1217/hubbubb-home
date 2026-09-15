@@ -253,8 +253,14 @@ def main() -> None:
     parser.add_argument("--extra-negatives", default=None,
                         help="directory of real audio the model must sit "
                              "through - the television, Jarvis's own replies. "
-                             "Used for training and for the false-accept "
-                             "measurement the cutoff table is read from")
+                             "Mined hard negatives belong here; pair it with "
+                             "--eval-negatives or the cutoff table is scored "
+                             "on these same clips")
+    parser.add_argument("--eval-negatives", default=None,
+                        help="directory of clips the model must NEVER train "
+                             "on, used only for the false-accept table. "
+                             "Without it that table is scored on the training "
+                             "negatives and flatters the model badly")
     parser.add_argument("--smoke", action="store_true", help="tiny fast run proving the pipeline; the model itself will be poor")
     args = parser.parse_args()
 
@@ -329,22 +335,46 @@ def main() -> None:
             "truncation_strategy": "split", "type": "mmap"})
 
     if args.extra_negatives:
-        # Twice over: as training negatives, and as an ambient set, so the
-        # false-accepts-per-hour table at the end is measured against this
-        # room's own television rather than a stranger's dinner party.
+        # With --eval-negatives these clips are training data and nothing
+        # else. Without it they are also the ambient set the false-accept
+        # table is read from - which is scoring the model on its own homework,
+        # and on 2 September that printed 0.18 false accepts an hour for a
+        # model the room then woke 3.3 times an hour. The warning below is
+        # the only honest thing to say about that number.
         house = work / "house_negative_clips"
         copy_clips(Path(args.extra_negatives).expanduser(), house)
-        build_features(house, work / "features" / "house_negative", plain, {
+        sets = {
             "training": ("train", 1, 10),
             "validation": ("validation", 1, 10),
             "testing": ("test", 1, 1),
+        }
+        if not args.eval_negatives:
+            sets["validation_ambient"] = ("train", 1, 1)
+            sets["testing_ambient"] = ("train", 1, 1)
+            print("WARNING: no --eval-negatives, so the false-accept table at "
+                  "the end is measured on the training negatives and means "
+                  "nothing. Hold an hour of television back.", flush=True)
+        build_features(house, work / "features" / "house_negative", plain,
+                       sets, split_seed=None)
+        features.append({
+            "features_dir": str(work / "features" / "house_negative"),
+            "sampling_weight": 20.0, "penalty_weight": 2.0, "truth": False,
+            "truncation_strategy": "random", "type": "mmap"})
+
+    if args.eval_negatives:
+        # Never sampled for training (weight 0) - this set exists only so the
+        # cutoff table at the end is measured against audio the model has
+        # never seen, from this room, with this television.
+        held = work / "eval_negative_clips"
+        copy_clips(Path(args.eval_negatives).expanduser(), held)
+        build_features(held, work / "features" / "eval_negative", plain, {
             "validation_ambient": ("train", 1, 1),
             "testing_ambient": ("train", 1, 1),
         }, split_seed=None)
         features.append({
-            "features_dir": str(work / "features" / "house_negative"),
-            "sampling_weight": 20.0, "penalty_weight": 1.0, "truth": False,
-            "truncation_strategy": "random", "type": "mmap"})
+            "features_dir": str(work / "features" / "eval_negative"),
+            "sampling_weight": 0.0, "penalty_weight": 1.0, "truth": False,
+            "truncation_strategy": "split", "type": "mmap"})
 
     # --- train ---------------------------------------------------------------
     import yaml

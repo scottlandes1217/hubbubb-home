@@ -50,6 +50,53 @@ phrase, so retraining with different `--steps` is incremental.
 
 A smoke model detects *something* but false-triggers freely — never ship it.
 
+## Fixing a model the television keeps waking
+
+The wrong instinct is to slice an evening of telly into the negatives and
+retrain. Almost every one of those clips is already scored near zero, so the
+model is right about them and learns nothing; on 2 September that produced a
+model that tested at 0.18 false accepts an hour and then woke 3.3 times an
+hour in the room.
+
+Two things actually matter: train on the moments that nearly fired, and
+measure on audio the model has never seen.
+
+```sh
+# 1. Record from the puck itself, telly on, an evening of it. Hours, not
+#    minutes: at 3 wakes an hour, 20 minutes holds about one example.
+.venv/bin/python record.py 36000 ~/.hubbubb-voice/room/tv-long.wav --puck 192.168.0.200
+.venv/bin/python record.py 3600  ~/.hubbubb-voice/room/tv-heldout.wav --puck 192.168.0.200
+
+# 2. Mine the near-misses out of it with the model you are trying to beat.
+.venv/bin/python harvest.py hard ~/.hubbubb-voice/room/tv-long.wav     ~/.hubbubb-voice/room/hard_negatives/ ~/.claude/hooks/voice-pe/jarvis.tflite
+.venv/bin/python harvest.py chunks ~/.hubbubb-voice/room/tv-heldout.wav     ~/.hubbubb-voice/room/eval_negatives/
+
+# 3. Retrain on those, scored against the hour that was held back.
+.venv/bin/python train.py "jarvis" --out ~/.hubbubb-voice/wakewords/jarvis3     --extra-positives ~/.hubbubb-voice/room/positive_clips     --extra-negatives ~/.hubbubb-voice/room/hard_negatives     --eval-negatives  ~/.hubbubb-voice/room/eval_negatives
+```
+
+`harvest.py hard` runs the model over the recording with the puck's own rule
+(a moving average over 5 slices, 25 slices of refractory) and keeps the 1.5 s
+ending at every moment that scored above 0.4 — a few hundred windows out of
+ten hours. It prints what the recording would have cost you at each cutoff,
+which is the same number you can measure from `assist_satellite` history, so
+the two are comparable.
+
+Without `--eval-negatives` the cutoff table at the end of a run is scored on
+the training negatives; `train.py` now says so in a warning rather than
+printing a flattering number silently.
+
+Keep real positives in the loop (`--extra-positives`) and watch the
+false-reject column too: pushing false accepts down without them buys a quiet
+television and a wake word that no longer hears you.
+
+**Record everything from the same microphone.** Puck audio comes in around
+six times quieter than the laptop's, because it is the raw far-field level
+the wake model actually works at rather than something an AGC has flattered.
+That is what makes it the better training data, and it is also why a set
+mixing the two teaches the model that loudness predicts the wake word. If you
+switch to `--puck`, re-record the positives with it too.
+
 ## Full-quality runs and tuning
 
 The full run matches the notebook's defaults. Honest expectations: the

@@ -296,7 +296,7 @@ class HubbubbHomeOptionsFlow(OptionsFlow):
                                 CONF_DRIFT_REPAIR, default=True
                             ): BooleanSelector(),
                             vol.Optional(
-                                CONF_REVIEW_ENABLED, default=False
+                                CONF_REVIEW_ENABLED, default=True
                             ): BooleanSelector(),
                             vol.Optional(
                                 CONF_REVIEW_TIME, default=DEFAULT_REVIEW_TIME
