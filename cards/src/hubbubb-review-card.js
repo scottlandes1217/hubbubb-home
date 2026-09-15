@@ -11,6 +11,8 @@
  */
 import { groupProposals, markup } from "./review-groups.js";
 
+const RUNNING = "running — the review takes a few minutes";
+
 class HubbubbReviewCard extends HTMLElement {
   setConfig(config) {
     if (!config || !config.entity) {
@@ -36,8 +38,20 @@ class HubbubbReviewCard extends HTMLElement {
     return 6;
   }
 
+  /* Every call reports back in the header: "saving…" until HA answers, then
+     "saved" or the error text. A card that swallows a failed call just looks
+     like a button that does nothing. */
+  _call(service, data, busy, done) {
+    this._note = busy;
+    this._render();
+    this._hass.callService("hubbubb_home", service, data).then(
+      () => { this._note = done; this._render(); },
+      (e) => { this._note = `${service} failed: ${e?.message || e}`; this._render(); }
+    );
+  }
+
   _decide(id, decision) {
-    this._hass.callService("hubbubb_home", "review_decide", { id, decision });
+    this._call("review_decide", { id, decision }, "saving…", `saved: ${decision}`);
   }
 
   _item(p, buttons) {
@@ -61,7 +75,7 @@ class HubbubbReviewCard extends HTMLElement {
     const st = this._hass.states[this._config.entity];
     const attrs = st?.attributes ?? {};
     const groups = groupProposals(attrs.proposals);
-    const sig = JSON.stringify([attrs.last_run, attrs.proposals, this._showDecided]);
+    const sig = JSON.stringify([attrs.last_run, attrs.proposals, this._showDecided, this._note]);
     if (sig === this._sig) return;
     this._sig = sig;
 
@@ -103,8 +117,8 @@ class HubbubbReviewCard extends HTMLElement {
       <ha-card class="jr-card">
         <div class="jr-top">
           <span class="jr-h">Nightly review</span>
-          <span class="jr-sub">last run ${this._esc(lastRun)}${attrs.detail ? " — " + this._esc(attrs.detail) : ""}</span>
-          <button class="jr-btn" data-run>Run now</button>
+          <span class="jr-sub">last run ${this._esc(lastRun)}${attrs.detail ? " — " + this._esc(attrs.detail) : ""}${this._note ? " · " + this._esc(this._note) : ""}</span>
+          <button class="jr-btn" data-run ${this._note === RUNNING ? "disabled" : ""}>${this._note === RUNNING ? "Running…" : "Run now"}</button>
         </div>
         <div class="jr-section">Waiting for you (${groups.pending.length})</div>
         ${pending || `<div class="jr-empty">Nothing waiting. The review runs at 04:00.</div>`}
@@ -125,11 +139,9 @@ class HubbubbReviewCard extends HTMLElement {
       this._showDecided = !this._showDecided;
       this._render();
     });
-    this.querySelector("[data-run]").addEventListener("click", (e) => {
-      e.target.disabled = true;
-      e.target.textContent = "Running…";
-      this._hass.callService("hubbubb_home", "run_review", {});
-    });
+    this.querySelector("[data-run]").addEventListener("click", () =>
+      this._call("run_review", {}, RUNNING, "review finished")
+    );
   }
 
   _esc(s) {

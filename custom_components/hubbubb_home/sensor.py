@@ -123,7 +123,11 @@ class ReviewSensor(HubbubbEntity, SensorEntity):
             "last_run": review.last_run,
             "detail": review.detail,
             "summary": review.spoken(),
-            "proposals": review.proposals,
+            # A copy, not the live list: decisions mutate it in place, and HA
+            # diffs new attributes against the ones it already holds. Handing
+            # it the same object made every decision invisible to dashboards
+            # until a reload (the counters changed, the list "did not").
+            "proposals": [dict(p) for p in review.proposals],
             "pending": len(review.by_status("pending")),
             "accepted": len(review.by_status("accepted")),
         }
