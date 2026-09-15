@@ -16,7 +16,7 @@ console.info(`hubbubb-ring-card ${BUILD}`);
 // option, so plain binding cannot pull it back. live() compares against the
 // live DOM value instead of the last rendered one.
 import { live } from "lit/directives/live.js";
-import { rmsEnvelope } from "./envelope.js";
+import { downsampler, rmsEnvelope } from "./envelope.js";
 import { promptKey, splitPaths } from "./paths.js";
 import {
   clearCore,
@@ -2195,13 +2195,12 @@ class HubbubbRingCard extends LitElement {
         this._toast("The microphone disconnected.");
         this._stopLocalVoice();
       };
+    /* The context runs at the device's own rate and we resample to the 16k
+       the pipeline expects ourselves. Asking for a 16k context looked right,
+       but iOS keeps the mic at 48k and WebKit's conversion between the two
+       garbles speech — Whisper then transcribes gibberish. */
     const Ctx = window.AudioContext || window.webkitAudioContext;
-    let ctx;
-    try {
-      ctx = new Ctx({ sampleRate: 16000 });
-    } catch {
-      ctx = new Ctx();
-    }
+    const ctx = new Ctx();
     /* Unlock audio output while we're still inside the tap gesture, so the
        TTS reply is allowed to play seconds later (iOS autoplay rules).
        Dictation never plays audio, so it skips the unlock. */
@@ -2235,7 +2234,7 @@ class HubbubbRingCard extends LitElement {
           type: "assist_pipeline/run",
           start_stage: "stt",
           end_stage: mode === "dictate" ? "stt" : "tts",
-          input: { sample_rate: ctx.sampleRate },
+          input: { sample_rate: 16000 },
           ...(convId ? { conversation_id: convId } : {}),
         }
       );
@@ -2246,16 +2245,14 @@ class HubbubbRingCard extends LitElement {
 
     const src = (voice.src = ctx.createMediaStreamSource(stream));
     const proc = (voice.proc = ctx.createScriptProcessor(2048, 1, 1));
+    const down = downsampler(ctx.sampleRate, 16000);
     proc.onaudioprocess = (e) => {
       if (voice.handlerId == null) return;
-      const f = e.inputBuffer.getChannelData(0);
-      const out = new Uint8Array(1 + f.length * 2);
+      const pcm = down(e.inputBuffer.getChannelData(0));
+      const out = new Uint8Array(1 + pcm.length * 2);
       out[0] = voice.handlerId;
       const dv = new DataView(out.buffer, 1);
-      for (let i = 0; i < f.length; i++) {
-        const v = Math.max(-1, Math.min(1, f[i]));
-        dv.setInt16(i * 2, v < 0 ? v * 0x8000 : v * 0x7fff, true);
-      }
+      for (let i = 0; i < pcm.length; i++) dv.setInt16(i * 2, pcm[i], true);
       try {
         this._hass.connection.socket.send(out);
       } catch {
