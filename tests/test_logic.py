@@ -161,6 +161,7 @@ _pkg.__path__ = [str(PKG)]
 sys.modules["hubbubb_home"] = _pkg
 
 from hubbubb_home.memory import Memory  # noqa: E402
+from hubbubb_home.recipes import Recipes, as_lines  # noqa: E402
 from hubbubb_home.speakers import SpeakerBook  # noqa: E402
 from hubbubb_home.timers import TimerPool  # noqa: E402
 from hubbubb_home.nightly import FindingsReport, _days  # noqa: E402
@@ -224,6 +225,56 @@ def test_memory_round_trip_against_a_real_database():
             assert gone and "pool" in gone
             assert await store.async_search("pool") == []
             assert len(await store.async_all()) == 1
+
+        asyncio.run(_run())
+
+
+def test_recipes_round_trip_against_a_real_database():
+    """Save, find by ingredient, edit in place, delete - on the real schema."""
+    import asyncio
+    import tempfile
+
+    class _MemHass:
+        def __init__(self, path):
+            self.config = types.SimpleNamespace(path=lambda *p: path)
+
+        async def async_add_executor_job(self, fn, *args):
+            return fn(*args)
+
+    assert as_lines(["a", " ", "b "]) == "a\nb"
+    assert as_lines("x\n\n y") == "x\ny"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        book = Recipes(_MemHass(str(Path(tmp) / "m.db")))
+
+        async def _run():
+            await book.async_setup()
+            parm = await book.async_save(
+                "Chicken parmesan", ["2 chicken breasts", "mozzarella"], ["bread", "fry", "bake"], "https://x"
+            )
+            await book.async_save("Pancakes", "flour\neggs", ["mix", "fry"])
+            assert parm["id"] == 1 and parm["ingredients"] == ["2 chicken breasts", "mozzarella"]
+
+            hits = await book.async_search("how do I make chicken parm?")
+            assert hits and hits[0]["title"] == "Chicken parmesan", hits
+            hits = await book.async_search("anything with eggs")
+            assert [h["title"] for h in hits] == ["Pancakes"], hits
+            assert await book.async_search("??") == []
+
+            again = await book.async_save("Pancakes", ["flour", "eggs", "milk"], ["mix", "fry"], recipe_id=2)
+            assert again["ingredients"][-1] == "milk"
+            assert [r["title"] for r in await book.async_all()] == ["Chicken parmesan", "Pancakes"]
+
+            try:
+                await book.async_save("", ["x"], ["y"])
+            except ValueError:
+                pass
+            else:
+                raise AssertionError("empty title saved")
+
+            assert await book.async_delete(1) is True
+            assert await book.async_delete(1) is False
+            assert len(await book.async_all()) == 1
 
         asyncio.run(_run())
 

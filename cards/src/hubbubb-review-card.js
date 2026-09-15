@@ -42,16 +42,26 @@ class HubbubbReviewCard extends HTMLElement {
      "saved" or the error text. A card that swallows a failed call just looks
      like a button that does nothing. */
   _call(service, data, busy, done) {
+    this._track(this._hass.callService("hubbubb_home", service, data), busy, done, service);
+  }
+
+  _track(promise, busy, done, label) {
     this._note = busy;
     this._render();
-    this._hass.callService("hubbubb_home", service, data).then(
+    promise.then(
       () => { this._note = done; this._render(); },
-      (e) => { this._note = `${service} failed: ${e?.message || e}`; this._render(); }
+      (e) => { this._note = `${label} failed: ${e?.message || e}`; this._render(); }
     );
   }
 
   _decide(id, decision) {
     this._call("review_decide", { id, decision }, "saving…", `saved: ${decision}`);
+  }
+
+  _acceptAll(ids) {
+    const one = (id) =>
+      this._hass.callService("hubbubb_home", "review_decide", { id, decision: "accepted" });
+    this._track(Promise.all(ids.map(one)), `accepting ${ids.length}…`, `accepted ${ids.length}`, "accept all");
   }
 
   _item(p, buttons) {
@@ -120,7 +130,9 @@ class HubbubbReviewCard extends HTMLElement {
           <span class="jr-sub">last run ${this._esc(lastRun)}${attrs.detail ? " — " + this._esc(attrs.detail) : ""}${this._note ? " · " + this._esc(this._note) : ""}</span>
           <button class="jr-btn" data-run ${this._note === RUNNING ? "disabled" : ""}>${this._note === RUNNING ? "Running…" : "Run now"}</button>
         </div>
-        <div class="jr-section">Waiting for you (${groups.pending.length})</div>
+        <div class="jr-section">Waiting for you (${groups.pending.length})
+          ${groups.pending.length > 1 ? `<button class="jr-btn jr-yes" data-accept-all>Accept all</button>` : ""}
+        </div>
         ${pending || `<div class="jr-empty">Nothing waiting. The review runs at 04:00.</div>`}
         <div class="jr-section">Accepted — say "apply the nightly findings" (${groups.accepted.length})</div>
         ${accepted || `<div class="jr-empty">Nothing accepted yet.</div>`}
@@ -134,6 +146,9 @@ class HubbubbReviewCard extends HTMLElement {
       item.querySelectorAll("[data-decide]").forEach((b) =>
         b.addEventListener("click", () => this._decide(item.dataset.id, b.dataset.decide))
       )
+    );
+    this.querySelector("[data-accept-all]")?.addEventListener("click", () =>
+      this._acceptAll(groups.pending.map((p) => p.id))
     );
     this.querySelector("[data-toggle]").addEventListener("click", () => {
       this._showDecided = !this._showDecided;

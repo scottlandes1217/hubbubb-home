@@ -90,8 +90,7 @@ from .const import (
     DOMAIN,
     EVENT_MESSAGE,
     delivery_for,
-    PANEL_FILE,
-    PANEL_PATH,
+    PANELS,
     PLATFORMS,
     SENTENCE_FILES,
     WEBHOOK_MESSAGE,
@@ -115,6 +114,7 @@ from .oauth import (
 )
 from .llm_api import HubbubbAPI
 from .memory import Memory
+from .recipes import Recipes
 from .speakers import (
     SpeakerBook,
     VoiceProxyView,
@@ -156,6 +156,7 @@ class Runtime:
     hass: HomeAssistant
     name: str
     memory: Memory
+    recipes: Recipes
     timers: TimerPool
     findings: FindingsReport
     review: ReviewReport
@@ -200,6 +201,9 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     memory = Memory(hass)
     await memory.async_setup()
+
+    recipes = Recipes(hass)
+    await recipes.async_setup()
 
     findings = FindingsReport(hass)
     await findings.async_load()
@@ -266,6 +270,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass=hass,
         name=name,
         memory=memory,
+        recipes=recipes,
         timers=None,  # set below; the pool needs a callback that needs runtime
         findings=findings,
         review=review,
@@ -343,7 +348,8 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         hass.services.async_remove(DOMAIN, service)
     # One panel between however many entries; it goes with the last of them.
     if not hass.data[DOMAIN]:
-        frontend.async_remove_panel(hass, PANEL_PATH)
+        for _file, path, _title, _icon in PANELS:
+            frontend.async_remove_panel(hass, path)
     return True
 
 
@@ -370,7 +376,7 @@ class _CardsView(HomeAssistantView):
     async def get(
         self, request: web.Request, version: str, filename: str
     ) -> web.StreamResponse:
-        if filename not in (*CARDS, PANEL_FILE):  # also forecloses traversal
+        if filename not in (*CARDS, *(p[0] for p in PANELS)):  # also forecloses traversal
             raise web.HTTPNotFound
         return web.FileResponse(
             Path(__file__).parent / "www" / filename,
@@ -392,22 +398,23 @@ async def _async_serve_cards(hass: HomeAssistant) -> None:
     # Every time, not once: unloading the last entry removes the panel, so a
     # reload has to put it back. update=True is what makes a second entry, or
     # that reload, a no-op rather than a ValueError.
-    frontend.async_register_built_in_panel(
-        hass,
-        "custom",
-        sidebar_title="Voice Studio",
-        sidebar_icon="mdi:microphone-plus",
-        frontend_url_path=PANEL_PATH,
-        config={
-            "_panel_custom": {
-                "name": "hubbubb-voice-studio",
-                "module_url": f"{base}/{PANEL_FILE}",
-                "embed_iframe": False,
-                "trust_external": False,
-            }
-        },
-        update=True,
-    )
+    for filename, path, title, icon in PANELS:
+        frontend.async_register_built_in_panel(
+            hass,
+            "custom",
+            sidebar_title=title,
+            sidebar_icon=icon,
+            frontend_url_path=path,
+            config={
+                "_panel_custom": {
+                    "name": filename[: -len(".js")],
+                    "module_url": f"{base}/{filename}",
+                    "embed_iframe": False,
+                    "trust_external": False,
+                }
+            },
+            update=True,
+        )
 
     if hass.data.get(f"{DOMAIN}_cards"):
         return
@@ -535,6 +542,23 @@ SERVICE_SCHEMAS: dict[str, vol.Schema] = {
         }
     ),
     "forget": vol.Schema({vol.Required("query"): str}),
+    "recipe_save": vol.Schema(
+        {
+            vol.Optional("id"): vol.Coerce(int),
+            vol.Required("title"): str,
+            vol.Optional("ingredients", default=""): vol.Any(str, [str]),
+            vol.Optional("steps", default=""): vol.Any(str, [str]),
+            vol.Optional("source", default=""): str,
+        }
+    ),
+    "recipe_delete": vol.Schema({vol.Required("id"): vol.Coerce(int)}),
+    "recipe_list": vol.Schema({}),
+    "recipe_find": vol.Schema(
+        {
+            vol.Required("query"): str,
+            vol.Optional("limit", default=3): vol.All(int, vol.Range(1, 25)),
+        }
+    ),
     "timer_start": vol.Schema(
         {
             vol.Optional("name", default=""): str,
@@ -580,6 +604,29 @@ def _async_register_services(hass: HomeAssistant, runtime: Runtime) -> None:
 
     async def forget(call: ServiceCall) -> ServiceResponse:
         return {"forgot": await runtime.memory.async_forget(call.data["query"])}
+
+    async def recipe_save(call: ServiceCall) -> ServiceResponse:
+        try:
+            stored = await runtime.recipes.async_save(
+                call.data["title"],
+                call.data["ingredients"],
+                call.data["steps"],
+                call.data["source"],
+                call.data.get("id"),
+            )
+        except ValueError as err:
+            raise HomeAssistantError(str(err)) from err
+        return {"recipe": stored}
+
+    async def recipe_delete(call: ServiceCall) -> ServiceResponse:
+        return {"deleted": await runtime.recipes.async_delete(call.data["id"])}
+
+    async def recipe_list(call: ServiceCall) -> ServiceResponse:
+        return {"recipes": await runtime.recipes.async_all()}
+
+    async def recipe_find(call: ServiceCall) -> ServiceResponse:
+        hits = await runtime.recipes.async_search(call.data["query"], call.data["limit"])
+        return {"recipes": hits}
 
     async def timer_start(call: ServiceCall) -> ServiceResponse:
         total = (
@@ -660,6 +707,10 @@ def _async_register_services(hass: HomeAssistant, runtime: Runtime) -> None:
         "remember": remember,
         "recall": recall,
         "forget": forget,
+        "recipe_save": recipe_save,
+        "recipe_delete": recipe_delete,
+        "recipe_list": recipe_list,
+        "recipe_find": recipe_find,
         "timer_start": timer_start,
         "timer_cancel": timer_cancel,
         "timer_add": timer_add,

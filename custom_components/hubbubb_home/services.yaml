@@ -18,6 +18,39 @@ forget:
     query:
       required: true
       selector: { text: }
+recipe_save:
+  fields:
+    id:
+      description: "Set to replace an existing recipe"
+      selector: { number: { min: 1, mode: box } }
+    title:
+      required: true
+      example: "Chicken parmesan"
+      selector: { text: }
+    ingredients:
+      description: "One per line"
+      selector: { text: { multiline: true } }
+    steps:
+      description: "One per line"
+      selector: { text: { multiline: true } }
+    source:
+      example: "https://example.com/chicken-parm"
+      selector: { text: }
+recipe_delete:
+  fields:
+    id:
+      required: true
+      selector: { number: { min: 1, mode: box } }
+recipe_list: {}
+recipe_find:
+  fields:
+    query:
+      required: true
+      example: "something with chicken"
+      selector: { text: }
+    limit:
+      default: 3
+      selector: { number: { min: 1, max: 25 } }
 timer_start:
   fields:
     name:

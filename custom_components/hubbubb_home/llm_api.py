@@ -51,6 +51,9 @@ class HubbubbAPI(llm.API):
             RememberTool(runtime),
             RecallTool(runtime),
             ForgetTool(runtime),
+            FindRecipeTool(runtime),
+            SaveRecipeTool(runtime),
+            DeleteRecipeTool(runtime),
             AddToListTool(runtime),
             ReadListTool(runtime),
             SetSpeakerTool(runtime),
@@ -86,6 +89,17 @@ class HubbubbAPI(llm.API):
             "yours - use start_timer, cancel_timer and timer_status "
             "whenever a countdown is asked for, from any device, and never "
             "tell the speaker that timers are unavailable."
+        )
+        prompt += (
+            "\n\nThe house keeps a cookbook. When asked for a recipe or how "
+            "to make a dish, call find_recipe first and read from a saved "
+            "one if there is a match. If nothing is saved, find a well-rated "
+            "recipe online, then in one reply, after all the searching, give "
+            "the gist aloud - name, time, the main ingredients - and ask "
+            "whether to save it; only the final message is spoken, so never "
+            "leave the gist in an earlier one. Only call save_recipe "
+            "once the speaker says yes, with the full ingredient list and "
+            "steps and the page it came from."
         )
         # The persona's "say you can't" reads, to a 3B model, as license to
         # improvise a sentence of filler. When the companion exists, the rule
@@ -216,6 +230,77 @@ class ForgetTool(_RuntimeTool):
         if gone is None:
             return {"forgot": None, "detail": "nothing matched"}
         return {"forgot": gone}
+
+
+class FindRecipeTool(_RuntimeTool):
+    name = "find_recipe"
+    description = (
+        "Search the house's saved recipes by dish name or ingredient. Returns "
+        "the best matches with their full ingredients and steps. Call this "
+        "before looking online; an empty result means nothing is saved."
+    )
+    parameters = vol.Schema(
+        {vol.Required("query"): vol.All(str, vol.Length(min=1, max=200))}
+    )
+
+    async def async_call(
+        self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context
+    ) -> JsonObjectType:
+        hits = await self._runtime.recipes.async_search(tool_input.tool_args["query"])
+        return {"recipes": hits}
+
+
+class SaveRecipeTool(_RuntimeTool):
+    name = "save_recipe"
+    description = (
+        "Save a recipe to the house's cookbook, after the speaker has agreed "
+        "to keep it. Give the complete ingredient list and the steps in order, "
+        "one item per entry, and the URL it came from if any."
+    )
+    parameters = vol.Schema(
+        {
+            vol.Required("title"): vol.All(str, vol.Length(min=1, max=200)),
+            vol.Required("ingredients"): [str],
+            vol.Required("steps"): [str],
+            vol.Optional("source", default=""): str,
+        }
+    )
+
+    async def async_call(
+        self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context
+    ) -> JsonObjectType:
+        if self._guest(llm_context):
+            return {"error": _GUEST_ERROR}
+        a = tool_input.tool_args
+        try:
+            stored = await self._runtime.recipes.async_save(
+                a["title"], a["ingredients"], a["steps"], a.get("source", "")
+            )
+        except ValueError as err:
+            return {"error": str(err)}
+        return {"saved": stored["title"], "id": stored["id"]}
+
+
+class DeleteRecipeTool(_RuntimeTool):
+    name = "delete_recipe"
+    description = (
+        "Remove the saved recipe that best matches a name. Only when asked to "
+        "delete or remove a recipe; confirm the title in your reply."
+    )
+    parameters = vol.Schema(
+        {vol.Required("query"): vol.All(str, vol.Length(min=1, max=200))}
+    )
+
+    async def async_call(
+        self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context
+    ) -> JsonObjectType:
+        if self._guest(llm_context):
+            return {"error": _GUEST_ERROR}
+        hits = await self._runtime.recipes.async_search(tool_input.tool_args["query"], 1)
+        if not hits:
+            return {"deleted": None}
+        await self._runtime.recipes.async_delete(hits[0]["id"])
+        return {"deleted": hits[0]["title"]}
 
 
 class AddToListTool(_RuntimeTool):

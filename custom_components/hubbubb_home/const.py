@@ -144,11 +144,14 @@ CARDS = (
     "hubbubb-timers-card.js",
     "hubbubb-review-card.js",
 )
-# The Voice Studio sidebar panel. Served from the same versioned URL as the
-# cards but not registered as a Lovelace resource: a panel loads its own
-# module, and every dashboard would otherwise pull the studio in too.
-PANEL_FILE = "hubbubb-voice-studio.js"
-PANEL_PATH = "hubbubb-voice"
+# Sidebar panels: (bundle, url path, sidebar title, icon). Served from the
+# same versioned URL as the cards but not registered as Lovelace resources: a
+# panel loads its own module, and every dashboard would otherwise pull them in
+# too. The custom element is the bundle name without .js.
+PANELS = (
+    ("hubbubb-voice-studio.js", "hubbubb-voice", "Voice Studio", "mdi:microphone-plus"),
+    ("hubbubb-recipes.js", "hubbubb-recipes", "Recipes", "mdi:chef-hat"),
+)
 
 PLATFORMS = ["switch", "sensor", "conversation"]
 
