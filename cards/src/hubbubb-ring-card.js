@@ -2110,6 +2110,21 @@ class HubbubbRingCard extends LitElement {
      the id of the session it started. A path segment rather than a query
      string because the companion app drops everything after "?" from its
      navigate URLs. */
+  /* Keep the address on the open session, so a refresh (or a link shared
+     from the bar) lands back on it through _openLinked instead of on the
+     dashboard with build mode shut. replaceState, not push: stepping through
+     sessions is not a history the back button should retrace. HA is not
+     told; its route is still this view, which is all it needs to know. */
+  _syncUrl() {
+    if (this._config?.build_dashboard || this._config?.build_page) return;
+    const base = location.pathname.replace(/\/session\/[^/]+$/, "");
+    const want = this._build && this._sel
+      ? `${base}/session/${encodeURIComponent(this._sel)}`
+      : base;
+    if (want !== location.pathname)
+      history.replaceState(history.state, "", want + location.search);
+  }
+
   _openLinked() {
     const m = location.pathname.match(/\/session\/([^/]+)$/);
     if (!m) return;
@@ -2473,6 +2488,7 @@ class HubbubbRingCard extends LitElement {
 
   updated(changed) {
     this._setupCanvas();
+    if (changed.has("_sel") || changed.has("_build")) this._syncUrl();
     if (changed.has("_sel") && this._sel) this._restoreDraft();
     if (changed.has("_msgs") && this._stick) this._toBottom();
   }
@@ -4670,9 +4686,6 @@ class HubbubbRingCard extends LitElement {
       margin: auto;
       text-align: center;
     }
-    .row.sel {
-      background: rgba(46, 157, 245, 0.14);
-    }
     .viewer {
       flex: 0 0 min(44%, 600px);
       padding-left: 12px;
@@ -4906,7 +4919,7 @@ class HubbubbRingCard extends LitElement {
       background: none;
       border: none;
       border-bottom: 1px solid rgba(53, 154, 210, 0.14);
-      padding: 8px 4px;
+      padding: 8px 4px 8px 14px;
       cursor: pointer;
       color: inherit;
       font-family: inherit;
@@ -5010,6 +5023,13 @@ class HubbubbRingCard extends LitElement {
       background: linear-gradient(160deg, #0b1a22 0%, #070f15 100%);
       transition: transform 0.18s cubic-bezier(0.4, 0, 0.2, 1);
       touch-action: pan-y;
+    }
+    /* After .rowwrap .row: that rule paints an opaque swipe backdrop over
+       the row, so the selected state has to outrank it or it never shows. */
+    .rowwrap .row.sel {
+      background: linear-gradient(160deg, #143247 0%, #0d2334 100%);
+      box-shadow: inset 3px 0 0 var(--jr-color);
+      color: #fff;
     }
     .rowwrap.open .row {
       transform: translateX(-84px);
