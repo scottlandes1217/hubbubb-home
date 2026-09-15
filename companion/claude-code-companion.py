@@ -362,7 +362,7 @@ def find_claude(session, tree=None, root=None):
     return None
 
 
-def send_to_claude(text, force=False, project=None, new_session=False):
+def send_to_claude(text, force=False, project=None, new_session=False, fresh=False):
     """Type text into the tmux pane, then press Enter.
 
     Uses argument lists (never a shell) and tmux's -l literal flag, so the
@@ -378,7 +378,7 @@ def send_to_claude(text, force=False, project=None, new_session=False):
         )
 
     if new_session:
-        return start_and_send(project, text)
+        return start_and_send(project, text, fresh)
 
     session = session_for_project(project) if project else read_target()
     if not window_exists(session):
@@ -1529,18 +1529,20 @@ def resolve_pending(action, project=None):
     return start_and_send(project or held.get("project"), text)[:2]
 
 
-def start_and_send(project, text):
+def start_and_send(project, text, fresh=False):
     """Open a fresh Claude session and hand it the text.
 
     Used for build/plan handoffs, which want their own session rather than
-    being appended to whatever conversation is already running.
+    being appended to whatever conversation is already running. `fresh` skips
+    the follow-up rule below: the phone's home-screen button means a new
+    conversation every time, since the app already has the old ones.
     """
     name, path = resolve_project(project or current_project())
     if not name:
         return False, f"I don't know a project called {project}.", None
 
     # A follow-up belongs in the session that answered the question before it.
-    recent = read_ask_target()
+    recent = None if fresh else read_ask_target()
     if (recent
             and os.path.normpath(recent.get("path") or "") == os.path.normpath(path)
             and not session_busy(recent["id"])[0]):
@@ -2542,6 +2544,7 @@ class Handler(BaseHTTPRequestHandler):
                 force=bool(data.get("force")),
                 project=(data.get("project") or "").strip() or None,
                 new_session=bool(data.get("new_session")),
+                fresh=bool(data.get("fresh")),
             )
         except Exception as exc:
             ok, detail, rest = False, f"{type(exc).__name__}: {exc}", []

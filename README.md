@@ -255,7 +255,8 @@ actually finishes.
 
 Every session has an address: `/<dashboard>/<view>/session/<id>` opens the
 build screen on that session, and `agent_prompt_direct` with `new_session:
-true` answers with the `id` of the one it started. A phone Shortcut can call
+true` answers with the `id` of the one it started (`fresh: true` as well, or
+an idle session that answered a question in the last half hour is reused). A phone Shortcut can call
 the service, then open `homeassistant://navigate/<dashboard>/0/session/<id>`
 and land in the conversation it just began.
 
