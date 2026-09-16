@@ -145,3 +145,15 @@ run_review:
   description: >-
     Review yesterday's coding sessions now instead of waiting for tonight.
     Needs a companion; it runs the agent there and can take several minutes.
+agent_fleet:
+  fields:
+    project: { selector: { text: } }
+agent_fleet_act:
+  fields:
+    action: { required: true, selector: { select: { options: [drop, task, recall, commit, push] } } }
+    project: { selector: { text: } }
+    feature: { selector: { text: } }
+    mission: { selector: { text: } }
+    id: { selector: { text: } }
+    text: { selector: { text: } }
+    message: { selector: { text: } }

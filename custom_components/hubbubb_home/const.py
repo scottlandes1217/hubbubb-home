@@ -151,6 +151,7 @@ CARDS = (
 PANELS = (
     ("hubbubb-voice-studio.js", "hubbubb-voice", "Voice Studio", "mdi:microphone-plus"),
     ("hubbubb-recipes.js", "hubbubb-recipes", "Recipes", "mdi:chef-hat"),
+    ("hubbubb-fleet.js", "hubbubb-fleet", "Fleet", "mdi:robot-industrial"),
 )
 
 PLATFORMS = ["switch", "sensor", "conversation"]

@@ -145,6 +145,8 @@ AGENT_SERVICES = {
     "agent_permission": ("permission", "POST"),
     "agent_models": ("models", "GET"),
     "agent_file": ("file", "GET"),
+    "agent_fleet": ("fleet", "GET"),
+    "agent_fleet_act": ("fleet", "POST"),
 }
 
 

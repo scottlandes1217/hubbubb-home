@@ -42,6 +42,8 @@ Hubbubb Home exposes each of these as a service that returns
 | `hubbubb_home.agent_key` | `POST` | `/key` | `key` |
 | `hubbubb_home.agent_kill` | `POST` | `/kill` | `window` |
 | — | `POST` | `/review` | `brief`, `hours`, `projects` |
+| `hubbubb_home.agent_fleet` | `GET` | `/fleet` | `project` (omit it for the project list) |
+| `hubbubb_home.agent_fleet_act` | `POST` | `/fleet` | `action` (drop / task / recall / commit / push), `project`, `feature`, `mission`, `id`, `text`, `message` |
 
 Answer with JSON. A non-2xx status, or a body carrying `{"ok": false,
 "detail": "..."}`, is surfaced to the card as an error rather than a blank
