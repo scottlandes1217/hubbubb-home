@@ -250,7 +250,6 @@ class HubbubbFleet extends LitElement {
     }
     .node h3 { margin: 0 0 4px; font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink); }
     .node p { margin: 0; font-size: 11px; color: var(--dim); line-height: 1.35; }
-    .node .id { position: absolute; right: 10px; top: 8px; font-size: 9px; color: rgba(111, 139, 163, 0.6); letter-spacing: 0.1em; }
     .crew { position: absolute; left: 10px; right: 10px; bottom: 8px; display: flex; gap: 6px; flex-wrap: wrap; }
     .bot {
       display: inline-flex;
@@ -545,7 +544,7 @@ class HubbubbFleet extends LitElement {
   _dragStart(e) {
     if (this._deploying) return;
     e.preventDefault();
-    e.currentTarget.setPointerCapture(e.pointerId);
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* no live pointer */ }
     this._drag = { x: e.clientX, y: e.clientY, moved: false };
   }
 
@@ -724,7 +723,6 @@ class HubbubbFleet extends LitElement {
     ].join(" ");
     return html`
       <div class=${cls} data-id=${feat.id} @click=${() => this._nodeTap(feat)}>
-        <span class="id">${feat.id}</span>
         <h3>${feat.name}</h3>
         <p>${this._deploying === feat.id ? html`<span class="deploying">deploying…</span>` : feat.blurb}</p>
         <div class="crew">
