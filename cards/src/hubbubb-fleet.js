@@ -9,7 +9,7 @@
    All traffic is the companion's /fleet endpoint through hubbubb_home
    services, plus agent_transcript for the open agent. The pure parts are
    exported so test/fleet.mjs can assert them without a browser. */
-import { LitElement, css, html, nothing } from "lit";
+import { LitElement, css, html, nothing, svg } from "lit";
 
 const BUILD =
   ((new Error().stack || "").match(/\/(\d+\.\d+\.\d+)\//) || [])[1] || "dev";
@@ -43,6 +43,95 @@ export const liveCount = (agents) => (agents || []).filter((a) => a.alive).lengt
 /* Transcript rows -> what the drawer shows: prompts, replies, tools. */
 export const roleClass = (role) =>
   ({ user: "u", assistant: "a", tool: "t", out: "o", err: "e", think: "k", cmd: "c", screen: "s" }[role] || "o");
+
+/* The web. Fruchterman-Reingold on a fixed seed (a circle in map order), so
+   the same map always lands in the same place, then scaled to fit and pushed
+   apart so labels never sit on each other. Returns {id: {x, y}}. */
+export const W = 1200;
+export const H = 760;
+export const layout = (features, links, iterations = 300) => {
+  const n = features.length;
+  const pos = {};
+  features.forEach((f, i) => {
+    const a = (i / Math.max(n, 1)) * Math.PI * 2 - Math.PI / 2;
+    pos[f.id] = { x: W / 2 + Math.cos(a) * W * 0.36, y: H / 2 + Math.sin(a) * H * 0.36 };
+  });
+  if (n < 2) return pos;
+  const edges = (links || []).filter(([a, b]) => pos[a] && pos[b] && a !== b);
+  const k = Math.sqrt((W * H) / n) * 0.9;
+  let temp = W / 8;
+  for (let it = 0; it < iterations; it++) {
+    const disp = {};
+    for (const f of features) disp[f.id] = { x: 0, y: 0 };
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const a = pos[features[i].id], b = pos[features[j].id];
+        let dx = a.x - b.x, dy = a.y - b.y;
+        let d = Math.hypot(dx, dy) || 0.01;
+        const rep = (k * k) / d;
+        dx /= d; dy /= d;
+        disp[features[i].id].x += dx * rep; disp[features[i].id].y += dy * rep;
+        disp[features[j].id].x -= dx * rep; disp[features[j].id].y -= dy * rep;
+      }
+    }
+    for (const [ia, ib] of edges) {
+      const a = pos[ia], b = pos[ib];
+      let dx = a.x - b.x, dy = a.y - b.y;
+      const d = Math.hypot(dx, dy) || 0.01;
+      const att = (d * d) / k;
+      dx /= d; dy /= d;
+      disp[ia].x -= dx * att; disp[ia].y -= dy * att;
+      disp[ib].x += dx * att; disp[ib].y += dy * att;
+    }
+    for (const f of features) {
+      const p = pos[f.id], d = disp[f.id];
+      // gravity: the web drifts to the middle instead of the corners
+      d.x += (W / 2 - p.x) * 0.05; d.y += (H / 2 - p.y) * 0.05;
+      const len = Math.hypot(d.x, d.y) || 0.01;
+      const step = Math.min(len, temp);
+      p.x += (d.x / len) * step; p.y += (d.y / len) * step;
+    }
+    temp = Math.max(temp * 0.96, 1);
+  }
+  // fit into the map with a margin for labels
+  const xs = features.map((f) => pos[f.id].x), ys = features.map((f) => pos[f.id].y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+  const mx = 110, my = 70;
+  const sx = (W - 2 * mx) / Math.max(maxX - minX, 1), sy = (H - 2 * my) / Math.max(maxY - minY, 1);
+  for (const f of features) {
+    pos[f.id] = { x: mx + (pos[f.id].x - minX) * sx, y: my + (pos[f.id].y - minY) * sy };
+  }
+  // no two hubs closer than a label's width
+  const min = 150;
+  for (let pass = 0; pass < 40; pass++) {
+    let moved = false;
+    for (let i = 0; i < n; i++) {
+      for (let j = i + 1; j < n; j++) {
+        const a = pos[features[i].id], b = pos[features[j].id];
+        const dx = b.x - a.x, dy = b.y - a.y;
+        const d = Math.hypot(dx, dy) || 0.01;
+        if (d >= min) continue;
+        const push = (min - d) / 2, ux = dx / d, uy = dy / d;
+        a.x -= ux * push; a.y -= uy * push; b.x += ux * push; b.y += uy * push;
+        moved = true;
+      }
+    }
+    for (const f of features) {
+      pos[f.id].x = Math.min(W - mx, Math.max(mx, pos[f.id].x));
+      pos[f.id].y = Math.min(H - my, Math.max(my, pos[f.id].y));
+    }
+    if (!moved) break;
+  }
+  return pos;
+};
+
+/* A node name on at most two lines. */
+export const splitName = (name) => {
+  const s = String(name || "");
+  if (s.length <= 14) return [s];
+  const at = s.indexOf(" & ") >= 0 ? s.indexOf(" & ") + 2 : s.lastIndexOf(" ", 16);
+  return at > 0 ? [s.slice(0, at).trim(), s.slice(at).trim()] : [s];
+};
 
 class HubbubbFleet extends LitElement {
   static properties = {
@@ -212,66 +301,35 @@ class HubbubbFleet extends LitElement {
     .stage { flex: 1; display: flex; min-height: 0; position: relative; }
     .left { flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0; }
     .left[hidden] { display: none; }
-    .map {
-      flex: 1;
-      overflow: auto;
-      padding: 18px 16px 24px;
-      display: grid;
-      grid-template-columns: repeat(auto-fill, minmax(190px, 1fr));
-      gap: 14px;
-      align-content: start;
-    }
-    .node {
-      position: relative;
-      min-height: 120px;
-      padding: 12px 12px 34px;
-      border: 1px solid var(--line);
-      background: linear-gradient(180deg, rgba(10, 18, 32, 0.9), rgba(5, 9, 18, 0.9));
-      clip-path: polygon(12px 0, 100% 0, 100% calc(100% - 12px), calc(100% - 12px) 100%, 0 100%, 0 12px);
-      transition: box-shadow 0.15s, border-color 0.15s, transform 0.15s;
-      cursor: pointer;
-    }
-    .node::after {
-      content: "";
-      position: absolute;
-      left: 0; right: 0; top: 0;
-      height: 2px;
-      background: linear-gradient(90deg, transparent, var(--cyan), transparent);
-      opacity: 0.35;
-    }
-    .node.live { border-color: rgba(61, 255, 154, 0.45); }
-    .node.live::after { background: linear-gradient(90deg, transparent, var(--green), transparent); opacity: 0.8; }
-    .node.busy { animation: nodepulse 2.2s ease-in-out infinite; }
-    .node.target { border-color: var(--mag); box-shadow: 0 0 0 2px rgba(255, 47, 214, 0.5), 0 0 30px rgba(255, 47, 214, 0.45); transform: scale(1.03); }
-    .node.armed { border-color: rgba(255, 47, 214, 0.6); box-shadow: 0 0 16px rgba(255, 47, 214, 0.25); }
-    @keyframes nodepulse {
-      0%, 100% { box-shadow: 0 0 6px rgba(61, 255, 154, 0.15); }
-      50% { box-shadow: 0 0 22px rgba(61, 255, 154, 0.45); }
-    }
-    .node h3 { margin: 0 0 4px; font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--ink); }
-    .node p { margin: 0; font-size: 11px; color: var(--dim); line-height: 1.35; }
-    .crew { position: absolute; left: 10px; right: 10px; bottom: 8px; display: flex; gap: 6px; flex-wrap: wrap; }
-    .bot {
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-      padding: 2px 7px 2px 4px;
-      font-size: 10px;
-      letter-spacing: 0.06em;
-      border: 1px solid rgba(61, 255, 154, 0.4);
-      background: rgba(61, 255, 154, 0.08);
-      color: var(--green);
-      cursor: pointer;
-      text-transform: uppercase;
-    }
-    .bot:hover { background: rgba(61, 255, 154, 0.2); box-shadow: 0 0 10px rgba(61, 255, 154, 0.35); }
-    .bot .eye { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 6px var(--green); }
-    .bot.busy .eye { background: var(--amber); box-shadow: 0 0 8px var(--amber); animation: blink 0.9s ease-in-out infinite; }
-    .bot.busy { border-color: rgba(255, 176, 32, 0.5); color: var(--amber); background: rgba(255, 176, 32, 0.08); }
-    .bot.off { opacity: 0.45; border-style: dashed; }
-    .bot .n { color: var(--ink); opacity: 0.7; }
-    @keyframes blink { 0%, 100% { opacity: 1; transform: scale(1); } 50% { opacity: 0.4; transform: scale(0.7); } }
-
+    .map { flex: 1; min-height: 0; position: relative; }
+    .map svg { width: 100%; height: 100%; display: block; }
+    .edge { stroke: rgba(0, 229, 255, 0.22); stroke-width: 1.5; }
+    .edge.live { stroke: rgba(61, 255, 154, 0.55); stroke-width: 2; }
+    .edge.busy { stroke: var(--amber); stroke-dasharray: 6 8; animation: flow 1.2s linear infinite; }
+    @keyframes flow { to { stroke-dashoffset: -28; } }
+    .node { cursor: pointer; }
+    .node .hub { fill: rgba(10, 18, 32, 0.95); stroke: rgba(0, 229, 255, 0.5); stroke-width: 1.5; transition: stroke 0.15s, r 0.15s; }
+    .node .halo { fill: none; stroke: var(--cyan); stroke-width: 1; opacity: 0.25; }
+    .node:hover .hub, .node.target .hub { stroke: var(--cyan); filter: url(#glow); }
+    .node.live .hub { stroke: var(--green); }
+    .node.live .halo { stroke: var(--green); opacity: 0.4; }
+    .node.busy .halo { animation: ring 2.2s ease-out infinite; }
+    .node.target .hub, .node.armed:hover .hub { stroke: var(--mag); stroke-width: 3; filter: url(#glowmag); }
+    .node.target .halo { stroke: var(--mag); opacity: 0.8; }
+    @keyframes ring { 0% { transform: scale(1); opacity: 0.6; } 100% { transform: scale(1.9); opacity: 0; } }
+    .node .halo { transform-box: fill-box; transform-origin: center; }
+    .node .core { fill: var(--cyan); opacity: 0.8; }
+    .node.live .core { fill: var(--green); }
+    .node text { fill: var(--ink); font: 600 12px var(--mono); letter-spacing: 0.06em; text-transform: uppercase; text-anchor: middle; pointer-events: none; }
+    .node .sub { fill: var(--dim); font-size: 9px; font-weight: 400; text-transform: none; letter-spacing: 0; }
+    .agent { cursor: pointer; }
+    .agent .eye { fill: var(--green); filter: url(#glow); }
+    .agent.busy .eye { fill: var(--amber); animation: blink 0.9s ease-in-out infinite; transform-box: fill-box; transform-origin: center; }
+    .agent.off .eye { fill: var(--dim); filter: none; }
+    .agent text { fill: var(--green); font: 9px var(--mono); text-anchor: middle; letter-spacing: 0.08em; text-transform: uppercase; pointer-events: none; }
+    .agent.busy text { fill: var(--amber); }
+    .agent.off text { fill: var(--dim); }
+    .agent:hover .eye { r: 7; }
     /* agent bay */
     .bay {
       flex: none;
@@ -698,9 +756,7 @@ class HubbubbFleet extends LitElement {
       <div class="stage">
         <div class="left" ?hidden=${showDrawer && this.narrow}>
           <div class="map">
-            ${!f
-              ? html`<div class="empty">mapping ${this._project}…</div>`
-              : f.features.map((feat) => this._renderNode(feat, crews[feat.id] || []))}
+            ${!f ? html`<div class="empty">mapping ${this._project}…</div>` : this._renderWeb(f, crews)}
           </div>
           ${this._renderBay()}
         </div>
@@ -712,7 +768,45 @@ class HubbubbFleet extends LitElement {
     `;
   }
 
-  _renderNode(feat, crew) {
+  _positions(f) {
+    const key = f.features.map((x) => x.id).join(",") + "|" + (f.links || []).length;
+    if (this._layoutKey !== key) {
+      this._layoutKey = key;
+      this._layout = layout(f.features, f.links || []);
+    }
+    return this._layout;
+  }
+
+  _renderWeb(f, crews) {
+    const pos = this._positions(f);
+    const feats = f.features;
+    const state = (id) => {
+      const crew = crews[id] || [];
+      return { live: crew.length > 0, busy: crew.some((a) => a.busy) };
+    };
+    return svg`
+      <svg viewBox="0 0 ${W} ${H}" preserveAspectRatio="xMidYMid meet">
+        <defs>
+          <filter id="glow" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur stdDeviation="3" result="b" /><feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge>
+          </filter>
+          <filter id="glowmag" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur stdDeviation="5" result="b" /><feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge>
+          </filter>
+        </defs>
+        ${(f.links || []).map(([a, b]) => {
+          const pa = pos[a], pb = pos[b];
+          if (!pa || !pb) return nothing;
+          const sa = state(a), sb = state(b);
+          const cls = sa.busy || sb.busy ? "edge busy" : sa.live || sb.live ? "edge live" : "edge";
+          return svg`<line class=${cls} x1=${pa.x} y1=${pa.y} x2=${pb.x} y2=${pb.y} />`;
+        })}
+        ${feats.map((feat) => this._renderNode(feat, crews[feat.id] || [], pos[feat.id]))}
+      </svg>
+    `;
+  }
+
+  _renderNode(feat, crew, p) {
     const busy = crew.some((a) => a.busy);
     const cls = [
       "node",
@@ -721,25 +815,32 @@ class HubbubbFleet extends LitElement {
       this._hover === feat.id || this._deploying === feat.id ? "target" : "",
       this._armed ? "armed" : "",
     ].join(" ");
-    return html`
-      <div class=${cls} data-id=${feat.id} @click=${() => this._nodeTap(feat)}>
-        <h3>${feat.name}</h3>
-        <p>${this._deploying === feat.id ? html`<span class="deploying">deploying…</span>` : feat.blurb}</p>
-        <div class="crew">
-          ${crew.map(
-            (a) => html`
-              <span
-                class="bot ${a.busy ? "busy" : ""} ${a.alive ? "" : "off"}"
-                title=${agentState(a)}
-                @click=${(e) => { e.stopPropagation(); this._openAgent(a.id); }}
-              >
-                <span class="eye"></span>${a.callsign}
-                ${a.edits?.length ? html`<span class="n">${a.edits.length}</span>` : nothing}
-              </span>
-            `
-          )}
-        </div>
-      </div>
+    const lines = splitName(feat.name);
+    const r = 22 + Math.min(crew.length, 4) * 2;
+    return svg`
+      <g class=${cls} data-id=${feat.id} transform="translate(${p.x} ${p.y})" @click=${() => this._nodeTap(feat)}>
+        <title>${feat.blurb || feat.name}</title>
+        <circle class="halo" r=${r + 6} />
+        <circle class="hub" r=${r} />
+        <circle class="core" r=${this._deploying === feat.id ? 9 : 5} />
+        ${lines.map((l, i) => svg`<text y=${r + 15 + i * 13}>${l}</text>`)}
+        ${this._deploying === feat.id
+          ? svg`<text class="sub" y=${-r - 8}>deploying…</text>`
+          : crew.map((a, i) => {
+              const ang = -Math.PI / 2 + (i - (crew.length - 1) / 2) * 1.1;
+              const d = r + 24;
+              const x = Math.cos(ang) * d, y = Math.sin(ang) * d;
+              return svg`
+                <g class="agent ${a.busy ? "busy" : ""} ${a.alive ? "" : "off"}"
+                   transform="translate(${x} ${y})"
+                   @click=${(e) => { e.stopPropagation(); this._openAgent(a.id); }}>
+                  <title>${a.callsign}: ${agentState(a)}</title>
+                  <circle r="12" fill="transparent" />
+                  <circle class="eye" r="5" />
+                  <text y="-9">${a.callsign}${a.edits?.length ? " " + a.edits.length : ""}</text>
+                </g>`;
+            })}
+      </g>
     `;
   }
 
