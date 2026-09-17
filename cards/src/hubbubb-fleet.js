@@ -152,6 +152,8 @@ class HubbubbFleet extends LitElement {
     _order: { state: true },
     _deploying: { state: true },
     _shipNote: { state: true },
+    _comms: { state: true },
+    _note: { state: true },
   };
 
   static styles = css`
@@ -432,6 +434,11 @@ class HubbubbFleet extends LitElement {
     .shipbox .files div::before { content: "± "; color: var(--amber); }
     .shipbox .btns { display: flex; gap: 8px; margin-top: 10px; flex-wrap: wrap; }
     .shipbox .ok { color: var(--green); font-size: 12px; margin-top: 8px; }
+    .feed { max-height: 42vh; overflow: auto; margin: 8px 0; font-size: 12px; }
+    .feed .n { padding: 4px 0; border-bottom: 1px solid rgba(0, 229, 255, 0.08); word-break: break-word; }
+    .feed .who { color: var(--green); letter-spacing: 0.06em; text-transform: uppercase; font-size: 10px; margin-right: 6px; }
+    .feed .n.cmd .who { color: var(--mag); }
+    .feed .when { color: var(--dim); font-size: 10px; float: right; }
     .empty { color: var(--dim); font-size: 12px; padding: 24px; text-align: center; }
   `;
 
@@ -693,6 +700,45 @@ class HubbubbFleet extends LitElement {
     this._tick();
   }
 
+  async _say(action) {
+    const text = (this._note || "").trim();
+    if (!text) return;
+    this._busy = true;
+    const res = await this._try(() => this._api("agent_fleet_act", { action, project: this._project, text }));
+    this._busy = false;
+    if (res) {
+      this._note = "";
+      const box = this.shadowRoot?.querySelector(".shipbox textarea");
+      if (box) box.value = "";
+      this._shipNote = action === "broadcast" ? res.detail : "";
+      this._tick();
+      this.updateComplete.then(() => {
+        const feed = this.shadowRoot?.querySelector(".feed");
+        if (feed) feed.scrollTop = feed.scrollHeight;
+      });
+    }
+  }
+
+  _renderComms(notes) {
+    return html`
+      <div class="shipbox">
+        <h3>Comms · ${this._project}</h3>
+        <div class="mission">Agents read the board before every edit and leave notes here. A note waits to be read; a broadcast is typed into every agent now.</div>
+        <div class="feed">
+          ${notes.length
+            ? notes.map((n) => html`<div class="n ${n.who === "Command" ? "cmd" : ""}"><span class="when">${n.when}</span><span class="who">${n.who}</span>${n.text}</div>`)
+            : html`<div style="opacity:.6">no notes yet</div>`}
+        </div>
+        <textarea rows="2" placeholder="to the fleet…" .value=${this._note || ""} @input=${(e) => (this._note = e.target.value)}></textarea>
+        <div class="btns">
+          <button ?disabled=${this._busy || !(this._note || "").trim()} @click=${() => this._say("note")}>Note</button>
+          <button class="hot" ?disabled=${this._busy || !(this._note || "").trim()} @click=${() => this._say("broadcast")}>Broadcast</button>
+        </div>
+        ${this._shipNote ? html`<div class="ok">${this._shipNote}</div>` : nothing}
+      </div>
+    `;
+  }
+
   /* --- render ------------------------------------------------------- */
 
   render() {
@@ -717,7 +763,10 @@ class HubbubbFleet extends LitElement {
                 <span class="pill ${git.changed ? "warn" : ""}">
                   changed <b>${git.changed ?? "…"}</b>${git.ahead ? html` · ahead <b>${git.ahead}</b>` : nothing}
                 </span>
-                <button class=${git.changed ? "go" : ""} @click=${() => (this._ship = !this._ship)}>
+                <button class=${this._comms ? "" : "hot"} @click=${() => { this._comms = !this._comms; this._ship = false; }}>
+                  ${this._comms ? "Close" : `Comms${f?.notes?.length ? ` (${f.notes.length})` : ""}`}
+                </button>
+                <button class=${git.changed ? "go" : ""} @click=${() => { this._ship = !this._ship; this._comms = false; }}>
                   ${this._ship ? "Close" : "Ship"}
                 </button>
               `
@@ -764,6 +813,7 @@ class HubbubbFleet extends LitElement {
           ? html`<div class="drawer ${this.narrow ? "full" : ""}">${this._renderDrawer(open)}</div>`
           : nothing}
         ${this._ship ? this._renderShip(f?.git || {}) : nothing}
+        ${this._comms ? this._renderComms(f?.notes || []) : nothing}
       </div>
     `;
   }
