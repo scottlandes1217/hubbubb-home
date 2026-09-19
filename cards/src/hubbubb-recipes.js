@@ -68,7 +68,19 @@ class HubbubbRecipes extends LitElement {
 
   connectedCallback() {
     super.connectedCallback();
+    // Reload when the tab or app comes back to the front, so a recipe Jarvis
+    // saved by voice shows up without a manual refresh.
+    this._onVisible = () => document.visibilityState === "visible" && this._load();
+    document.addEventListener("visibilitychange", this._onVisible);
+    // ...and the moment the cookbook changes, whoever changed it.
+    this._unsub = this.hass.connection.subscribeEvents(() => this._load(), "hubbubb_home_recipes");
     this._load();
+  }
+
+  disconnectedCallback() {
+    document.removeEventListener("visibilitychange", this._onVisible);
+    this._unsub?.then((u) => u()).catch(() => {});
+    super.disconnectedCallback();
   }
 
   async _call(service, data = {}) {

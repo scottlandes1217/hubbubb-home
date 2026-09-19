@@ -30,6 +30,9 @@ def as_lines(value) -> str:
     return "\n".join(line for line in (i.strip() for i in items) if line)
 
 
+EVENT_RECIPES = "hubbubb_home_recipes"  # fired after any save or delete
+
+
 class Recipes:
     """Saved recipes, shared by the panel, the services and the agent."""
 
@@ -107,6 +110,9 @@ class Recipes:
 
         stored = await self._hass.async_add_executor_job(_save)
         _LOGGER.debug("recipe saved: %s", title)
+        # Both write paths (service and agent tool) end here, so this is the
+        # one place the Recipes panel needs to hear about a change.
+        self._hass.bus.async_fire(EVENT_RECIPES, {"id": stored["id"]})
         return stored
 
     async def async_delete(self, recipe_id: int) -> bool:
@@ -117,7 +123,10 @@ class Recipes:
             conn.close()
             return cur.rowcount > 0
 
-        return await self._hass.async_add_executor_job(_delete)
+        gone = await self._hass.async_add_executor_job(_delete)
+        if gone:
+            self._hass.bus.async_fire(EVENT_RECIPES, {"id": recipe_id})
+        return gone
 
     # --- reads ---------------------------------------------------------------
 

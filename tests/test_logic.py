@@ -234,9 +234,12 @@ def test_recipes_round_trip_against_a_real_database():
     import asyncio
     import tempfile
 
+    fired = []
+
     class _MemHass:
         def __init__(self, path):
             self.config = types.SimpleNamespace(path=lambda *p: path)
+            self.bus = types.SimpleNamespace(async_fire=lambda ev, data: fired.append(ev))
 
         async def async_add_executor_job(self, fn, *args):
             return fn(*args)
@@ -273,6 +276,8 @@ def test_recipes_round_trip_against_a_real_database():
                 raise AssertionError("empty title saved")
 
             assert await book.async_delete(1) is True
+
+            assert fired and set(fired) == {"hubbubb_home_recipes"}, fired
             assert await book.async_delete(1) is False
             assert len(await book.async_all()) == 1
 

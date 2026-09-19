@@ -99,7 +99,9 @@ class HubbubbAPI(llm.API):
             "whether to save it; only the final message is spoken, so never "
             "leave the gist in an earlier one. Only call save_recipe "
             "once the speaker says yes, with the full ingredient list and "
-            "steps and the page it came from."
+            "steps and the page it came from. Saved recipes are not entities: "
+            "they show in the Recipes panel in the Home Assistant sidebar, "
+            "so if asked where a saved recipe is, say that."
         )
         # The persona's "say you can't" reads, to a 3B model, as license to
         # improvise a sentence of filler. When the companion exists, the rule
