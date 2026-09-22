@@ -1707,6 +1707,11 @@ class HubbubbRingCard extends LitElement {
     this._saveQueue();
     try {
       await this._api("agent_prompt_direct", { id: item.id, text: item.text });
+      // The listener has typed it into the terminal: that is "sent". The chip
+      // used to say "sending…" until the text showed up in the transcript,
+      // which on a tool-heavy session can scroll out of the window first.
+      item.delivered = true;
+      this._queue = [...this._queue];
       this._err = "";
     } catch (e) {
       this._err = this._errText(e);
@@ -4265,7 +4270,9 @@ class HubbubbRingCard extends LitElement {
               <div class="qbar">
                 <span class="qtag">
                   ${q.state === "sent"
-                    ? "sending…"
+                    ? q.delivered
+                      ? "sent ✓"
+                      : "sending…"
                     : s?.busy
                       ? "queued · sends when this turn ends"
                       : "queued"}
