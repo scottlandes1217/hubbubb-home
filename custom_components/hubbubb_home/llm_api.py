@@ -507,11 +507,12 @@ class CameraActivityTool(_RuntimeTool):
 class EscalateTool(_RuntimeTool):
     name = "hand_to_companion"
     description = (
-        "Hand a request to the much more capable coding agent on the "
-        "companion computer. Use it when the request is beyond you: "
-        "multi-step jobs, coding, research, anything needing files or the "
-        "web. The agent answers aloud later, so after calling this just "
-        "acknowledge that it's being worked on."
+        "Hand a request to Claude, the much more capable agent on the "
+        "companion computer. Always use it when the speaker mentions Claude "
+        "(\"ask Claude...\"), says you were wrong, or the request is beyond "
+        "you: multi-step jobs, coding, anything needing files or apps on the "
+        "computer. Claude answers aloud later, so after calling this just "
+        "acknowledge that it's being worked on - never answer it yourself."
     )
     parameters = vol.Schema(
         {vol.Required("request"): vol.All(str, vol.Length(min=3, max=2000))}
