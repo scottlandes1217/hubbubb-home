@@ -67,6 +67,7 @@ class HubbubbAPI(llm.API):
             tools.append(AskHubbubbTool(runtime))
         if runtime.companion.configured:
             tools.append(EscalateTool(runtime))
+            tools.append(WebSearchTool(runtime))
         if runtime.speakers.configured:
             tools.append(TrainWakeWordTool(runtime))
 
@@ -107,11 +108,18 @@ class HubbubbAPI(llm.API):
         # improvise a sentence of filler. When the companion exists, the rule
         # is escalate - never guess.
         if runtime.companion.configured:
+            # A local model cannot be trusted to notice its own doubt, so the
+            # handoff triggers are things it can see: no tool fits, a tool
+            # failed, the speaker corrected it, or the speaker asked.
             prompt += (
-                "\n\nWhen a request is beyond your tools, or you do not know "
-                "the answer, do not guess and do not apologize at length: "
-                "call hand_to_companion with the request, then say only that "
-                "you have passed it along."
+                "\n\nFor anything current or outside the house, call "
+                "web_search and answer from its results. Call "
+                "hand_to_companion with the full request, then say only that "
+                "you have passed it along, when: no tool of yours fits; a "
+                "tool returned an error; the speaker says you were wrong; "
+                "the speaker asks for Claude; or the job needs this computer "
+                "itself - files, apps, coding, multi-step work. Never guess "
+                "and never apologize at length."
             )
         return llm.APIInstance(
             api=self,
@@ -519,6 +527,34 @@ class EscalateTool(_RuntimeTool):
         except CompanionError as err:
             return {"error": str(err)}
         return {"handed_off": True}
+
+
+class WebSearchTool(_RuntimeTool):
+    name = "web_search"
+    description = (
+        "Search the web. Use it for anything current or outside the house: "
+        "store hours, news, scores, weather elsewhere, facts you are not sure "
+        "of. Answer from the snippets; never invent a result."
+    )
+    parameters = vol.Schema(
+        {
+            vol.Required("query"): vol.All(str, vol.Length(min=2, max=300)),
+            vol.Optional("limit", default=5): vol.All(
+                int, vol.Range(min=1, max=10)
+            ),
+        }
+    )
+
+    async def async_call(
+        self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context
+    ) -> JsonObjectType:
+        try:
+            results = await self._runtime.companion.async_search(
+                tool_input.tool_args["query"], tool_input.tool_args.get("limit", 5)
+            )
+        except CompanionError as err:
+            return {"error": str(err)}
+        return {"results": results, "found": len(results)}
 
 
 class TrainWakeWordTool(_RuntimeTool):

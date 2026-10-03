@@ -13,10 +13,12 @@ import logging
 from typing import Any
 
 import aiohttp
+from urllib.parse import urlsplit
 
 _LOGGER = logging.getLogger(__name__)
 
 _TIMEOUT = aiohttp.ClientTimeout(total=90)
+SEARCH_PORT = 8888
 
 NOT_CONFIGURED = (
     "No companion is set up, so there is no coding agent to talk to. Add one "
@@ -91,6 +93,35 @@ class CompanionClient:
                     return {"content": body}
         except aiohttp.ClientError as err:
             raise CompanionError(f"companion unreachable: {err}") from err
+
+    async def async_search(self, query: str, limit: int) -> list[dict]:
+        """Web results from the SearXNG instance on the companion's machine.
+
+        It runs beside the companion (port 8888) so its address follows the
+        companion URL rather than being one more setting to keep in step.
+        """
+        if not self._url:
+            raise CompanionError(NOT_CONFIGURED)
+        url = f"http://{urlsplit(self._url).hostname}:{SEARCH_PORT}/search"
+        try:
+            async with self._session.get(
+                url,
+                params={"q": query, "format": "json"},
+                timeout=aiohttp.ClientTimeout(total=20),
+            ) as resp:
+                if resp.status >= 400:
+                    raise CompanionError(f"web search returned {resp.status}")
+                data = await resp.json(content_type=None)
+        except aiohttp.ClientError as err:
+            raise CompanionError(f"web search unreachable: {err}") from err
+        return [
+            {
+                "title": r.get("title", ""),
+                "url": r.get("url", ""),
+                "snippet": (r.get("content") or "")[:400],
+            }
+            for r in data.get("results", [])[:limit]
+        ]
 
     async def async_available(self) -> bool:
         """True when a companion is configured and answering."""
