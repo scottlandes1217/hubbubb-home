@@ -53,6 +53,7 @@ PAIRS = Path(os.path.expanduser("~/.claude/hooks/finetune/pairs.jsonl"))
 OLLAMA = shutil.which("ollama") or "/opt/homebrew/bin/ollama"
 API = "http://127.0.0.1:11434"
 MIN_NEW = 20
+MIN_FREE = 150 << 30
 # The 03:20 voicecheck wants ollama back; a run still going at 03:00 dies.
 STOP_AT = datetime.time(3, 0)
 LORA_KEYS = [
@@ -261,6 +262,16 @@ def main():
         stop = datetime.datetime.combine(now.date(), STOP_AT)
         deadline = (stop if stop > now else stop + datetime.timedelta(days=1)).timestamp()
 
+    # Transient peak per run ~110 GB: bf16 merged shards (~30) plus what
+    # `ollama create` stages - fp16 conversion (~67) and the q4 result (~22).
+    # A run that ran out of space mid-create left 140 GB of orphans once.
+    free = shutil.disk_usage(Path.home()).free
+    if free < MIN_FREE:
+        record.update(promoted=False, failed=f"only {free >> 30} GB free",
+                      escalations=last.get("escalations", 0))
+        LAST_RUN.write_text(json.dumps(record, indent=1))
+        sys.exit(f"refusing to train: {free >> 30} GB free, need {MIN_FREE >> 30}")
+
     current = serving_model()
     try:
         run([sys.executable, HERE / "dataset.py"] + (["--smoke"] if args.smoke else []))
@@ -299,6 +310,8 @@ def main():
         record.update(eval=result, promoted=result["promote"])
         if result["promote"]:
             run([OLLAMA, "cp", "jarvis-house-candidate", "jarvis-house"])
+        # Never keep a candidate: promoted it lives on as jarvis-house (shared
+        # blobs), rejected it is 22 GB of nothing. rm is in `finally` too.
         print(json.dumps({k: record[k] for k in ("promoted", "train_seconds")}),
               result["candidate"]["score"], "vs", result["current"]["score"])
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired, ValueError) as err:
@@ -309,6 +322,8 @@ def main():
     finally:
         ollama_up()
         shutil.rmtree(MERGED, ignore_errors=True)
+        subprocess.run([OLLAMA, "rm", "jarvis-house-candidate"],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         prune_blobs()
         record["finished"] = datetime.datetime.now().isoformat(timespec="seconds")
         WORK.mkdir(parents=True, exist_ok=True)
