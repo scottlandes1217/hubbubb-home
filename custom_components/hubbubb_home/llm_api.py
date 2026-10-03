@@ -542,7 +542,8 @@ class WebSearchTool(_RuntimeTool):
         "store hours, news, scores, weather elsewhere, facts you are not sure "
         "of. Each result has a snippet; the top ones also carry page_text, "
         "the passages of that page that match the query. Answer from those; "
-        "never invent a result."
+        "never invent a result. Search with the speaker's own words and never "
+        "add a year they did not say - your sense of the year is out of date."
     )
     parameters = vol.Schema(
         {
