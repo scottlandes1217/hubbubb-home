@@ -1,16 +1,19 @@
 """Training data for the house model, generated from the house itself.
 
 Reads Home Assistant's registries (read-only) for every assist-exposed
-entity and synthesizes command -> tool-call conversations in the exact
-shape the serving stack uses: ollama's llama3.2 template expects the model
-to answer a tool-worthy request with nothing but
+entity and synthesizes command -> tool-call conversations in the shape the
+serving stack uses: native Qwen tool calls (an assistant turn with EMPTY
+content and a `tool_calls` list - the chat template renders the
+<tool_call> block, ollama parses it back). That behavioural contract -
+right tool, right entity name, plain speech everywhere else, never JSON in
+prose, no narrating the call - is what these pairs teach. Live device state
+is deliberately absent: a status answer only ever follows a tool result in
+the same conversation (CURRICULUM.md, lesson 1).
 
-    {"name": "HassTurnOn", "parameters": {"name": "Lamp"}}
-
-and to speak plainly otherwise. That behavioural contract - right tool,
-right entity name, plain speech everywhere else, never JSON in prose - is
-what these pairs teach. Live device state is deliberately absent: state
-changes by the minute and stays in the prompt at inference time.
+Escalations the companion logged (`kind: "escalation"` in pairs.jsonl)
+become direct answers when Claude's response is there - that is how the
+local model learns the subject - and a hand_to_companion call when it is
+not.
 
 Output: train.jsonl / valid.jsonl in mlx_lm chat format
 ({"messages": [...], "tools": [...]}) under ~/.hubbubb-voice/housemodel/data/.
@@ -61,8 +64,19 @@ TOOLS = [
 
 
 def _call(_fn, **params):
-    """The assistant turn, exactly as ollama's template wants it emitted."""
-    return json.dumps({"name": _fn, "parameters": params})
+    """The tool-call turn: empty content, the call is the whole turn."""
+    return {"role": "assistant", "content": "", "tool_calls": [
+        {"type": "function", "function": {"name": _fn, "arguments": params}}]}
+
+
+def _say(text):
+    return {"role": "assistant", "content": text}
+
+
+def _convo(user, *turns):
+    return {"messages": [{"role": "system", "content": SYSTEM},
+                         {"role": "user", "content": user}, *turns],
+            "tools": TOOLS}
 
 
 def _load(name):
@@ -97,27 +111,20 @@ def entity_samples(name, domain, area):
     lower = name.lower()
     s = []
 
-    def sample(user, assistant):
-        s.append({"messages": [
-            {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": user},
-            {"role": "assistant", "content": assistant},
-        ], "tools": TOOLS})
-
     if domain == "scene":
         verb = random.choice(["activate", "run", "turn on"])
-        sample(f"{verb} the {lower} scene", _call("HassTurnOn", name=name))
+        s.append(_convo(f"{verb} the {lower} scene", _call("HassTurnOn", name=name)))
         return s
 
     on = random.choice([f"turn on the {lower}", f"switch the {lower} on",
                         f"turn the {lower} on"])
     off = random.choice([f"turn off the {lower}", f"switch off the {lower}",
                          f"turn the {lower} off"])
-    sample(on, _call("HassTurnOn", name=name))
-    sample(off, _call("HassTurnOff", name=name))
+    s.append(_convo(on, _call("HassTurnOn", name=name)))
+    s.append(_convo(off, _call("HassTurnOff", name=name)))
     if area:
-        sample(f"turn off the {lower} in the {area.lower()}",
-               _call("HassTurnOff", name=name, area=area))
+        s.append(_convo(f"turn off the {lower} in the {area.lower()}",
+                        _call("HassTurnOff", name=name, area=area)))
 
     if domain == "light":
         pct = random.randrange(10, 95, 5)
@@ -127,23 +134,19 @@ def entity_samples(name, domain, area):
             f"set the {lower} brightness to {pct} percent",
             f"dim the {lower} to {pct} percent",
         ])
-        sample(phrasing, _call("HassLightSet", name=name, brightness=pct))
+        s.append(_convo(phrasing, _call("HassLightSet", name=name, brightness=pct)))
 
     if domain == "media_player":
-        sample(f"pause the {lower}", _call("HassMediaPause", name=name))
-        sample(f"resume the {lower}", _call("HassMediaUnpause", name=name))
+        s.append(_convo(f"pause the {lower}", _call("HassMediaPause", name=name)))
+        s.append(_convo(f"resume the {lower}", _call("HassMediaUnpause", name=name)))
 
-    # Status: the call, then - separate sample - speaking the tool's answer.
+    # Status is always grounded: the call, its result, then the spoken answer.
     state = random.choice(["on", "off"])
     ask = f"is the {lower} {random.choice(['on', 'on or off'])}"
-    sample(ask, _call("GetLiveContext"))
-    s.append({"messages": [
-        {"role": "system", "content": SYSTEM},
-        {"role": "user", "content": ask},
-        {"role": "assistant", "content": _call("GetLiveContext")},
-        {"role": "tool", "content": f"{name}: {state}"},
-        {"role": "assistant", "content": f"The {lower} is {state}."},
-    ], "tools": TOOLS})
+    s.append(_convo(ask, _call("GetLiveContext")))
+    s.append(_convo(ask, _call("GetLiveContext"),
+                    {"role": "tool", "content": f"{name}: {state}"},
+                    _say(f"The {lower} is {state}.")))
     return s
 
 
@@ -162,6 +165,24 @@ PLAIN = [
     ("what did you say", "I said nothing worth repeating - what do you need?"),
 ]
 
+# Things no tool here can see. The first jarvis-house invented a pasta timer
+# when asked about cameras; the right answer is a short honest "can't".
+NO_TOOL = [
+    ("any camera activity?", "I can't check the cameras from here."),
+    ("what's the water bill?", "I can't check that."),
+    ("did anyone call?", "I can't check calls."),
+    ("how much is in the bank account", "I can't check that."),
+    ("what did the doctor say", "I don't have that."),
+    ("is the mail here yet", "I can't tell from here."),
+]
+
+# One clarifying question, ending in "?", when the request is ambiguous.
+CLARIFY = [
+    ("turn it off", "Which one should I turn off?"),
+    ("set it to fifty", "Which light should I set to fifty percent?"),
+    ("turn on the light", "Which light?"),
+]
+
 ESCALATE = [
     "ask claude to review the sprinkler schedule",
     "write a script that renames my photo files",
@@ -171,41 +192,35 @@ ESCALATE = [
 
 
 def plain_samples():
-    out = []
-    for user, reply in PLAIN:
-        out.append({"messages": [
-            {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": user},
-            {"role": "assistant", "content": reply}], "tools": TOOLS})
-    for req in ESCALATE:
-        out.append({"messages": [
-            {"role": "system", "content": SYSTEM},
-            {"role": "user", "content": req},
-            {"role": "assistant",
-             "content": _call("hand_to_companion", request=req)}],
-            "tools": TOOLS})
+    out = [_convo(u, _say(r)) for u, r in PLAIN + NO_TOOL + CLARIFY]
+    out += [_convo(r, _call("hand_to_companion", request=r)) for r in ESCALATE]
     return out
 
 
-def harvested_samples():
-    """Escalations the nightly pass curated from real speech, when present."""
+def harvested_samples(names):
+    """Escalations the companion logged: Claude's answer, or the handoff."""
     out = []
     try:
-        for line in open(PAIRS):
-            try:
-                pair = json.loads(line)
-            except ValueError:
-                continue
-            if pair.get("kind") == "escalation" and pair.get("prompt"):
-                out.append({"messages": [
-                    {"role": "system", "content": SYSTEM},
-                    {"role": "user", "content": pair["prompt"]},
-                    {"role": "assistant",
-                     "content": _call("hand_to_companion",
-                                      request=pair["prompt"])}],
-                    "tools": TOOLS})
+        lines = open(PAIRS).readlines()
     except OSError:
-        pass
+        return out
+    for line in lines:
+        try:
+            pair = json.loads(line)
+        except ValueError:
+            continue
+        prompt = (pair.get("prompt") or "").strip()
+        if pair.get("kind") != "escalation" or not prompt:
+            continue
+        response = (pair.get("response") or "").strip()
+        # ponytail: name match, not real state detection. Claude's answer to
+        # "is the porch light on" is a snapshot; training on it teaches state
+        # as fact (CURRICULUM lesson 1), so anything naming a device hands off.
+        mentions_device = any(n in prompt.lower() for n in names)
+        if response and not mentions_device:
+            out.append(_convo(prompt, _say(response)))
+        else:
+            out.append(_convo(prompt, _call("hand_to_companion", request=prompt)))
     return out
 
 
@@ -216,10 +231,12 @@ def main():
     args = parser.parse_args()
     random.seed(29)  # regeneration is deterministic for a given house
 
+    entities = exposed_entities()
     samples = []
-    for name, domain, area in exposed_entities():
+    for name, domain, area in entities:
         samples += entity_samples(name, domain, area)
-    samples += plain_samples() + harvested_samples()
+    names = {n.lower() for n, _, _ in entities if len(n) > 3}
+    samples += plain_samples() + harvested_samples(names)
     random.shuffle(samples)
     if args.smoke:
         samples = samples[:60]

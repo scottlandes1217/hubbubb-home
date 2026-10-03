@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>com.hubbubb.housemodel-nightly</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/bin/python3</string>
+		<string>/Users/scottlandes/Projects/hubbubb-home/companion/voice-service/housemodel/train_house.py</string>
+		<string>--nightly</string>
+	</array>
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>1</integer>
+		<key>Minute</key>
+		<integer>30</integer>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>/Users/scottlandes/.hubbubb-voice/housemodel/nightly.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/scottlandes/.hubbubb-voice/housemodel/nightly.log</string>
+</dict>
+</plist>
