@@ -67,6 +67,7 @@ class HubbubbAPI(llm.API):
             tools.append(AskHubbubbTool(runtime))
         if runtime.companion.configured:
             tools.append(EscalateTool(runtime))
+            tools.append(UseComputerTool(runtime))
             tools.append(WebSearchTool(runtime))
         if runtime.speakers.configured:
             tools.append(TrainWakeWordTool(runtime))
@@ -123,9 +124,10 @@ class HubbubbAPI(llm.API):
                 "hand_to_companion with the full request, then say only that "
                 "you have passed it along, when: no tool of yours fits; a "
                 "tool returned an error; the speaker says you were wrong; "
-                "the speaker asks for Claude; or the job needs this computer "
-                "itself - files, apps, coding, multi-step work. Never guess "
-                "and never apologize at length."
+                "or the speaker asks for Claude. When the job needs the "
+                "computer itself - files, apps, coding, multi-step work - "
+                "call use_computer instead. Never guess and never apologize "
+                "at length."
             )
         return llm.APIInstance(
             api=self,
@@ -509,9 +511,9 @@ class EscalateTool(_RuntimeTool):
     description = (
         "Hand a request to Claude, the much more capable agent on the "
         "companion computer. Always use it when the speaker mentions Claude "
-        "(\"ask Claude...\"), says you were wrong, or the request is beyond "
-        "you: multi-step jobs, coding, anything needing files or apps on the "
-        "computer. Claude answers aloud later, so after calling this just "
+        "(\"ask Claude...\"), says you were wrong, or a tool failed or "
+        "use_computer could not do it. Claude answers aloud later, so after "
+        "calling this just "
         "acknowledge that it's being worked on - never answer it yourself."
     )
     parameters = vol.Schema(
@@ -530,10 +532,40 @@ class EscalateTool(_RuntimeTool):
         if person := self._speaker(llm_context):
             text = f"[{person}] {text}"
         try:
-            await self._runtime.companion.async_call("prompt", {"text": text})
+            await self._runtime.companion.async_call(
+                "prompt", {"text": text, "brain": "claude"}
+            )
         except CompanionError as err:
             return {"error": str(err)}
         return {"handed_off": True}
+
+
+class UseComputerTool(_RuntimeTool):
+    name = "use_computer"
+    description = (
+        "Do a job on the companion computer: open, find, read or organize "
+        "files, run apps, look something up on it, make or edit a project. "
+        "A worker on this same local model does it and speaks the result "
+        "when finished; anything risky it asks the speaker to confirm first. "
+        "After calling this just say it's being done."
+    )
+    parameters = vol.Schema(
+        {vol.Required("task"): vol.All(str, vol.Length(min=3, max=2000))}
+    )
+
+    async def async_call(
+        self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context
+    ) -> JsonObjectType:
+        text = tool_input.tool_args["task"]
+        if person := self._speaker(llm_context):
+            text = f"[{person}] {text}"
+        try:
+            await self._runtime.companion.async_call(
+                "prompt", {"text": text, "brain": "local"}
+            )
+        except CompanionError as err:
+            return {"error": str(err)}
+        return {"started": True}
 
 
 class WebSearchTool(_RuntimeTool):
