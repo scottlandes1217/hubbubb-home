@@ -167,6 +167,7 @@ from hubbubb_home.timers import TimerPool  # noqa: E402
 from hubbubb_home.nightly import FindingsReport, _days  # noqa: E402
 from hubbubb_home.review import ReviewReport, parse_proposals  # noqa: E402
 from hubbubb_home.appletv import _TEMPLATE, _match_source, decide_plan  # noqa: E402
+from hubbubb_home.companion import relevant_text  # noqa: E402
 
 
 # --- memory: spoken question -> FTS5 query -----------------------------------
@@ -2039,6 +2040,23 @@ def test_user_client_refreshes_rotates_and_marks_reauth():
     assert load() == {"access_token": "y"}
     assert writes[-1] == {"hubbubb": {"people": "Scott: a : b\n"}, "hubbubb_tokens": {"scott": {"access_token": "y"}, "vega": {"access_token": "v"}}}
     assert token_io(hass, entry, "nobody")[0]() is None
+
+
+def test_relevant_text():
+    # Matching lines come back with a line of context; scripts, nav and
+    # unrelated lines do not, and the length cap holds.
+    html = (
+        "<html><head><script>var hours = 'x';</script></head><body>"
+        "<nav>Costco hours menu</nav><p>Bend Warehouse</p><p>Open until 7PM</p>"
+        "<p>Saturday hours 9:30 AM - 6:00 PM</p><p>Gas prices vary</p></body></html>"
+    )
+    text = relevant_text(html, "costco saturday hours")
+    assert "Saturday hours 9:30 AM - 6:00 PM" in text
+    assert "Open until 7PM" in text
+    assert "var hours" not in text and "menu" not in text
+    assert "Gas prices" in text  # context line after the hit
+    assert relevant_text(html, "zebra") == ""
+    assert len(relevant_text("<p>hours</p>" * 2000, "hours", limit=100)) == 100
 
 
 if __name__ == "__main__":

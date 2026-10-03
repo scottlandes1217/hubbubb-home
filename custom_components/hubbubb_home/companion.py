@@ -9,7 +9,10 @@ services answer with a clear error rather than timing out.
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import re
+from html.parser import HTMLParser
 from typing import Any
 
 import aiohttp
@@ -19,6 +22,47 @@ _LOGGER = logging.getLogger(__name__)
 
 _TIMEOUT = aiohttp.ClientTimeout(total=90)
 SEARCH_PORT = 8888
+PAGES_READ = 2
+
+
+class _PageText(HTMLParser):
+    """Visible text lines of a page, minus scripts, styles and chrome."""
+
+    SKIP = {"script", "style", "noscript", "svg", "nav", "footer", "header"}
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.lines: list[str] = []
+        self._skipping = 0
+
+    def handle_starttag(self, tag, attrs) -> None:
+        self._skipping += tag in self.SKIP
+
+    def handle_endtag(self, tag) -> None:
+        if tag in self.SKIP and self._skipping:
+            self._skipping -= 1
+
+    def handle_data(self, data) -> None:
+        if not self._skipping and data.strip():
+            self.lines.append(data.strip())
+
+
+def relevant_text(html: str, query: str, limit: int = 1500) -> str:
+    """The parts of a page that mention the query, each with a line of context.
+
+    Snippets alone rarely hold the answer, and a small model fills the gap
+    from stale training. A whole page is too long to hand it every turn.
+    """
+    # ponytail: keyword overlap, so "most recent" style questions can miss the
+    # right line on long tables; upgrade to embedding rank if that bites.
+    parser = _PageText()
+    parser.feed(html)
+    lines = parser.lines
+    terms = {w for w in re.findall(r"[a-z0-9]+", query.lower()) if len(w) > 2}
+    hits = [i for i, line in enumerate(lines) if any(t in line.lower() for t in terms)]
+    hits.sort(key=lambda i: -sum(t in lines[i].lower() for t in terms))
+    text = " | ".join(" ".join(lines[max(0, i - 1) : i + 2]) for i in sorted(hits[:40]))
+    return text[:limit]
 
 NOT_CONFIGURED = (
     "No companion is set up, so there is no coding agent to talk to. Add one "
@@ -114,7 +158,7 @@ class CompanionClient:
                 data = await resp.json(content_type=None)
         except aiohttp.ClientError as err:
             raise CompanionError(f"web search unreachable: {err}") from err
-        return [
+        results = [
             {
                 "title": r.get("title", ""),
                 "url": r.get("url", ""),
@@ -122,6 +166,28 @@ class CompanionClient:
             }
             for r in data.get("results", [])[:limit]
         ]
+        pages = await asyncio.gather(
+            *(self._page_text(r["url"], query) for r in results[:PAGES_READ])
+        )
+        for result, text in zip(results, pages):
+            if text:
+                result["page_text"] = text
+        return results
+
+    async def _page_text(self, url: str, query: str) -> str:
+        """Best effort: a page that is slow, huge or not HTML just adds nothing."""
+        try:
+            async with self._session.get(
+                url,
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status >= 400 or "html" not in resp.content_type:
+                    return ""
+                html = (await resp.content.read(3_000_000)).decode("utf-8", "replace")
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            return ""
+        return relevant_text(html, query)
 
     async def async_available(self) -> bool:
         """True when a companion is configured and answering."""

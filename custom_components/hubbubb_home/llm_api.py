@@ -75,6 +75,9 @@ class HubbubbAPI(llm.API):
             getattr(llm_context, "device_id", None)
         )
         prompt = f"{runtime.persona()}\n\n{speaker}"
+        # HA's own date line has no weekday, and a model asked about "today"
+        # invents one.
+        prompt += f"\n\nToday is {dt_util.now().strftime('%A, %B %-d, %Y')}."
         # Home Assistant's own Assist API drops its timer tools and adds
         # "This device is not able to start timers." whenever the request
         # arrives without a timer-capable device - a dashboard, the phone
@@ -112,8 +115,11 @@ class HubbubbAPI(llm.API):
             # handoff triggers are things it can see: no tool fits, a tool
             # failed, the speaker corrected it, or the speaker asked.
             prompt += (
-                "\n\nFor anything current or outside the house, call "
-                "web_search and answer from its results. Call "
+                "\n\nYour own knowledge stops well before today. For anything "
+                "current or outside the house, call web_search and answer only "
+                "from what its results say - prefer page_text over snippets; "
+                "if the results do not state the answer, say you could not "
+                "find it rather than filling in from memory. Call "
                 "hand_to_companion with the full request, then say only that "
                 "you have passed it along, when: no tool of yours fits; a "
                 "tool returned an error; the speaker says you were wrong; "
@@ -534,7 +540,9 @@ class WebSearchTool(_RuntimeTool):
     description = (
         "Search the web. Use it for anything current or outside the house: "
         "store hours, news, scores, weather elsewhere, facts you are not sure "
-        "of. Answer from the snippets; never invent a result."
+        "of. Each result has a snippet; the top ones also carry page_text, "
+        "the passages of that page that match the query. Answer from those; "
+        "never invent a result."
     )
     parameters = vol.Schema(
         {
