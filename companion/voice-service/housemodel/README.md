@@ -26,7 +26,7 @@ steps run in `.venv` on their own.
    training target; rows that name a device, or have no answer, teach the
    handoff instead.
 2. mlx_lm LoRA on `mlx-community/Qwen3.6-35B-A3B-4bit` - every linear layer
-   in the last 16 blocks except the routed experts. ~36 GB peak; ollama's
+   in the last 8 blocks except the routed experts. ~36 GB peak; ollama's
    models are unloaded first, so Jarvis is offline while it trains.
 3. The deltas are added to the original bf16 checkpoint
    (`Qwen/Qwen3.6-35B-A3B`, ~70 GB in the HF cache). Measured dead ends on

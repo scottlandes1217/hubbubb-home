@@ -26,6 +26,7 @@ Writes ~/.hubbubb-voice/housemodel/last-run.json either way.
 """
 
 import argparse
+import contextlib
 import datetime
 import json
 import os
@@ -61,7 +62,9 @@ LORA_KEYS = [
     "mlp.shared_expert.gate_proj", "mlp.shared_expert.up_proj",
     "mlp.shared_expert.down_proj",
 ]
-RANK, SCALE, LAYERS = 8, 20.0, 16
+# 16 layers peaked at 48 GB - the Metal working-set ceiling on 64 GB - and
+# thrashed swap at one iteration per ten minutes. 8 layers fit in ~36.
+RANK, SCALE, LAYERS = 8, 20.0, 8
 
 deadline = None
 
@@ -109,14 +112,60 @@ def ollama_down():
 
 
 def ollama_up():
+    """True once /api/tags answers again."""
     subprocess.run(["launchctl", "bootstrap", f"gui/{os.getuid()}", str(OLLAMA_PLIST)],
                    stderr=subprocess.DEVNULL)  # "already loaded" is fine
     for _ in range(60):
         try:
             urllib.request.urlopen(f"{API}/api/tags", timeout=2)
-            return
+            return True
         except OSError:
             time.sleep(1)
+    return False
+
+
+# Jarvis's voice pipeline; while ollama is down it answers through Claude.
+PIPELINE = "01m06yp2qzc5cgmz5b2q2n3125"
+CLAUDE_AGENT = "conversation.claude_conversation"
+HA_WS = Path(os.path.expanduser("~/.claude/hooks/ha-ws.py"))
+
+
+def ha(command):
+    out = subprocess.run([sys.executable, str(HA_WS), json.dumps(command)],
+                         capture_output=True, text=True, check=True, timeout=30).stdout
+    reply = json.loads(out)
+    if not reply.get("success"):
+        raise RuntimeError(f"{command['type']}: {reply.get('error')}")
+    return reply["result"]
+
+
+def set_engine(engine):
+    """Point the pipeline at `engine`; returns the engine it had before."""
+    pipe = ha({"type": "assist_pipeline/pipeline/get", "pipeline_id": PIPELINE})
+    before = pipe["conversation_engine"]
+    if before != engine:
+        fields = {k: v for k, v in pipe.items() if k != "id"}
+        ha({"type": "assist_pipeline/pipeline/update", "pipeline_id": PIPELINE,
+            **fields, "conversation_engine": engine})
+    return before
+
+
+@contextlib.contextmanager
+def ollama_offline():
+    """Ollama down for the body, Jarvis on Claude meanwhile. On every exit:
+    ollama back up, then - only once it answers - the old engine back."""
+    try:
+        before = set_engine(CLAUDE_AGENT)
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as err:
+        # HA unreachable: train anyway; the house is just offline a while.
+        print(f"claude fallback not set: {err}", file=sys.stderr)
+        before = None
+    ollama_down()
+    try:
+        yield
+    finally:
+        if ollama_up() and before not in (None, CLAUDE_AGENT):
+            set_engine(before)
 
 
 def prune_blobs():
@@ -220,21 +269,20 @@ def main():
              f"s('{BASE}'); print(s('{HF_BASE}'))"],
             capture_output=True, text=True, check=True).stdout.strip().splitlines()[-1]
 
-        ollama_down()
         for path in (ADAPTER, MERGED):
             shutil.rmtree(path, ignore_errors=True)
         config = WORK / "lora.yaml"  # JSON is YAML; mlx_lm -c takes either
         config.write_text(json.dumps({"lora_parameters": {
             "keys": LORA_KEYS, "rank": RANK, "scale": SCALE, "dropout": 0.0}}))
         started = time.time()
-        run([PYTHON, "-m", "mlx_lm", "lora", "-c", config,
-             "--model", BASE, "--train", "--data", DATA,
-             "--adapter-path", ADAPTER, "--batch-size", "1",
-             "--num-layers", str(LAYERS), "--iters", str(iters),
-             "--steps-per-report", "10", "--save-every", str(iters),
-             "--grad-checkpoint"])
+        with ollama_offline():
+            run([PYTHON, "-m", "mlx_lm", "lora", "-c", config,
+                 "--model", BASE, "--train", "--data", DATA,
+                 "--adapter-path", ADAPTER, "--batch-size", "1",
+                 "--num-layers", str(LAYERS), "--iters", str(iters),
+                 "--steps-per-report", "10", "--save-every", str(iters),
+                 "--grad-checkpoint"])
         record["train_seconds"] = round(time.time() - started)
-        ollama_up()
 
         merge(ADAPTER / "adapters.safetensors", hf_dir)
         modelfile = WORK / "Modelfile"

@@ -10,6 +10,11 @@
 		<string>/Users/scottlandes/Projects/hubbubb-home/companion/voice-service/housemodel/train_house.py</string>
 		<string>--nightly</string>
 	</array>
+	<!-- Detached from a terminal, training crawled (iteration 1 of 100 after
+	     ten minutes) where an attached run does an iteration every ~5 s;
+	     ask launchd for app-level, not background, scheduling. -->
+	<key>ProcessType</key>
+	<string>Interactive</string>
 	<key>StartCalendarInterval</key>
 	<dict>
 		<key>Hour</key>
