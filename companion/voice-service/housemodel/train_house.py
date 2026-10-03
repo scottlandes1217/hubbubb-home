@@ -15,8 +15,8 @@ The serving model is qwen3.6:35b-a3b (a 35B mixture-of-experts). The chain:
      "unsupported architecture" for qwen35moe.)
   4. `ollama create jarvis-house-candidate --quantize q4_K_M`.
   5. eval_house.py auditions candidate vs the serving model; only a clean
-     win becomes `jarvis-house`. Pointing Home Assistant at jarvis-house is
-     a separate, deliberate step.
+     win becomes `jarvis-house`, and the first win also points Jarvis's HA
+     agent at it (set_agent_model); later wins just replace its weights.
 
   train_house.py            full run
   train_house.py --smoke    tiny dataset, 20 iterations - proves the chain
@@ -149,6 +149,39 @@ def set_engine(engine):
         ha({"type": "assist_pipeline/pipeline/update", "pipeline_id": PIPELINE,
             **fields, "conversation_engine": engine})
     return before
+
+
+HA_URL = "http://192.168.1.62"
+HA_TOKEN = Path(os.path.expanduser("~/.claude/hooks/.ha-token"))
+OLLAMA_ENTRY = "01M1812PC99PF81N4TK6MRNM8S"  # HA's Ollama integration
+JARVIS_AGENT = "01M18196WT86WY8HXGXH820FVX"  # its "Ollama (Mac)" agent
+
+
+def ha_rest(path, payload):
+    request = urllib.request.Request(
+        HA_URL + path, data=json.dumps(payload).encode(),
+        headers={"Authorization": "Bearer " + HA_TOKEN.read_text().strip(),
+                 "Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=60) as reply:
+        return json.load(reply)
+
+
+def set_agent_model(model):
+    """Point Jarvis's agent at `model`, every other setting as it was.
+
+    Subentry settings are only writable through a reconfigure flow, and its
+    form offers the current values as suggestions - so carry those over.
+    """
+    form = ha_rest("/api/config/config_entries/subentries/flow",
+                   {"handler": [OLLAMA_ENTRY, "conversation"],
+                    "source": "reconfigure", "subentry_id": JARVIS_AGENT})
+    data = {f["name"]: f["description"]["suggested_value"]
+            for f in form["data_schema"]
+            if "suggested_value" in (f.get("description") or {})}
+    data["model"] = model
+    done = ha_rest(f"/api/config/config_entries/subentries/flow/{form['flow_id']}", data)
+    if done.get("reason") != "reconfigure_successful":
+        raise RuntimeError(f"agent not switched: {done}")
 
 
 @contextlib.contextmanager
@@ -310,6 +343,16 @@ def main():
         record.update(eval=result, promoted=result["promote"])
         if result["promote"]:
             run([OLLAMA, "cp", "jarvis-house-candidate", "jarvis-house"])
+            # A winner nobody talks to teaches nothing. After the first
+            # promotion the agent is already on jarvis-house and the cp alone
+            # swaps the weights under it.
+            if current != "jarvis-house:latest":
+                try:
+                    set_agent_model("jarvis-house:latest")
+                    record["switched"] = True
+                except (OSError, ValueError, KeyError, RuntimeError) as err:
+                    record["switch_failed"] = str(err)[:300]
+                    print(f"promoted but HA not switched: {err}", file=sys.stderr)
         # Never keep a candidate: promoted it lives on as jarvis-house (shared
         # blobs), rejected it is 22 GB of nothing. rm is in `finally` too.
         print(json.dumps({k: record[k] for k in ("promoted", "train_seconds")}),

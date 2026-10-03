@@ -38,7 +38,8 @@ steps run in `.venv` on their own.
 5. `eval_house.py` - 20+ held-out prompts through `/api/chat` with the
    tools, candidate vs serving model. Hard checks: no narration on a
    tool-call turn, no tool syntax in speech, no invented state on a
-   no-tool question. Promote = `ollama cp jarvis-house-candidate jarvis-house`.
+   no-tool question. Promote = `ollama cp jarvis-house-candidate jarvis-house`,
+   then (first time only) HA's "Ollama (Mac)" agent is switched to it.
 
 Every run writes `~/.hubbubb-voice/housemodel/last-run.json` (scores,
 failures, the escalation watermark). `--nightly` skips unless 20+ new
