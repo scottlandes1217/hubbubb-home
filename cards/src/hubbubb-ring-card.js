@@ -376,6 +376,7 @@ class HubbubbRingCard extends LitElement {
     _ask: { state: true },
     _askSent: { state: true },
     _activity: { state: true },
+    _screen: { state: true },
     _permission: { state: true },
     _modelBusy: { state: true },
     _models: { state: true },
@@ -996,6 +997,7 @@ class HubbubbRingCard extends LitElement {
       this._msgs = null;
       this._ask = null;
       this._activity = null;
+      this._screen = null;
     this._suggestion = null;
       this._suggestion = null;
       this._permission = null;
@@ -1284,6 +1286,7 @@ class HubbubbRingCard extends LitElement {
         const next = t.messages;
         if (next != null && !this._sameMsgs(next, this._msgs)) this._msgs = next;
         this._activity = t.activity || null;
+        this._screen = t.screen || null;
         this._suggestion = t.suggestion || null;
         this._permission = t.permission || null;
         // Only a genuinely different dialog clears the "you picked this"
@@ -1364,6 +1367,7 @@ class HubbubbRingCard extends LitElement {
     this._askSent = null;
     this._askSig = undefined;
     this._activity = null;
+    this._screen = null;
     this._suggestion = null;
     this._permission = null;
     // A model picked by hand belongs to the session it was picked in; the
@@ -4298,9 +4302,13 @@ class HubbubbRingCard extends LitElement {
             : this._msgs.map(
                 (m) => html`<div class="msg ${m.role}">${this._body(m)}</div>`
               )}
-        ${this._activity && s?.busy
-          ? html`<div class="activity">${this._activity}</div>`
-          : nothing}
+        ${!s?.busy
+          ? nothing
+          : this._activity
+            ? html`<div class="activity">${this._activity}</div>`
+            : this._screen
+              ? html`<pre class="activity screen-tail" title="No spinner on screen - this is the terminal as it stands">${this._screen}</pre>`
+              : nothing}
         ${this._ask ? this._renderAsk(this._ask) : nothing}
         ${(this._queue || [])
           .filter((q) => q.id === this._sel)
@@ -5717,6 +5725,16 @@ class HubbubbRingCard extends LitElement {
       font-size: 11px;
       color: rgba(160, 200, 220, 0.7);
       animation: jr-blink 1.6s ease-in-out infinite;
+    }
+    .screen-tail {
+      align-self: stretch;
+      margin: 0;
+      padding: 8px 10px;
+      white-space: pre-wrap;
+      overflow-wrap: anywhere;
+      border-left: 2px solid rgba(160, 200, 220, 0.35);
+      background: rgba(0, 0, 0, 0.25);
+      animation: none;
     }
     .askbox {
       align-self: stretch;
