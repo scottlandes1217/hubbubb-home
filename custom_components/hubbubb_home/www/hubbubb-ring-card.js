@@ -59,7 +59,7 @@ var Xs=Object.defineProperty,Js=Object.defineProperties;var Zs=Object.getOwnProp
         @change=${o=>this._setModel(o.target.value)}
       >
         <option value="" disabled>${t.length?"Model":"\u2026"}</option>
-        ${t.map(o=>b`<option value=${o.id}>${o.name}</option>`)}
+        ${t.map(o=>b`<option value=${o.id}>${o.id==="local"?"Local":o.name}</option>`)}
       </select>
       <select
         class="runsel perm mode-${(s||"unknown").replace(/\s+/g,"-")} ${this._modelBusy==="perm"?"busy":""}"
@@ -139,11 +139,11 @@ var Xs=Object.defineProperty,Js=Object.defineProperties;var Zs=Object.getOwnProp
                   </div>
                 `)}
       </div>
-    `}_modelName(t){let e=(this._models||[]).find(s=>s.id===(t==null?void 0:t.model));return(t==null?void 0:t.model)==="local"?((e==null?void 0:e.name.match(/\((.*)\)/))||[])[1]||"house model":((e==null?void 0:e.name)||(t==null?void 0:t.model)||"Claude").replace(/^Claude /,"")}_renderHello(t){let e=(t==null?void 0:t.model)==="local",s=this._modelName(t);return b`<div class="hello">
+    `}_modelName(t){if((t==null?void 0:t.model)==="local")return"Local";let e=(this._models||[]).find(s=>s.id===(t==null?void 0:t.model));return((e==null?void 0:e.name)||(t==null?void 0:t.model)||"Claude").replace(/^Claude /,"")}_renderHello(t){let e=(t==null?void 0:t.model)==="local",s=this._modelName(t);return b`<div class="hello">
       <div class="hello-ring"><span></span><span></span><span></span></div>
       <div class="hello-name">${e?this._name:"Claude"}</div>
       <div class="hello-sub">
-        ${e?"Local":"Cloud"} · ${s}${t!=null&&t.project?b` · ${t.project}`:v}
+        ${e?"Local":`Cloud \xB7 ${s}`}${t!=null&&t.project?b` · ${t.project}`:v}
       </div>
       <div class="hello-ready">Ready when you are</div>
     </div>`}_useSuggestion(){let t=this._composerEl();!t||!this._suggestion||(t.value=this._suggestion,this._autoGrow(t),this._draftSoon(),t.focus(),t.setSelectionRange(t.value.length,t.value.length))}_renderSession(){let t=(this._sessions||[]).find(e=>e.id===this._sel);return b`

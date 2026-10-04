@@ -1963,7 +1963,7 @@ class HubbubbRingCard extends LitElement {
       >
         <option value="" disabled>${models.length ? "Model" : "…"}</option>
         ${models.map(
-          (m) => html`<option value=${m.id}>${m.name}</option>`
+          (m) => html`<option value=${m.id}>${m.id === "local" ? "Local" : m.name}</option>`
         )}
       </select>
       <select
@@ -4208,12 +4208,11 @@ class HubbubbRingCard extends LitElement {
     `;
   }
 
-  /* "Opus 5.5" for claude-opus-5-5, the house model's tag for local. The
+  /* "Opus 5.5" for claude-opus-5-5, plain "Local" for the house model. The
      names come from the listener's list; an id it does not know shows as is. */
   _modelName(s) {
+    if (s?.model === "local") return "Local";
     const pick = (this._models || []).find((m) => m.id === s?.model);
-    if (s?.model === "local")
-      return (pick?.name.match(/\((.*)\)/) || [])[1] || "house model";
     return (pick?.name || s?.model || "Claude").replace(/^Claude /, "");
   }
 
@@ -4228,7 +4227,7 @@ class HubbubbRingCard extends LitElement {
       <div class="hello-ring"><span></span><span></span><span></span></div>
       <div class="hello-name">${local ? this._name : "Claude"}</div>
       <div class="hello-sub">
-        ${local ? "Local" : "Cloud"} · ${model}${s?.project ? html` · ${s.project}` : nothing}
+        ${local ? "Local" : `Cloud · ${model}`}${s?.project ? html` · ${s.project}` : nothing}
       </div>
       <div class="hello-ready">Ready when you are</div>
     </div>`;
