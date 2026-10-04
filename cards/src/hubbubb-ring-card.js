@@ -4421,9 +4421,7 @@ class HubbubbRingCard extends LitElement {
         <textarea
           data-ai="compose-prompt"
           rows="2"
-          placeholder=${this._suggestion
-            ? `${this._suggestion}  (Tab)`
-            : `Message ${this._name}…`}
+          placeholder="Message ${this._name}…"
           autocomplete="off"
           ?disabled=${this._pending}
           @keydown=${(e) => {

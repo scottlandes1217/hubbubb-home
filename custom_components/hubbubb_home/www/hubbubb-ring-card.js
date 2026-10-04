@@ -266,7 +266,7 @@ var Xs=Object.defineProperty,Js=Object.defineProperties;var Zs=Object.getOwnProp
         <textarea
           data-ai="compose-prompt"
           rows="2"
-          placeholder=${this._suggestion?`${this._suggestion}  (Tab)`:`Message ${this._name}\u2026`}
+          placeholder="Message ${this._name}…"
           autocomplete="off"
           ?disabled=${this._pending}
           @keydown=${e=>{if(e.key==="Tab"&&!e.shiftKey&&this._suggestion&&!e.target.value){e.preventDefault(),this._useSuggestion();return}e.key==="Enter"&&!e.shiftKey&&(e.preventDefault(),this._send(e))}}
