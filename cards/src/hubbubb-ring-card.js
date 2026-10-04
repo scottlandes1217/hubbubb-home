@@ -4194,6 +4194,9 @@ class HubbubbRingCard extends LitElement {
                           ${s.label !== s.project
                             ? html`<span class="pill alt">${s.label.replace(`${s.project}, `, "")}</span>`
                             : nothing}
+                          ${s.model
+                            ? html`<span class="pill alt">${this._modelName(s)}</span>`
+                            : nothing}
                         </span>
                       </span>
                       <span class="chev">›</span>
@@ -4205,16 +4208,22 @@ class HubbubbRingCard extends LitElement {
     `;
   }
 
+  /* "Opus 5.5" for claude-opus-5-5, the house model's tag for local. The
+     names come from the listener's list; an id it does not know shows as is. */
+  _modelName(s) {
+    const pick = (this._models || []).find((m) => m.id === s?.model);
+    if (s?.model === "local")
+      return (pick?.name.match(/\((.*)\)/) || [])[1] || "house model";
+    return (pick?.name || s?.model || "Claude").replace(/^Claude /, "");
+  }
+
   /* A session nobody has spoken to has no transcript, only the raw terminal
      with Claude Code's own banner. Greet with the assistant's name instead,
      and say which model is answering. Questions on that screen (a trust
      prompt) still surface through _ask, which is scraped separately. */
   _renderHello(s) {
     const local = s?.model === "local";
-    const pick = (this._models || []).find((m) => m.id === s?.model);
-    const model = local
-      ? (pick?.name.match(/\((.*)\)/) || [])[1] || "house model"
-      : pick?.name || s?.model || "Claude";
+    const model = this._modelName(s);
     return html`<div class="hello">
       <div class="hello-ring"><span></span><span></span><span></span></div>
       <div class="hello-name">${local ? this._name : "Claude"}</div>
