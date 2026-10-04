@@ -788,7 +788,16 @@ class HubbubbRingCard extends LitElement {
       });
     const speak = (ev) => {
       const msg = ev?.data?.message;
-      if (msg) this._electAndSpeak(msg);
+      const device = ev?.data?.device;
+      // A turn typed on a screen is answered on that screen and nowhere else:
+      // with it gone (a phone off the network), the house stays quiet rather
+      // than picking whichever other screen happens to be awake.
+      if (!msg) return;
+      if (device) {
+        if (device === this._deviceId()) this._speakHere(msg);
+        return;
+      }
+      this._electAndSpeak(msg);
     };
     track(hass.connection.subscribeEvents(speak, "hubbubb_home_message"));
     /* ponytail: legacy event name from before the integration owned the
@@ -806,6 +815,21 @@ class HubbubbRingCard extends LitElement {
         while (list.length && list[0].at < c.at - CLAIM_WINDOW) list.shift();
       }, "hubbubb_home_claim")
     );
+  }
+
+  /* Which screen this is, kept for good so a turn typed here is answered here.
+     Storage blocked: an id for this card's lifetime, which still matches its
+     own turns until the app tears the card down. */
+  _deviceId() {
+    if (this._device) return this._device;
+    const make = () => Math.random().toString(36).slice(2, 12);
+    try {
+      this._device = localStorage.getItem("jrc:device") || make();
+      localStorage.setItem("jrc:device", this._device);
+    } catch {
+      this._device = make();
+    }
+    return this._device;
   }
 
   /* Every open dashboard hears hubbubb_home_message, so without a winner the
@@ -1715,7 +1739,11 @@ class HubbubbRingCard extends LitElement {
     this._queue = [...this._queue];
     this._saveQueue();
     try {
-      await this._api("agent_prompt_direct", { id: item.id, text: item.text });
+      await this._api("agent_prompt_direct", {
+        id: item.id,
+        text: item.text,
+        device: this._deviceId(),
+      });
       // The listener has typed it into the terminal: that is "sent". The chip
       // used to say "sending…" until the text showed up in the transcript,
       // which on a tool-heavy session can scroll out of the window first.
