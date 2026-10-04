@@ -379,6 +379,7 @@ class HubbubbRingCard extends LitElement {
     _permission: { state: true },
     _modelBusy: { state: true },
     _models: { state: true },
+    _suggestion: { state: true },
     _modes: { state: true },
     _model: { state: true },
     _queue: { state: true },
@@ -995,6 +996,8 @@ class HubbubbRingCard extends LitElement {
       this._msgs = null;
       this._ask = null;
       this._activity = null;
+    this._suggestion = null;
+      this._suggestion = null;
       this._permission = null;
       this._confirmKill = null;
       this._picking = false;
@@ -1281,6 +1284,7 @@ class HubbubbRingCard extends LitElement {
         const next = t.messages;
         if (next != null && !this._sameMsgs(next, this._msgs)) this._msgs = next;
         this._activity = t.activity || null;
+        this._suggestion = t.suggestion || null;
         this._permission = t.permission || null;
         // Only a genuinely different dialog clears the "you picked this"
         // marker — the same one lingering for a poll or two is just the
@@ -1360,6 +1364,7 @@ class HubbubbRingCard extends LitElement {
     this._askSent = null;
     this._askSig = undefined;
     this._activity = null;
+    this._suggestion = null;
     this._permission = null;
     // A model picked by hand belongs to the session it was picked in; the
     // next session's picker shows what its own transcript reports.
@@ -4200,6 +4205,39 @@ class HubbubbRingCard extends LitElement {
     `;
   }
 
+  /* A session nobody has spoken to has no transcript, only the raw terminal
+     with Claude Code's own banner. Greet with the assistant's name instead,
+     and say which model is answering. Questions on that screen (a trust
+     prompt) still surface through _ask, which is scraped separately. */
+  _renderHello(s) {
+    const local = s?.model === "local";
+    const pick = (this._models || []).find((m) => m.id === s?.model);
+    const model = local
+      ? (pick?.name.match(/\((.*)\)/) || [])[1] || "house model"
+      : pick?.name || s?.model || "Claude";
+    return html`<div class="hello">
+      <div class="hello-ring"><span></span><span></span><span></span></div>
+      <div class="hello-name">${local ? this._name : "Claude"}</div>
+      <div class="hello-sub">
+        ${local ? "Local" : "Cloud"} · ${model}${s?.project ? html` · ${s.project}` : nothing}
+      </div>
+      <div class="hello-ready">Ready when you are</div>
+    </div>`;
+  }
+
+  /* Claude Code's own suggested next prompt (the dim text Tab accepts in the
+     terminal), scraped by the listener. Put it in the box rather than sending
+     it, so it can be edited first - same as Tab does there. */
+  _useSuggestion() {
+    const box = this._composerEl();
+    if (!box || !this._suggestion) return;
+    box.value = this._suggestion;
+    this._autoGrow(box);
+    this._draftSoon();
+    box.focus();
+    box.setSelectionRange(box.value.length, box.value.length);
+  }
+
   _renderSession() {
     const s = (this._sessions || []).find((x) => x.id === this._sel);
     return html`
@@ -4247,8 +4285,8 @@ class HubbubbRingCard extends LitElement {
       >
         ${this._msgs == null
           ? html`<div class="dim pad">Loading transcript…</div>`
-          : this._msgs.length === 0
-            ? html`<div class="dim pad">Nothing here yet.</div>`
+          : this._msgs.every((m) => m.role === "screen")
+            ? this._renderHello(s)
             : this._msgs.map(
                 (m) => html`<div class="msg ${m.role}">${this._body(m)}</div>`
               )}
@@ -4371,13 +4409,29 @@ class HubbubbRingCard extends LitElement {
             ${this._pending ? "…" : "Send"}
           </button>
         </div>
+        ${this._suggestion
+          ? html`<button
+              type="button"
+              class="suggest"
+              data-ai="use-suggestion"
+              title="Claude Code's suggested reply - tap, or press Tab in an empty box"
+              @click=${() => this._useSuggestion()}
+            ><span class="suggest-key">⇥</span>${this._suggestion}</button>`
+          : nothing}
         <textarea
           data-ai="compose-prompt"
           rows="2"
-          placeholder="Message ${this._name}…"
+          placeholder=${this._suggestion
+            ? `${this._suggestion}  (Tab)`
+            : `Message ${this._name}…`}
           autocomplete="off"
           ?disabled=${this._pending}
           @keydown=${(e) => {
+            if (e.key === "Tab" && !e.shiftKey && this._suggestion && !e.target.value) {
+              e.preventDefault();
+              this._useSuggestion();
+              return;
+            }
             if (e.key === "Enter" && !e.shiftKey) {
               e.preventDefault();
               this._send(e);
@@ -5169,6 +5223,114 @@ class HubbubbRingCard extends LitElement {
       border: 1px solid rgba(53, 154, 210, 0.25);
       padding: 5px 9px;
       color: #a8d8f0;
+    }
+    .suggest {
+      align-self: flex-start;
+      max-width: 100%;
+      margin: 4px 8px 0;
+      padding: 4px 10px;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      border: 1px dashed var(--jr-color);
+      border-radius: 999px;
+      background: transparent;
+      color: inherit;
+      opacity: 0.7;
+      font: inherit;
+      font-size: 13px;
+      text-align: left;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      cursor: pointer;
+      transition: opacity 150ms ease, transform 150ms ease;
+    }
+    .suggest:hover {
+      opacity: 1;
+    }
+    .suggest:active {
+      transform: scale(0.97);
+    }
+    .suggest-key {
+      color: var(--jr-color);
+      font-size: 12px;
+    }
+    .hello {
+      margin: auto;
+      padding: 24px 16px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 6px;
+      text-align: center;
+      line-height: 1.3;
+      animation: jr-hello-in 600ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+    }
+    .hello-ring {
+      position: relative;
+      width: 96px;
+      height: 96px;
+      margin-bottom: 14px;
+    }
+    .hello-ring span {
+      position: absolute;
+      border-radius: 50%;
+      border: 1.5px solid var(--jr-color);
+    }
+    .hello-ring span:nth-child(1) {
+      inset: 0;
+      opacity: 0.35;
+      border-style: dashed;
+      animation: jr-hello-spin 24s linear infinite;
+    }
+    .hello-ring span:nth-child(2) {
+      inset: 14px;
+      opacity: 0.7;
+      border-color: var(--jr-color) transparent;
+      animation: jr-hello-spin 9s linear infinite reverse;
+    }
+    .hello-ring span:nth-child(3) {
+      inset: 32px;
+      background: var(--jr-color);
+      box-shadow: 0 0 18px var(--jr-color), 0 0 42px var(--jr-color);
+      animation: jr-rim 4s ease-in-out infinite;
+    }
+    .hello-name {
+      font-size: 30px;
+      font-weight: 300;
+      letter-spacing: 0.42em;
+      margin-right: -0.42em; /* letter-spacing trails the last glyph */
+      text-transform: uppercase;
+      color: var(--jr-color);
+      text-shadow: 0 0 14px var(--jr-color);
+    }
+    .hello-sub {
+      font-size: 13px;
+      opacity: 0.75;
+      font-variant-numeric: tabular-nums;
+    }
+    .hello-ready {
+      font-size: 12px;
+      opacity: 0.45;
+      letter-spacing: 0.08em;
+    }
+    @keyframes jr-hello-spin {
+      to {
+        transform: rotate(360deg);
+      }
+    }
+    @keyframes jr-hello-in {
+      from {
+        opacity: 0;
+        transform: translateY(6px) scale(0.98);
+      }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .hello,
+      .hello-ring span {
+        animation: none;
+      }
     }
     .msg.screen {
       max-width: 100%;
