@@ -13,8 +13,10 @@ model setting, and no opinion from us about which provider anyone uses.
 
 from __future__ import annotations
 
+import ast
 import logging
-from datetime import timedelta
+import operator
+from datetime import datetime, timedelta
 from typing import Any
 
 import voluptuous as vol
@@ -62,6 +64,8 @@ class HubbubbAPI(llm.API):
             CancelTimerTool(runtime),
             TimerStatusTool(runtime),
             FindingsTool(runtime),
+            CalculateTool(runtime),
+            DateTool(runtime),
         ]
         if runtime.hubbubb is not None:
             tools.append(AskHubbubbTool(runtime))
@@ -704,6 +708,127 @@ class FindingsTool(_RuntimeTool):
             "findings": report.items,
             "last_run": report.last_run,
         }
+
+
+# A local model without thinking gets sums and calendars wrong while sounding
+# sure: Halloween on a Monday, 11:50pm + 40 minutes = 1:20am. These two answer
+# exactly, so the model only has to read the result out.
+_OPS = {
+    ast.Add: operator.add, ast.Sub: operator.sub, ast.Mult: operator.mul,
+    ast.Div: operator.truediv, ast.FloorDiv: operator.floordiv,
+    ast.Mod: operator.mod, ast.Pow: operator.pow,
+    ast.USub: operator.neg, ast.UAdd: operator.pos,
+}
+
+
+def _arith(node):
+    """Numbers and + - * / // % ** only - the model's text is never eval'd."""
+    if isinstance(node, ast.Expression):
+        return _arith(node.body)
+    if isinstance(node, ast.Constant) and type(node.value) in (int, float):
+        return node.value
+    if isinstance(node, ast.BinOp) and type(node.op) in _OPS:
+        left, right = _arith(node.left), _arith(node.right)
+        if isinstance(node.op, ast.Pow) and abs(right) > 100:
+            raise ValueError("exponent too large")
+        return _OPS[type(node.op)](left, right)
+    if isinstance(node, ast.UnaryOp) and type(node.op) in _OPS:
+        return _OPS[type(node.op)](_arith(node.operand))
+    raise ValueError("only numbers and + - * / % ** ( ) are allowed")
+
+
+def calculate(expression: str) -> float | int:
+    expr = expression.replace(",", "").replace("x", "*").replace("×", "*")
+    value = _arith(ast.parse(expr, mode="eval"))
+    if isinstance(value, float):
+        value = round(value, 6)
+        if value.is_integer():
+            value = int(value)
+    return value
+
+
+def _ordinal(n: int) -> str:
+    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def date_facts(when: str, add_days: int, add_minutes: int, now: datetime) -> dict:
+    """The weekday, spoken form and distance from today of a date or time."""
+    when = when.strip()
+    has_time = bool(when) and len(when) > 10
+    if not when or when.lower() in ("now", "today"):
+        base, has_time = now, bool(add_minutes)
+    else:
+        # ponytail: ISO only; "next Friday" is the model's to turn into a date
+        base = datetime.fromisoformat(when.replace(" ", "T"))
+        if base.tzinfo is None and now.tzinfo is not None:
+            base = base.replace(tzinfo=now.tzinfo)
+    target = base + timedelta(days=add_days, minutes=add_minutes)
+    has_time = has_time or bool(add_minutes)
+    spoken = f"{target:%A %B} {_ordinal(target.day)}"
+    if target.year != now.year:
+        spoken += f", {target.year}"
+    if has_time:
+        hour = target.hour % 12 or 12
+        minute = f":{target.minute:02d}" if target.minute else ""
+        spoken += f" at {hour}{minute} {'AM' if target.hour < 12 else 'PM'}"
+    days = (target.date() - now.date()).days
+    return {
+        "date": target.date().isoformat(),
+        "weekday": f"{target:%A}",
+        "spoken": spoken,
+        "days_from_today": days,
+    }
+
+
+class CalculateTool(_RuntimeTool):
+    name = "calculate"
+    description = (
+        "Exact arithmetic. Call it for every sum, percentage, tip, unit or "
+        "recipe scaling instead of working it out yourself - write the "
+        "expression with numbers and + - * / % ** ( ), e.g. 84 * 0.17."
+    )
+    parameters = vol.Schema(
+        {vol.Required("expression"): vol.All(str, vol.Length(min=1, max=200))}
+    )
+
+    async def async_call(
+        self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context
+    ) -> JsonObjectType:
+        try:
+            return {"result": calculate(tool_input.tool_args["expression"])}
+        except (ValueError, SyntaxError, ZeroDivisionError, OverflowError) as err:
+            return {"error": str(err) or "could not calculate that"}
+
+
+class DateTool(_RuntimeTool):
+    name = "date_info"
+    description = (
+        "Exact calendar and clock facts. Call it for any weekday, date, "
+        "\"how many days until\", or time-plus-duration question instead of "
+        "working it out yourself. Give when as YYYY-MM-DD or YYYY-MM-DD HH:MM "
+        "(24 hour), or leave it empty for now, plus optional add_days or "
+        "add_minutes. Read the answer from spoken."
+    )
+    parameters = vol.Schema(
+        {
+            vol.Optional("when", default=""): str,
+            vol.Optional("add_days", default=0): vol.Coerce(int),
+            vol.Optional("add_minutes", default=0): vol.Coerce(int),
+        }
+    )
+
+    async def async_call(
+        self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context
+    ) -> JsonObjectType:
+        args = tool_input.tool_args
+        try:
+            return date_facts(
+                args.get("when", ""), args.get("add_days", 0),
+                args.get("add_minutes", 0), dt_util.now(),
+            )
+        except (ValueError, OverflowError) as err:
+            return {"error": f"{err}; use YYYY-MM-DD or YYYY-MM-DD HH:MM"}
 
 
 class AskHubbubbTool(_RuntimeTool):

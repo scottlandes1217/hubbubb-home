@@ -2059,6 +2059,32 @@ def test_relevant_text():
     assert len(relevant_text("<p>hours</p>" * 2000, "hours", limit=100)) == 100
 
 
+def test_calculate_and_dates():
+    from hubbubb_home.llm_api import calculate, date_facts
+
+    assert calculate("84 * 0.17") == 14.28
+    assert calculate("300 / 4 * 6") == 450
+    assert calculate("1,200 x 3") == 3600
+    for bad in ("__import__('os')", "2 ** 1000", "1 / 0", "abs(-1)"):
+        try:
+            calculate(bad)
+        except (ValueError, SyntaxError, ZeroDivisionError):
+            continue
+        raise AssertionError(bad)
+
+    now = datetime(2026, 10, 4, 18, 0, tzinfo=timezone.utc)  # a Sunday
+    halloween = date_facts("2026-10-31", 0, 0, now)
+    assert halloween["weekday"] == "Saturday"
+    assert halloween["spoken"] == "Saturday October 31st"
+    assert date_facts("2026-12-25", 0, 0, now)["days_from_today"] == 82
+    # The flight: lands 11:50pm, 40 minutes home - 12:30 the next day.
+    flight = date_facts("2026-10-04 23:50", 0, 40, now)
+    assert flight["spoken"] == "Monday October 5th at 12:30 AM", flight
+    assert date_facts("", 7, 0, now)["spoken"] == "Sunday October 11th"
+    assert date_facts("2027-01-01", 0, 0, now)["spoken"] == "Friday January 1st, 2027"
+    assert date_facts("2026-10-11", 0, 0, now)["spoken"].endswith("11th")
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):
