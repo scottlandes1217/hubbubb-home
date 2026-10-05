@@ -12,6 +12,7 @@
 import { groupProposals, markup } from "./review-groups.js";
 
 const RUNNING = "running — the review takes a few minutes";
+const CHECKING = "re-checking against the current code — a few minutes";
 
 class HubbubbReviewCard extends HTMLElement {
   setConfig(config) {
@@ -49,9 +50,17 @@ class HubbubbReviewCard extends HTMLElement {
     this._note = busy;
     this._render();
     promise.then(
-      () => { this._note = done; this._render(); },
+      (r) => { this._note = typeof done === "function" ? done(r) : done; this._render(); },
       (e) => { this._note = `${label} failed: ${e?.message || e}`; this._render(); }
     );
+  }
+
+  /* Closes the open items the code no longer has; says how many. */
+  _recheck() {
+    const call = this._hass.callWS({ type: "call_service", domain: "hubbubb_home",
+      service: "review_recheck", service_data: {}, return_response: true });
+    this._track(call, CHECKING,
+      (r) => `re-check: ${r?.response?.fixed?.length ?? 0} already fixed, closed`, "re-check");
   }
 
   _decide(id, decision) {
@@ -74,7 +83,7 @@ class HubbubbReviewCard extends HTMLElement {
         </div>
         <div class="jr-body">${markup(p.body, (s) => this._esc(s))}${yaml}</div>
         <div class="jr-actions">
-          <span class="jr-seen">${p.status === "pending" ? "first seen" : p.status} ${this._esc(p.first_seen || "")}</span>
+          <span class="jr-seen">${p.resolved ? this._esc(p.resolved) : `${p.status === "pending" ? "first seen" : p.status} ${this._esc(p.first_seen || "")}`}</span>
           ${buttons}
         </div>
       </div>`;
@@ -96,6 +105,7 @@ class HubbubbReviewCard extends HTMLElement {
     const accepted = groups.accepted.map((p) =>
       this._item(p, btn("Undo", "pending") + btn("Mark done", "done"))).join("");
     const decided = groups.decided.map((p) => this._item(p, btn("Reopen", "pending"))).join("");
+    const busy = this._note === RUNNING || this._note === CHECKING;
     const lastRun = attrs.last_run ? new Date(attrs.last_run).toLocaleString() : "never";
 
     this.innerHTML = `
@@ -128,7 +138,8 @@ class HubbubbReviewCard extends HTMLElement {
         <div class="jr-top">
           <span class="jr-h">Nightly review</span>
           <span class="jr-sub">last run ${this._esc(lastRun)}${attrs.detail ? " — " + this._esc(attrs.detail) : ""}${this._note ? " · " + this._esc(this._note) : ""}</span>
-          <button class="jr-btn" data-run ${this._note === RUNNING ? "disabled" : ""}>${this._note === RUNNING ? "Running…" : "Run now"}</button>
+          <button class="jr-btn" data-recheck ${busy ? "disabled" : ""}>${this._note === CHECKING ? "Checking…" : "Re-check open"}</button>
+          <button class="jr-btn" data-run ${busy ? "disabled" : ""}>${this._note === RUNNING ? "Running…" : "Run now"}</button>
         </div>
         <div class="jr-section">Waiting for you (${groups.pending.length})
           ${groups.pending.length > 1 ? `<button class="jr-btn jr-yes" data-accept-all>Accept all</button>` : ""}
@@ -154,6 +165,7 @@ class HubbubbReviewCard extends HTMLElement {
       this._showDecided = !this._showDecided;
       this._render();
     });
+    this.querySelector("[data-recheck]").addEventListener("click", () => this._recheck());
     this.querySelector("[data-run]").addEventListener("click", () =>
       this._call("run_review", {}, RUNNING, "review finished")
     );

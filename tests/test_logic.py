@@ -2085,6 +2085,45 @@ def test_calculate_and_dates():
     assert date_facts("2026-10-11", 0, 0, now)["spoken"].endswith("11th")
 
 
+
+def test_recheck_closes_only_what_the_agent_calls_fixed():
+    """The defect this guards: findings the user had already fixed piling up
+    as pending every night, because the digest holds complaints, not fixes."""
+    import asyncio
+    from hubbubb_home.review import async_recheck, build_brief
+
+    report = ReviewReport(None)
+    asyncio.run(report.async_update(report=_REPORT, findings=2, drafts=[], detail=""))
+    asyncio.run(report.async_decide("suggestion_named_timers_by_voice", "rejected"))
+
+    class _Companion:
+        async def async_call(self, endpoint, payload, method, timeout):
+            assert "defect_whisper_hears_lights_as_weights" in payload["brief"]
+            assert "suggestion_named_timers_by_voice" not in payload["brief"]
+            return {"ok": True, "report": (
+                "FIXED defect_the_digest_re_ingests_its_own_brief\n"
+                "- OPEN defect_whisper_hears_lights_as_weights\n"
+                "FIXED suggestion_named_timers_by_voice\n"  # not open: ignored
+                "FIXED defect_made_up\n")}
+
+    fixed = asyncio.run(async_recheck(None, _Companion(), report))
+    assert fixed == ["defect_the_digest_re_ingests_its_own_brief"], fixed
+    assert report.get(fixed[0])["status"] == "done"
+    assert report.get("defect_whisper_hears_lights_as_weights")["status"] == "pending"
+    assert report.get("suggestion_named_timers_by_voice")["status"] == "rejected"
+
+    class _Hass:
+        class states:
+            @staticmethod
+            def async_all():
+                return []
+
+    brief = build_brief(_Hass(), "", report.proposals)
+    assert "done: The digest re-ingests its own brief" in brief, brief
+    assert "confirm it is" in brief
+
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

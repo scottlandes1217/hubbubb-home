@@ -145,6 +145,11 @@ run_review:
   description: >-
     Review yesterday's coding sessions now instead of waiting for tonight.
     Needs a companion; it runs the agent there and can take several minutes.
+review_recheck:
+  name: Re-check open review findings
+  description: >-
+    Ask the companion's agent to read the current code for every pending and
+    accepted proposal, and mark the ones already fixed as done.
 agent_fleet:
   fields:
     project: { selector: { text: } }

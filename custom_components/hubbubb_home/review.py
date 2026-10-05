@@ -103,6 +103,35 @@ thing.
 End your reply with a single line: FINDINGS: <number of defects>.
 """
 
+# The digest is the day's complaints, not the fixes that followed them - the
+# user usually fixes a thing in the same session that exposed it. Without this
+# the review filed already-fixed defects every night, under fresh titles.
+VERIFY = """
+Before you report any defect, open the code it concerns and confirm it is
+still broken TODAY. The digest records complaints, not the fixes that usually
+followed in the same session - a defect the code no longer has is not one.
+The code lives in ~/.claude/hooks, ~/Projects/hubbubb-home and
+~/.hamounts/config. Never re-raise anything in the list of earlier proposals
+below unless today's digest shows it broken again; reuse its exact title when
+it is the same thing.
+"""
+
+RECHECK = """You are re-checking open findings from a nightly code review of the
+code that runs this house. Each was raised from the user's complaints, and
+many have since been fixed. For each finding below, read the code it concerns
+NOW - ~/.claude/hooks, ~/Projects/hubbubb-home, ~/.hamounts/config - and
+decide whether the defect is still there. The digest after the findings is
+the most recent session history: the user saying it works now is evidence too.
+
+Say FIXED only when the code or the digest shows the fix; anything you cannot
+confirm either way stays OPEN. Change nothing.
+
+Answer with exactly one line per finding and nothing else:
+FIXED <id>
+OPEN <id>
+"""
+RECHECK_LINE = re.compile(r"^\W*(FIXED|OPEN)\W+([a-z0-9_]+)", re.M)
+
 
 class ReviewReport:
     """The last review, kept across restarts.
@@ -337,9 +366,15 @@ def parse_proposals(report: str) -> list[dict]:
     return out
 
 
-def build_brief(hass: HomeAssistant, previous: str = "") -> str:
+def build_brief(
+    hass: HomeAssistant, previous: str = "", proposals: list[dict] | None = None
+) -> str:
     """Everything except the digest, which only the companion can supply."""
-    brief = PREAMBLE + TASK + inventory(hass)
+    brief = PREAMBLE + TASK + VERIFY + inventory(hass)
+    if proposals:
+        brief += "\n--- earlier proposals (status: title) ---\n" + "\n".join(
+            f"  {p.get('status')}: {p['title']}" for p in proposals
+        ) + "\n"
     if previous:
         # Without this the review forgets: a defect raised yesterday and not
         # mentioned again simply vanishes from today's input.
@@ -359,7 +394,7 @@ async def async_review(
     projects: list[str] | None = None,
 ) -> None:
     """Ask the companion for a review, keep what comes back."""
-    brief = build_brief(hass, report.report)
+    brief = build_brief(hass, report.report, report.proposals)
     try:
         answer = await companion.async_call(
             "review",
@@ -402,3 +437,42 @@ async def async_review(
         tail.group(1) if tail else "?",
         len(drafts),
     )
+
+
+def recheck_brief(open_items: list[dict]) -> str:
+    return RECHECK + "\n--- findings ---\n" + "\n\n".join(
+        f"id: {p['id']}\nfirst seen: {p.get('first_seen', '')}\n"
+        f"{p['title']}\n{p.get('body', '')}"
+        for p in open_items
+    ) + "\n"
+
+
+def parse_recheck(text: str, ids: set[str]) -> set[str]:
+    """The ids the agent says are fixed; anything it did not name stays open."""
+    return {i for verdict, i in RECHECK_LINE.findall(text) if verdict == "FIXED" and i in ids}
+
+
+async def async_recheck(
+    hass: HomeAssistant, companion, report: ReviewReport, hours: int = 24
+) -> list[str]:
+    """Ask the agent which open proposals the code no longer has; close those."""
+    open_items = report.by_status("pending") + report.by_status("accepted")
+    if not open_items:
+        return []
+    answer = await companion.async_call(
+        "review",
+        {"brief": recheck_brief(open_items), "hours": hours, "projects": []},
+        "POST",
+        timeout=REVIEW_TIMEOUT,
+    )
+    if isinstance(answer, dict) and answer.get("ok") is False:
+        raise ValueError(answer.get("detail") or "the companion refused")
+    text = answer.get("report", "") if isinstance(answer, dict) else str(answer or "")
+    fixed = parse_recheck(text, {p["id"] for p in open_items})
+    today = dt_util.now().date().isoformat()
+    for proposal_id in fixed:
+        proposal = report.get(proposal_id)
+        proposal.update(status="done", resolved=f"already fixed, re-checked {today}")
+    await report.async_sync_issues()
+    await report._save()
+    return sorted(fixed)

@@ -121,7 +121,7 @@ from .speakers import (
     async_register_webhook as _speaker_webhook,
 )
 from .nightly import FindingsReport, async_sweep
-from .review import PROPOSAL_STATES, ReviewReport, async_review
+from .review import PROPOSAL_STATES, ReviewReport, async_recheck, async_review
 from .timers import TimerPool
 
 _LOGGER = logging.getLogger(__name__)
@@ -580,6 +580,7 @@ SERVICE_SCHEMAS: dict[str, vol.Schema] = {
     "ask_hubbubb": vol.Schema({vol.Required("request"): str}),
     "run_sweep": vol.Schema({}),
     "run_review": vol.Schema({}),
+    "review_recheck": vol.Schema({}),
     "review_decide": vol.Schema(
         {
             vol.Required("id"): str,
@@ -690,6 +691,21 @@ def _async_register_services(hass: HomeAssistant, runtime: Runtime) -> None:
             "detail": runtime.review.detail,
         }
 
+    async def review_recheck(call: ServiceCall) -> ServiceResponse:
+        """Close the open proposals the code no longer has."""
+        try:
+            fixed = await async_recheck(
+                runtime.hass,
+                runtime.companion,
+                runtime.review,
+                hours=int(
+                    runtime.option("overnight", CONF_REVIEW_HOURS, DEFAULT_REVIEW_HOURS)
+                ),
+            )
+        except Exception as err:  # noqa: BLE001 - the card shows the reason
+            raise HomeAssistantError(f"re-check failed: {err}") from err
+        return {"fixed": fixed}
+
     async def review_decide(call: ServiceCall) -> ServiceResponse:
         """What the Repairs panel does on submit, for sessions and scripts."""
         try:
@@ -719,6 +735,7 @@ def _async_register_services(hass: HomeAssistant, runtime: Runtime) -> None:
         "ask_hubbubb": ask_hubbubb,
         "run_sweep": run_sweep,
         "run_review": run_review,
+        "review_recheck": review_recheck,
         "review_decide": review_decide,
         "speak_briefing": speak_briefing,
     }
