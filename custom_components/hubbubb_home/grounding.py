@@ -20,6 +20,7 @@ of a two-turn window entirely.
 
 from __future__ import annotations
 
+import importlib
 import logging
 import re
 
@@ -101,17 +102,20 @@ def trim_by_turns(messages: list, turns: int) -> list:
 _original: dict = {}
 
 
-def async_install() -> None:
+async def async_install(hass) -> None:
     """Wrap the Ollama agent class once; a no-op if Ollama isn't loadable."""
     if _original:
         return
+    from homeassistant.components import conversation
+
     try:
-        from homeassistant.components import conversation
-        from homeassistant.components.ollama.conversation import (
-            OllamaConversationEntity as Entity,
+        # Importing ollama reads package metadata from disk - not on the loop.
+        module = await hass.async_add_import_executor_job(
+            importlib.import_module, "homeassistant.components.ollama.conversation"
         )
     except ImportError:
         return
+    Entity = module.OllamaConversationEntity
     if not all(hasattr(Entity, a) for a in ("_async_handle_chat_log", "_trim_history")):
         _LOGGER.warning("Ollama agent changed shape; Jarvis grounding is off")
         return

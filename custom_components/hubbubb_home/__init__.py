@@ -310,7 +310,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async_register_all(hass, runtime)
     appletv.async_register_all(hass, runtime)
     runtime.unsubscribe.append(llm.async_register_api(hass, HubbubbAPI(hass, runtime)))
-    grounding.async_install()
+    await grounding.async_install(hass)
     runtime.unsubscribe.append(grounding.async_uninstall)
 
     _async_register_services(hass, runtime)
