@@ -113,6 +113,7 @@ from .oauth import (
     tokens_only_change,
 )
 from .llm_api import HubbubbAPI
+from . import grounding
 from .memory import Memory
 from .recipes import Recipes
 from .speakers import (
@@ -309,6 +310,8 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     async_register_all(hass, runtime)
     appletv.async_register_all(hass, runtime)
     runtime.unsubscribe.append(llm.async_register_api(hass, HubbubbAPI(hass, runtime)))
+    grounding.async_install()
+    runtime.unsubscribe.append(grounding.async_uninstall)
 
     _async_register_services(hass, runtime)
     _async_register_webhook(hass, runtime)

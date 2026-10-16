@@ -168,6 +168,7 @@ from hubbubb_home.nightly import FindingsReport, _days  # noqa: E402
 from hubbubb_home.review import ReviewReport, parse_proposals  # noqa: E402
 from hubbubb_home.appletv import _TEMPLATE, _match_source, decide_plan  # noqa: E402
 from hubbubb_home.companion import relevant_text  # noqa: E402
+from hubbubb_home.grounding import trim_by_turns, ungrounded  # noqa: E402
 
 
 # --- memory: spoken question -> FTS5 query -----------------------------------
@@ -2122,6 +2123,68 @@ def test_recheck_closes_only_what_the_agent_calls_fixed():
     assert "done: The digest re-ingests its own brief" in brief, brief
     assert "confirm it is" in brief
 
+
+
+# --- grounding: the local model may not claim what no tool did ---------------
+
+class UserContent:
+    def __init__(self, content):
+        self.content = content
+
+
+class AssistantContent:
+    def __init__(self, content="", tools=()):
+        self.content = content
+        self.tool_calls = [types.SimpleNamespace(tool_name=n) for n in tools]
+
+
+def _turn(reply, *tools):
+    calls = [AssistantContent(tools=tools)] if tools else []
+    return [UserContent("x"), *calls, AssistantContent(reply)]
+
+
+def test_grounding_catches_tonights_claims_with_no_tool_behind_them():
+    # 15 October: each of these was spoken with no tool call at all.
+    for reply in (
+        "The Natural light scene is being applied to the house now sir. "
+        "I'll let you know once it's set.",
+        "I'll set them to natural scene now which will lower the brightness "
+        "for evening sir. Done.",
+        "You're right sir - I should have created a fresh session. I've now "
+        "sent the request to Claude Code in a new session.",
+    ):
+        assert ungrounded(_turn(reply)), reply
+    # A look is not a deed.
+    assert ungrounded(_turn("Done sir, the fan is on.", "assist__GetLiveContext"))
+
+
+def test_grounding_lets_real_actions_and_plain_answers_through():
+    assert not ungrounded(_turn(
+        "I've sent your concern to Claude Code sir.",
+        "hubbubb-home__hand_to_companion",
+    ))
+    assert not ungrounded(_turn("Natural scene on sir.", "assist__JarvisAllLightsScene"))
+    # Reading a state back from the house is how a state should be said.
+    assert not ungrounded(_turn(
+        "The fan has been running all evening sir.", "assist__GetLiveContext"
+    ))
+    assert not ungrounded(_turn("It's 75 degrees in the living room sir."))
+    assert not ungrounded(_turn("Would you like me to dim them?"))
+    # Only the turn since the speaker's last message counts.
+    old = _turn("Natural scene on sir.", "assist__JarvisAllLightsScene")
+    assert ungrounded(old + _turn("Done sir."))
+
+
+def test_history_trim_counts_turns_not_tool_messages():
+    m = lambda role: types.SimpleNamespace(role=role)
+    sys_ = m("system")
+    turn = lambda: [m("user"), m("assistant"), m("tool"), m("tool"), m("assistant")]
+    a, b, c, now = turn(), turn(), turn(), [m("user")]
+    kept = trim_by_turns([sys_, *a, *b, *c, *now], 2)
+    assert kept == [sys_, *b, *c, *now], len(kept)
+    short = [sys_, *c, *now]
+    assert trim_by_turns(short, 2) == short
+    assert trim_by_turns([sys_, *a, *b, *c, *now], 0) == [sys_, *a, *b, *c, *now]
 
 
 if __name__ == "__main__":
