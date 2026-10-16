@@ -112,6 +112,15 @@ class HubbubbAPI(llm.API):
             "they show in the Recipes panel in the Home Assistant sidebar, "
             "so if asked where a saved recipe is, say that."
         )
+        # A scene or "natural" hands the lights to Hue or Adaptive Lighting;
+        # a brightness call after it counts as a manual override and pins
+        # them there. The local model liked to add one "to be sure".
+        prompt += (
+            "\n\nA lighting scene or tone (natural, warm, relax and so on) is "
+            "the whole request: call that one tool and stop. Never follow it "
+            "with a brightness or other light change unless the speaker asked "
+            "for one - natural follows the sun by itself."
+        )
         # The persona's "say you can't" reads, to a 3B model, as license to
         # improvise a sentence of filler. When the companion exists, the rule
         # is escalate - never guess.
@@ -510,6 +519,15 @@ class CameraActivityTool(_RuntimeTool):
         }
 
 
+def _outcome(reply, key: str) -> dict:
+    """The companion's own ok/detail, under the key the tool reports."""
+    reply = reply if isinstance(reply, dict) else {}
+    out = {key: reply.get("ok", True) is not False}
+    if reply.get("detail"):
+        out["detail"] = reply["detail"]
+    return out
+
+
 class EscalateTool(_RuntimeTool):
     name = "hand_to_companion"
     description = (
@@ -518,10 +536,15 @@ class EscalateTool(_RuntimeTool):
         "(\"ask Claude...\"), says you were wrong, or a tool failed or "
         "use_computer could not do it. Claude answers aloud later, so after "
         "calling this just "
-        "acknowledge that it's being worked on - never answer it yourself."
+        "acknowledge that it's being worked on - never answer it yourself. "
+        "Set new_session when the speaker asks for a new or fresh session; "
+        "the request goes into it."
     )
     parameters = vol.Schema(
-        {vol.Required("request"): vol.All(str, vol.Length(min=3, max=2000))}
+        {
+            vol.Required("request"): vol.All(str, vol.Length(min=3, max=2000)),
+            vol.Optional("new_session", default=False): bool,
+        }
     )
 
     async def async_call(
@@ -536,12 +559,19 @@ class EscalateTool(_RuntimeTool):
         if person := self._speaker(llm_context):
             text = f"[{person}] {text}"
         try:
-            await self._runtime.companion.async_call(
-                "prompt", {"text": text, "brain": "claude"}
+            reply = await self._runtime.companion.async_call(
+                "prompt",
+                {
+                    "text": text,
+                    "brain": "claude",
+                    "new_session": tool_input.tool_args.get("new_session", False),
+                },
             )
         except CompanionError as err:
             return {"error": str(err)}
-        return {"handed_off": True}
+        # The companion answers 200 even when it held the prompt (Claude busy,
+        # "say start a new one") - the model must hear that, not "sent".
+        return _outcome(reply, "handed_off")
 
 
 class UseComputerTool(_RuntimeTool):
@@ -564,12 +594,12 @@ class UseComputerTool(_RuntimeTool):
         if person := self._speaker(llm_context):
             text = f"[{person}] {text}"
         try:
-            await self._runtime.companion.async_call(
+            reply = await self._runtime.companion.async_call(
                 "prompt", {"text": text, "brain": "local"}
             )
         except CompanionError as err:
             return {"error": str(err)}
-        return {"started": True}
+        return _outcome(reply, "started")
 
 
 class WebSearchTool(_RuntimeTool):
