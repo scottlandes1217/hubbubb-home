@@ -537,8 +537,9 @@ class EscalateTool(_RuntimeTool):
         "use_computer could not do it. Claude answers aloud later, so after "
         "calling this just "
         "acknowledge that it's being worked on - never answer it yourself. "
-        "Set new_session when the speaker asks for a new or fresh session; "
-        "the request goes into it."
+        "Set new_session only when the speaker's own words ask for a new or "
+        "fresh session - never because a tool failed; it opens another "
+        "Claude window on the computer."
     )
     parameters = vol.Schema(
         {
