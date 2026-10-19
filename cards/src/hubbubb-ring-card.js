@@ -303,17 +303,6 @@ const SHEETS = [
   { r: 0.795, w: 0.004, share: 0.15, dir: 1, rows: 2 },
 ];
 const SHEET_BINS = 360;
-/* jarvis-im3's core: the film's globe is a disc of round dots packed like a
-   honeycomb, not a wireframe. A Fibonacci sphere projects to that lattice,
-   and turning it keeps the dots drifting the way the film's do. */
-const HONEY = (() => {
-  const n = 280, out = [];
-  for (let i = 0; i < n; i++) {
-    const y = 1 - (2 * (i + 0.5)) / n, r = Math.sqrt(1 - y * y), a = i * 2.39996323;
-    out.push([r * Math.cos(a), y, r * Math.sin(a)]);
-  }
-  return out;
-})();
 /* The film talks syllable by syllable: each one snaps the ring into a fresh
    crumple - a new random set of lobes and twists - and it relaxes back to a
    clean circle in the gaps between words. Frame by frame at 24fps the film
@@ -4556,57 +4545,18 @@ class HubbubbRingCard extends LitElement {
       this._drawIm3Rings(ctx, cx, cy, half, R, G, B, dt);
       const SR = half * 0.29 * (1 + env * 0.04);
       const glow = clamp(cur.bright * (1 + env * 0.35), 0.3, 1.9) * boot.globe;
-      this._drawHoneyGlobe(ctx, cx, cy, SR, half, glow, R, G, B);
+      const lt = (c) => Math.round(c + (255 - c) * 0.35);
+      this._drawGlobe(ctx, cx, cy, SR, half, glow * 0.5,
+        `rgba(${lt(R)},${lt(G)},${lt(B)},${0.15 * glow})`, `rgba(${R},${G},${B},${0.045 * glow})`);
       ctx.globalAlpha = boot.ring * boot.globe;
-      // the rim: a soft halo under a crisp line
-      ctx.strokeStyle = `rgb(${R},${G},${B})`;
-      ctx.globalAlpha = boot.ring * boot.globe * 0.12;
-      ctx.lineWidth = Math.max(2, half * 0.02);
+      ctx.strokeStyle = `rgba(${R},${G},${B},0.55)`;
+      ctx.lineWidth = Math.max(0.8, half * 0.006);
       ctx.beginPath();
       ctx.arc(cx, cy, SR * 1.03, 0, 6.283185);
-      ctx.stroke();
-      ctx.globalAlpha = boot.ring * boot.globe * 0.7;
-      ctx.lineWidth = Math.max(0.8, half * 0.006);
       ctx.stroke();
       ctx.restore();
     }
     if (boot.phase) this._drawIm3Boot(ctx, cx, cy, half, boot, R, G, B, t);
-  }
-
-  /* The film's core: a faint blue glow filled with honeycomb dots, brightest
-     face-on and fading to nothing at the limb, turning slowly. */
-  _drawHoneyGlobe(ctx, cx, cy, SR, half, glow, R, G, B) {
-    const base = ctx.globalAlpha;
-    // a touch bluer and lighter than the rings, as in the film
-    const r = Math.round(R * 0.55 + 40), g = Math.round(G * 0.9 + 20), b = Math.min(255, Math.round(B * 1.1 + 40));
-    const fill = ctx.createRadialGradient(cx, cy, 0, cx, cy, SR);
-    fill.addColorStop(0, `rgba(${r},${g},${b},${0.13 * glow})`);
-    fill.addColorStop(1, `rgba(${r},${g},${b},${0.03 * glow})`);
-    ctx.fillStyle = fill;
-    ctx.beginPath();
-    ctx.arc(cx, cy, SR, 0, 6.283185);
-    ctx.fill();
-    const cs = Math.cos(this._spin * 0.6), sn = Math.sin(this._spin * 0.6);
-    const ct = Math.cos(0.35), st = Math.sin(0.35);
-    const dot = SR * 0.034;
-    ctx.fillStyle = `rgb(${r},${g},${b})`;
-    ctx.globalCompositeOperation = "lighter";
-    for (let bk = 1; bk <= 4; bk++) {
-      ctx.beginPath();
-      for (const [x, y, z] of HONEY) {
-        const x1 = x * cs + z * sn, z1 = -x * sn + z * cs;
-        const y2 = y * ct - z1 * st, z2 = y * st + z1 * ct;
-        if (z2 <= 0.12) continue;
-        if (Math.min(4, 1 + ((z2 * 4) | 0)) !== bk) continue;
-        const px = cx + x1 * SR * 0.97, py = cy - y2 * SR * 0.97, pr = dot * (0.55 + 0.45 * z2);
-        ctx.moveTo(px + pr, py);
-        ctx.arc(px, py, pr, 0, 6.283185);
-      }
-      ctx.globalAlpha = base * clamp(glow * 0.085 * bk, 0, 1);
-      ctx.fill();
-    }
-    ctx.globalCompositeOperation = "source-over";
-    ctx.globalAlpha = base;
   }
 
   /* The dots, additive: where a sheet turns edge-on they pile into a crease
