@@ -28,7 +28,7 @@ import {
   widestGap,
 } from "./pack.js";
 
-const CARD_VERSION = "4.13.1";
+const CARD_VERSION = "4.13.2";
 
 const SATELLITE_DOMAIN = "assist_satellite";
 
@@ -5186,7 +5186,8 @@ class HubbubbRingCard extends LitElement {
       </button>
       <button class=${pend(1)} title="To-do lists" @click=${() => this._openTodos()}>
         ${ico(svg`<path d="M10 6.5h10.5M10 12h10.5M10 17.5h10.5"/><path d="M3.5 6.5l1.6 1.6 2.9-3.2M3.5 12l1.6 1.6 2.9-3.2"/><rect x="3.8" y="16" width="3.2" height="3.2" rx="0.6"/>`)}
-        <span>To-do${open ? html`<b class="badge">${open}</b>` : nothing}</span>
+        ${open ? html`<b class="badge">${open}</b>` : nothing}
+        <span>To-do</span>
       </button>
       <button class="power ${this._booting ? "on" : ""} ${pend(2)}" title="Start-up and introduction" @click=${this._intro}>
         ${ico(svg`<path d="M12 3.5v7"/><path d="M7.2 6.6a7 7 0 1 0 9.6 0"/>`)}
@@ -5900,6 +5901,7 @@ class HubbubbRingCard extends LitElement {
       line-height: 1;
     }
     .dock button {
+      position: relative;
       display: flex;
       flex-direction: column;
       align-items: center;
@@ -5921,6 +5923,17 @@ class HubbubbRingCard extends LitElement {
       font-weight: 600;
       letter-spacing: 0.16em;
       text-transform: uppercase;
+      white-space: nowrap;
+    }
+    @media (max-width: 420px) {
+      .dock {
+        grid-template-columns: repeat(2, 1fr) 68px repeat(2, 1fr);
+        padding: 6px 4px;
+      }
+      .dock button span {
+        font-size: 8.5px;
+        letter-spacing: 0.08em;
+      }
     }
     .dock button svg {
       position: static; /* the ring's svg rule pins svgs absolutely */
@@ -5972,14 +5985,23 @@ class HubbubbRingCard extends LitElement {
     .dock button.pending span {
       opacity: 0;
     }
+    /* the open-item count rides on the icon's corner, so it never widens
+       the label - the label is what has to fit on a phone */
     .badge {
-      margin-left: 5px;
-      padding: 0 5px;
+      position: absolute;
+      top: 3px;
+      left: calc(50% + 5px);
+      min-width: 14px;
+      height: 14px;
+      box-sizing: border-box;
+      padding: 0 4px;
       border-radius: 7px;
-      background: rgba(var(--jr-glow), 0.25);
-      color: var(--jr-color);
+      background: var(--jr-color);
+      color: #021010;
       font-size: 9px;
-      letter-spacing: 0.04em;
+      font-weight: 700;
+      line-height: 14px;
+      text-align: center;
     }
     .flyicon {
       position: absolute;
@@ -6079,6 +6101,7 @@ class HubbubbRingCard extends LitElement {
     .sheet-box {
       display: flex;
       flex-direction: column;
+      font-family: "Avenir Next", "Segoe UI", Roboto, sans-serif;
       width: min(440px, calc(100% - 32px));
       max-height: calc(100% - 32px);
       background: #061014;
