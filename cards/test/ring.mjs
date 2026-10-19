@@ -110,6 +110,14 @@ const audio = () => ({ currentTime: 0.2, paused: false, ended: false, readyState
     c._speech.env = Math.max(0, Math.sin(i * 0.19));
     c._speech.count = Math.floor(i/14);
     const sheets = c._sheetTables(1/60, {speech:1}, i < 20 ? 1.2 : 0);
+    assert.equal(sheets.length, 2, 'exactly two smoke shells');
+    for (let b = 0; b < 360; b++) {
+      const outer = sheets[0], inner = sheets[1];
+      const outerEdge = outer.rc[b] - Math.abs(outer.cw[b]) - Math.abs(outer.skew[b]);
+      const innerEdge = inner.rc[b] + Math.abs(inner.cw[b]) + Math.abs(inner.skew[b]);
+      assert.ok(outerEdge - innerEdge > 0.045, 'visible air gap survives every syllable and startup burst');
+      assert.ok(inner.rc[b] - Math.abs(inner.cw[b]) > 0.70, 'space from sphere and context display stays open');
+    }
     for (const st of sheets) {
       for (let b = 0; b < 360; b += 3) for (const v of [-1,0,1]) {
         const th = b/360 * 2*Math.PI;
@@ -128,3 +136,25 @@ const audio = () => ({ currentTime: 0.2, paused: false, ended: false, readyState
   assert.ok(maxRadius < 0.99, `speech and burst stay inside canvas: ${maxRadius}`);
 }
 console.log('ring audio ownership, silence, onset timing, and mesh geometry ok');
+
+{
+  const c = make();
+  c._sessions = [
+    {id:'active', context:64000, context_max:200000, busy:true},
+    {id:'empty', context:0, context_max:200000},
+    {id:'done', context:158000, context_max:200000, done:true},
+  ];
+  for(let i=0;i<180;i++) c._segTick(1/60);
+  assert.equal(c._segMap.size,3, 'every open session retains a segment');
+  assert.ok(Math.abs(c._segMap.get('active').frac - 0.32) < 0.01);
+  assert.equal(c._segMap.get('empty').frac,0);
+  assert.ok(Math.abs(c._segMap.get('done').frac - 0.79) < 0.02);
+  const arcs=[];
+  const ctx={globalAlpha:1,beginPath(){},stroke(){},arc(x,y,r,a,z){arcs.push([r,a,z]);}};
+  c._drawIm3Rings(ctx,0,0,200,95,232,220,1/60);
+  assert.equal(arcs.filter(a=>a[0]===200*0.465).length,5,'three capacity arcs and two nonempty context fills');
+  c._sessions=[];
+  for(let i=0;i<240;i++) c._segTick(1/60);
+  assert.equal(c._segMap.size,0,'closed sessions disappear');
+}
+console.log('two-shell spacing and session context display ok');
