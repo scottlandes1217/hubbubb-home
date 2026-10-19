@@ -82,6 +82,7 @@ from .const import (
     DEFAULT_QUIET_START,
     in_quiet_window,
     CONF_APPROVERS,
+    CONF_HONORIFICS,
     CONF_SPEAKER_MAP,
     CONF_VOICE,
     CONF_VOICE_TOKEN,
@@ -118,6 +119,7 @@ from .memory import Memory
 from .recipes import Recipes
 from .speakers import (
     SpeakerBook,
+    address,
     VoiceProxyView,
     async_register_webhook as _speaker_webhook,
 )
@@ -265,6 +267,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         voice_conf.get(CONF_VOICE_URL),
         voice_conf.get(CONF_SPEAKER_MAP),
         voice_conf.get(CONF_VOICE_TOKEN),
+        voice_conf.get(CONF_HONORIFICS),
     )
     approvals = Approvals(hass, name, voice_conf.get(CONF_APPROVERS))
 
@@ -866,6 +869,12 @@ async def _route_message(runtime: Runtime, data: dict) -> None:
     """
     hass = runtime.hass
     message = data.get("message")
+    if message:
+        # Said after the fact, so whoever spoke to the house last is the
+        # likeliest listener.
+        speakers = runtime.speakers
+        message = address(message, speakers.title_for(speakers.last_known))
+        data = {**data, "message": message}
     if not message:
         return
 

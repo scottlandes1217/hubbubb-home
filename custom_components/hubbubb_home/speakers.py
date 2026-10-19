@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import secrets
 import time
 from collections import deque
@@ -59,6 +60,7 @@ class SpeakerBook:
         url: str | None,
         device_map: str | None,
         token: str | None = None,
+        titles: str | None = None,
     ) -> None:
         self._session = session
         self._url = (url or "").rstrip("/")
@@ -66,6 +68,10 @@ class SpeakerBook:
         self._token = token or ""
         self.events: deque[dict] = deque(maxlen=10)
         self._override: tuple[str, float] | None = None
+        self._titles = {k.lower(): v for k, v in parse_map(titles or "").items()}
+        # Whoever the house last recognized, however long ago - who an
+        # after-the-fact announcement is most likely for.
+        self.last_known: str | None = None
 
     @property
     def configured(self) -> bool:
@@ -83,10 +89,50 @@ class SpeakerBook:
             _LOGGER.debug("dropped speaker event with a missing or bad token")
             return
         self.events.append(event)
+        if event.get("person"):
+            self.last_known = str(event["person"])
 
     def set_override(self, person: str) -> None:
         """Someone said who they are; believe them for a while."""
         self._override = (person, time.time())
+        self.last_known = person
+
+    def title_for(self, person: str | None) -> str:
+        """What to call this person in place of "sir"."""
+        if not self._titles:
+            return "sir"  # nothing configured: the house-wide old behaviour
+        if not person:
+            return ""
+        return self._titles.get(person.lower(), person)
+
+    async def async_event_for(self, text: str, wait: float = 1.5) -> dict | None:
+        """The voice event for this transcript, if it arrives in time.
+
+        The voice service answers the pipeline and POSTs its event to the
+        webhook at the same moment, so the event can trail the transcript by
+        a few milliseconds. Matched on text, not just recency: an older
+        event is somebody's previous sentence.
+        """
+        want = text.strip().lower()
+        deadline = time.monotonic() + wait
+        while True:
+            if self.events:
+                event = self.events[-1]
+                if (str(event.get("text") or "").strip().lower() == want
+                        and time.time() - float(event.get("ts") or 0)
+                        <= EVENT_WINDOW):
+                    return event
+            if time.monotonic() >= deadline:
+                return None
+            await asyncio.sleep(0.05)
+
+    async def async_claim(self, person: str) -> dict:
+        """File the stranger the house just asked about under this name."""
+        return await self._post("/claim", {"person": person}) or {}
+
+    async def async_unlearn(self) -> dict:
+        """Forget the clip most recently learned before this utterance."""
+        return await self._post("/unlearn", {}) or {}
 
     def resolve(
         self, device_id: str | None = None
@@ -201,7 +247,7 @@ class SpeakerBook:
         except (aiohttp.ClientError, asyncio.TimeoutError) as err:
             return refusal(503, f"voice service unreachable: {err}")
 
-    async def _post(self, route: str, body: dict) -> None:
+    async def _post(self, route: str, body: dict) -> dict | None:
         if not self._url:
             raise SpeakerServiceError("no voice service is configured")
         headers = (
@@ -219,6 +265,10 @@ class SpeakerBook:
                         (await resp.text())[:200]
                         or f"voice service returned {resp.status}"
                     )
+                try:
+                    return await resp.json()
+                except (aiohttp.ContentTypeError, ValueError):
+                    return None
         except aiohttp.ClientError as err:
             raise SpeakerServiceError(
                 f"voice service unreachable: {err}"
@@ -286,6 +336,56 @@ class VoiceProxyView(HomeAssistantView):
         )
 
     post = delete = get
+
+
+_SIR = re.compile(r"\bsir\b", re.IGNORECASE)
+_LEADING_SIR = re.compile(r"^\s*sir\b[\s,]*", re.IGNORECASE)
+_TRAILING_SIR = re.compile(r"[\s,]*\bsir\b", re.IGNORECASE)
+
+
+def address(text: str, title: str) -> str:
+    """Swap the "sir" every reply is written with for this listener's title.
+
+    One pass where speech leaves the house, instead of a title threaded
+    through every hard-coded reply and prompt. No title drops the word and
+    the comma or space in front of it.
+    """
+    if not text or title.lower() == "sir":
+        return text
+    if title:
+        return _SIR.sub(
+            lambda m: title[:1].upper() + title[1:]
+            if m.group()[0].isupper() else title,
+            text,
+        )
+    text = _LEADING_SIR.sub("", text)
+    text = text[:1].upper() + text[1:]
+    return _TRAILING_SIR.sub("", text)
+
+
+# A reply to "who am I speaking with?" that is not a name.
+_NOT_NAMES = {
+    "i", "me", "you", "it", "we", "us", "he", "she", "they", "who", "someone",
+    "somebody", "nobody", "no", "nope", "yes", "yeah", "okay", "ok", "never",
+    "none", "not", "nothing", "a", "the", "just", "why", "guest", "um", "uh",
+}
+_NAME_PREFIX = re.compile(
+    r"^\s*(?:(?:hi|hello|hey)[\s,]+)?(?:it'?s|it is|this is|i'?m|i am|"
+    r"my name is|me,?|call me|the name'?s)\s+",
+    re.IGNORECASE,
+)
+
+
+def spoken_name(text: str, assistant: str = "") -> str | None:
+    """"It's Anna." -> "Anna"; anything that is not plausibly a name -> None."""
+    text = _NAME_PREFIX.sub("", text.strip())
+    words = re.split(r"[.,!?;]", text)[0].split()
+    if not words or len(words) > 3 or words[0].lower() in _NOT_NAMES:
+        return None
+    name = " ".join(w.strip("'\"") for w in words).title()
+    if assistant and name.lower() == assistant.lower():
+        return None
+    return name or None
 
 
 def parse_map(text: str) -> dict[str, str]:

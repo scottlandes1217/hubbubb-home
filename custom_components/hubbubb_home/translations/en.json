@@ -128,6 +128,8 @@
               "speaker_map": "Device owners (one \"device_id: Name\" per line)",
               "approvers": "Verified people (one \"Name: notify.mobile_app_x\" per line)",
               "token": "Voice service shared token",
+              "honorifics": "How to address people (one \"Name: sir\" per line)",
+              "front_door_agent": "Front door: the agent behind it",
               "person_lists": "Personal lists (one \"Name: todo.entity\" per line)",
               "household_list": "Household list"
             },
@@ -136,6 +138,8 @@
               "speaker_map": "A fallback when the voice is not recognised: the assist device in someone's own room probably hears them. Device IDs are on each device's page.",
               "approvers": "Each person's own device, for tap-to-approve. With any line here, Hubbubb requests by voice need the speaker recognized (90% or a spoken \"this is...\") and then approved on their device. Blank turns the gate off.",
               "token": "A shared secret between this integration and the voice service. Speaker events without it are dropped, so nothing else on the network can claim to be a voice. Blank skips the check.",
+              "honorifics": "Replaces the \"sir\" in every reply with the speaker's own title. A recognized person without a line is called by name; an unrecognized voice gets no title. Blank keeps \"sir\" for everyone.",
+              "front_door_agent": "Adds a \"front door\" conversation agent that asks a returning unrecognized voice who it is, learns the voice, then answers through this agent. Point the pipeline at the front door and turn its \"prefer handling commands locally\" off - the front door does that step itself.",
               "person_lists": "\"Add milk to my list\" lands on the speaker's own to-do list. Create lists under Settings → Devices & Services → Local To-do, then map them here.",
               "household_list": "The shared list — \"the shopping list\", and the fallback when the speaker has no list of their own."
             }

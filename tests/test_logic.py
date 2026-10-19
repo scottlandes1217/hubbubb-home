@@ -410,6 +410,47 @@ def test_speaker_prompt_line_three_cases():
     assert book.prompt_line() == "The person speaking is Scott."
 
 
+def test_titles_replace_sir():
+    from hubbubb_home.speakers import address, spoken_name
+
+    book = SpeakerBook(None, "", "", titles="scott: sir\nAnna: ma'am")
+    assert book.title_for("Scott") == "sir"
+    assert book.title_for("anna") == "ma'am"
+    assert book.title_for("Vega") == "Vega"  # known, no line: by name
+    assert book.title_for(None) == ""
+    assert SpeakerBook(None, "", "").title_for(None) == "sir"  # unconfigured
+
+    assert address("On it sir.", "sir") == "On it sir."
+    assert address("On it sir.", "Vega") == "On it Vega."
+    assert address("Sir, the door is open.", "ma'am") == "Ma'am, the door is open."
+    assert address("On it sir.", "") == "On it."
+    assert address("Yes, sir. Done.", "") == "Yes. Done."
+    assert address("Sir, the door is open.", "") == "The door is open."
+    assert address("I desire coffee sir", "") == "I desire coffee"
+
+    assert spoken_name("It's Anna.") == "Anna"
+    assert spoken_name("this is vega") == "Vega"
+    assert spoken_name("Hi, I'm Mary Jane") == "Mary Jane"
+    assert spoken_name("scott") == "Scott"
+    assert spoken_name("no") is None
+    assert spoken_name("I'd rather not say who I am today") is None
+    assert spoken_name("Jarvis", "Jarvis") is None
+
+
+def test_voice_event_for_matches_text_not_recency():
+    import asyncio
+    import time as _t
+
+    book = SpeakerBook(None, "", "")
+    book.record({"text": "turn on the lights", "ts": _t.time(), "ask": True,
+                 "person": None})
+    run = asyncio.run
+    assert run(book.async_event_for("Turn on the lights "))["ask"]
+    assert run(book.async_event_for("something else", wait=0.1)) is None
+    book.record({"text": "hello", "ts": _t.time(), "person": "Vega"})
+    assert book.last_known == "Vega"
+
+
 def test_speaker_map_parses_forgivingly():
     book = SpeakerBook(
         None, "", "a1: Scott\n\nnot a mapping line\n b2 :  Vega  \n: nobody\n"

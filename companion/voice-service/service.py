@@ -105,6 +105,8 @@ class Service:
         self.lock = asyncio.Lock()
         self.last: dict | None = None
         self.last_embedding: np.ndarray | None = None
+        self.ask_anchor: np.ndarray | None = None
+        self.utterance_started = time.time()
         self.http: ClientSession | None = None
         self._vocab: tuple[float, str] = (0.0, "")
         # Warm the GPU last: transcribe() reads self._vocab, so this has to
@@ -150,6 +152,10 @@ class Service:
     async def process(self, pcm: bytes, language: str | None,
                       house: bool = True) -> dict:
         audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
+        if house:
+            # Anything learned after this moment belongs to this utterance -
+            # what /unlearn must spare when this one says "that wasn't me".
+            self.utterance_started = time.time()
         loop = asyncio.get_running_loop()
         async with self.lock:
             started = time.monotonic()
@@ -182,12 +188,21 @@ class Service:
             return {"person": None, "confidence": 0.0, "ts": time.time(),
                     "text": "", "candidates": [], "token": self.args.token}
         person, confidence, candidates = self.profiles.match(embedding)
+        learned = self.profiles.learn(person, confidence, candidates,
+                                      embedding, len(audio) / RATE)
+        # A voice nobody matches, heard before: the house asks who it is and
+        # /claim files the clips under the answer.
+        ask = person is None and self.profiles.stranger(
+            embedding, len(audio) / RATE)
+        if ask:
+            self.ask_anchor = embedding
         event = {
             "person": person,
             "confidence": confidence,
             "ts": time.time(),
             "text": text,
             "candidates": candidates,
+            "ask": ask,
             # Lets the integration reject speaker events forged by something
             # else on the LAN; stripped before the event is stored there.
             "token": self.args.token,
@@ -195,8 +210,9 @@ class Service:
         self.last = event
         self.last_embedding = embedding
         _LOGGER.info(
-            "%.1fs audio -> %r in %.2fs, speaker=%s (%.2f)",
+            "%.1fs audio -> %r in %.2fs, speaker=%s (%.2f)%s",
             len(audio) / RATE, text, elapsed, person, confidence,
+            " learned" if learned else "",
         )
         self._write_last(event)
         if self.args.webhook:
@@ -530,6 +546,28 @@ def admin_app(service: Service) -> web.Application:
         except ValueError as err:
             raise web.HTTPBadRequest(text=str(err))
 
+    async def claim(req):
+        """The stranger the house just asked about told it their name."""
+        authorize(req)
+        person = person_name(await req.json())
+        if service.ask_anchor is None:
+            raise web.HTTPConflict(text="nobody unrecognized is waiting")
+        added, new = service.profiles.claim(person, service.ask_anchor)
+        service.ask_anchor = None
+        return web.json_response({
+            "person": person, "added": added, "new": new,
+            "samples": service.profiles.counts().get(person, 0)})
+
+    async def unlearn(req):
+        authorize(req)
+        before = service.utterance_started
+        person = service.profiles.unlearn(before)
+        if person is None:
+            raise web.HTTPNotFound(text="nothing learned recently")
+        return web.json_response({
+            "person": person,
+            "samples": service.profiles.counts().get(person, 0)})
+
     async def people(_req):
         return web.json_response(service.profiles.counts())
 
@@ -692,6 +730,8 @@ def admin_app(service: Service) -> web.Application:
             web.post("/label", label),
             web.get("/people", people),
             web.post("/people/delete", people_delete),
+            web.post("/claim", claim),
+            web.post("/unlearn", unlearn),
             web.post("/train", train),
             web.get("/train/status", train_status),
             web.get("/record/status", record_status),

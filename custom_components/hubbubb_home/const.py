@@ -84,6 +84,14 @@ CONF_APPROVERS = "approvers"
 # Shared secret with the voice service: speaker events must carry it, and
 # calls to the service send it back. Blank = no verification.
 CONF_VOICE_TOKEN = "token"
+# "Name: sir" lines - how each recognized person is addressed. A recognized
+# person without a line is called by name, an unrecognized one by nothing.
+# Blank keeps the old house-wide "sir".
+CONF_HONORIFICS = "honorifics"
+# The pipeline's real agent. Set, a "<name> front door" agent appears: point
+# the pipeline at it (with "prefer handling commands locally" off) and an
+# unrecognized voice is asked who it is before its request runs.
+CONF_FRONT_DOOR = "front_door_agent"
 # "Person Name: todo.their_list" lines - "my list" resolves to the speaker's
 # own to-do entity. Anything unresolved falls back to the household list.
 CONF_PERSON_LISTS = "person_lists"
