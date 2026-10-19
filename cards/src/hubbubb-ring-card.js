@@ -28,7 +28,7 @@ import {
   widestGap,
 } from "./pack.js";
 
-const CARD_VERSION = "4.12.0";
+const CARD_VERSION = "4.13.0";
 
 const SATELLITE_DOMAIN = "assist_satellite";
 
@@ -91,6 +91,7 @@ const DEFAULTS = {
      and build mode. `intro_message` empty = the built-in introduction. */
   dock: true,
   calendar_path: "/calendar",
+  review_path: "/jarvis-review", // the Review button in the dock
   intro_message: "",
   /* To-do lists under the dock on the main screen. Empty = every todo.* list
      Home Assistant has. */
@@ -291,29 +292,44 @@ const RIBBONS = [
    brightness is density (additive dots), not a per-dot alpha rule. */
 // rows: the film is threads of dots running round the band, not a cloud -
 // that is its mesh look, and twisting it draws the threads into the creases
+// the film's two bands with a dark gap between, and a hairline inside them
 const SHEETS = [
-  { r: 0.91, w: 0.06, share: 0.42, dir: 1, rows: 11 },
-  { r: 0.872, w: 0.045, share: 0.36, dir: -1, rows: 9 },
-  { r: 0.8, w: 0.012, share: 0.22, dir: 1, rows: 3 },
+  { r: 0.905, w: 0.06, share: 0.5, dir: 1, rows: 9 },
+  { r: 0.83, w: 0.022, share: 0.35, dir: -1, rows: 5 },
+  { r: 0.795, w: 0.004, share: 0.15, dir: 1, rows: 2 },
 ];
-const SHEET_BINS = 256;
-const LOBES = [
-  { k: 2, a: 0.5 },
-  { k: 3, a: 0.35 },
-  { k: 4, a: 0.22 },
-  { k: 5, a: 0.14 },
-  // the crumple: short lobes that make the talking ring go polygonal
-  { k: 7, a: 0.1 },
-  { k: 9, a: 0.07 },
+const SHEET_BINS = 360;
+/* The film talks syllable by syllable: each one snaps the ring into a fresh
+   crumple - a new random set of lobes and twists - and it relaxes back to a
+   clean circle in the gaps between words. Frame by frame at 24fps the film
+   goes crumpled, clean, crumpled, clean several times a second. */
+// mostly short lobes: the film dents and kinks locally rather than going oval
+const LOBE_KS = [3, 4, 5, 6, 7, 9, 11, 13, 17, 21];
+const TWIST_MS = [1, 2, 3, 4, 5, 7];
+// dots per sheet row round the ring: a grid, so the band shows the film's
+// fine radial striations as well as its threads
+const SHEET_COLS = 900;
+/* The film's introduction, in seconds, choreographed to its lines: the ring
+   bursts in, the name assembles, each feature's icon shows in the ring and
+   drops into the bar, a clock, preferences importing, then "fully
+   operational" folds it to a dot and the reactor powers up to 100%. */
+const IM3_BOOT = {
+  fold: 0.4, burst: 0.9, settle: 2.4,
+  word: 2.6, wordHold: 3.8, wordGone: 4.6, wordEnd: 5.0,
+  icons: 5.3, iconStep: 0.75,
+  clock: 9.3, clockEnd: 12.0,
+  imp: 12.2, impEnd: 15.0,
+  down: 16.8, dot: 17.2, reactor: 17.6, back: 20.0, end: 20.8,
+};
+// spoken one at a time on their beats, so the pauses fall where the film's do
+const IM3_LINES = [
+  [0.9, "Allow me to introduce myself."],
+  [2.6, "I am {name}, a virtual artificial intelligence,"],
+  [5.3, "and I'm here to assist you with a variety of tasks as best I can,"],
+  [9.3, "24 hours a day, 7 days a week."],
+  [12.2, "Importing all preferences from home interface."],
+  [15.2, "Systems are now fully operational."],
 ];
-const TWISTS = [
-  { m: 1, a: 0.6 },
-  { m: 2, a: 0.45 },
-  { m: 3, a: 0.3 },
-];
-// The film's start-up, in seconds: fold to a dot, the reactor powers up, the
-// ring bursts back in, the name assembles from particles and lets go.
-const IM3_BOOT = { dot: 0.5, reactor: 1.1, burst: 3.5, word: 4.7, hold: 5.7, gone: 6.3, end: 6.9 };
 
 /* Travelling peaks: a handful of localized bulges that drift around the
    band and breathe. Gentle at idle; when the voice talks they surge taller
@@ -444,6 +460,7 @@ class HubbubbRingCard extends LitElement {
     _messages: { state: true },
     _dictating: { state: true },
     _booting: { state: true },
+    _landed: { state: true },
     _sheet: { state: true },
   };
 
@@ -2712,7 +2729,8 @@ class HubbubbRingCard extends LitElement {
      field, so the adaptive-quality prefix keeps every sheet's share. */
   _buildSheetField() {
     const configured = Number(this._config?.particles) || 0;
-    const auto = clamp(Math.round((this._w || 240) * 55), 12000, 26000);
+    // the surface and threads carry the film now; dots are only its grain
+    const auto = clamp(Math.round((this._w || 240) * 28), 5000, 12000);
     const count = Math.max(400, configured > 0 ? clamp(configured, 0, 26000) : auto);
     const rand = seeded(0x1a3e);
     const p = new Array(count);
@@ -2725,13 +2743,13 @@ class HubbubbRingCard extends LitElement {
       const row = Math.floor(rand() * rows);
       let v = rows > 1 ? -1 + (2 * row) / (rows - 1) : 0;
       v += (rand() - 0.5) * 0.025;
-      if (rand() < 0.01) v *= 1.3 + rand() * 0.6; // loose spray off the rims
+      if (rand() < 0.06) v *= 1.15 + rand() * 0.7; // fuzz and spray off the rims
       p[i] = {
         si,
-        th: rand() * Math.PI * 2,
+        th: (Math.floor(rand() * SHEET_COLS) / SHEET_COLS) * Math.PI * 2,
         v,
         n: rand() - 0.5,
-        dr: (rand() - 0.5) * 0.04,
+        dr: 0,
         tw: 0.4 + rand() * 1.8,
         ph: rand() * Math.PI * 2,
         sz: 0.45 + rand() * 0.4,
@@ -2744,41 +2762,84 @@ class HubbubbRingCard extends LitElement {
   /* Per frame, per sheet: the centre-line radius and the signed half-width
      (w * cos twist) round the ring, sampled into bins so a dot costs one
      lookup. `env` is the voice; `burst` the start-up's turbulence. */
-  _sheetTables(dt, env, burst) {
+  _sheetTables(dt, cur, burst) {
+    const rand = Math.random;
+    const shape = () => ({
+      // kinks: a rough, lightly smoothed random edge, so the outline creases
+      // instead of waving
+      jag: (() => {
+        const n = new Float32Array(SHEET_BINS);
+        for (let b = 0; b < SHEET_BINS; b++) n[b] = rand() * 2 - 1;
+        const o = new Float32Array(SHEET_BINS);
+        for (let b = 0; b < SHEET_BINS; b++)
+          o[b] = (n[(b + SHEET_BINS - 2) % SHEET_BINS] + 2 * n[(b + SHEET_BINS - 1) % SHEET_BINS] + 3 * n[b] + 2 * n[(b + 1) % SHEET_BINS] + n[(b + 2) % SHEET_BINS]) / 9;
+        return Array.from(o);
+      })(),
+      la: LOBE_KS.map((k) => ((rand() * 2 - 1) * (0.4 + rand() * 0.6)) / Math.sqrt(k)),
+      lp: LOBE_KS.map(() => rand() * 6.283),
+      ta: TWIST_MS.map((m) => ((rand() * 2 - 1) * (0.5 + rand() * 0.5)) / Math.sqrt(m)),
+      tp: TWIST_MS.map(() => rand() * 6.283),
+    });
+    // where a sheet is between its last shape and its next
+    const mixed = (st) => {
+      const m = st.m >= 1 ? 1 : st.m * st.m * (3 - 2 * st.m);
+      const f = (k) => st.a[k].map((v, i) => v + (st.b[k][i] - v) * m);
+      return { jag: f("jag"), la: f("la"), lp: f("lp"), ta: f("ta"), tp: f("tp") };
+    };
     if (!this._sheetState) {
-      const rand = seeded(0x77e1);
-      this._sheetState = SHEETS.map(() => ({
-        lp: LOBES.map(() => rand() * 6.283),
-        lw: LOBES.map(() => (0.35 + rand() * 0.8) * (rand() < 0.5 ? -1 : 1)),
-        tp: TWISTS.map(() => rand() * 6.283),
-        tw: TWISTS.map(() => (0.3 + rand() * 0.9) * (rand() < 0.5 ? -1 : 1)),
-        rc: new Float32Array(SHEET_BINS),
-        cw: new Float32Array(SHEET_BINS),
-      }));
+      this._sheetState = SHEETS.map(() => {
+        const a = shape();
+        return { a, b: a, m: 1, rc: new Float32Array(SHEET_BINS), cw: new Float32Array(SHEET_BINS) };
+      });
+      this._crumple = 0;
+      this._reseed = 0;
     }
-    // the voice envelope peaks near 0.5; the film wants it near full
-    const drive = Math.min(1.4, env * 1.8 + burst);
-    // the shapes morph faster while he talks: slow drift at rest
-    const rate = dt * (0.12 + drive * 1.9);
-    const lobeA = 0.006 + drive * 0.075;
-    const twistA = 0.25 + drive * 1.8;
-    const breathe = 0.006 * Math.sin(this._t * 0.35);
+    /* Crumple follows the loudness of the syllable being spoken - up on the
+       vowel, clean again in the gap - and while it is up the shape keeps
+       re-rolling about ten times a second, blended over a few frames so it
+       reads as the film churning rather than jitter. */
+    const sp = this._speech;
+    let c = 0;
+    if (sp && cur.speech > 0.05) {
+      if (sp.live) c = sp.env;
+      else if (sp.syl) {
+        const u = (sp.t - sp.syl.start) / sp.syl.dur;
+        if (u >= 0 && u <= 1) c = sp.syl.peak * Math.pow(Math.sin(Math.PI * u), 0.6);
+      }
+      c *= cur.speech * 1.25;
+    }
+    c = Math.max(c, burst);
+    const tau = c > this._crumple ? 0.03 : 0.06;
+    this._crumple += (c - this._crumple) * (1 - Math.exp(-dt / tau));
+    this._reseed -= dt;
+    if (this._crumple > 0.15 && this._reseed <= 0) {
+      for (const st of this._sheetState) {
+        st.a = mixed(st);
+        st.b = shape();
+        st.m = 0;
+      }
+      this._reseed = 0.08 + rand() * 0.06;
+    }
+    const k = Math.min(1.3, this._crumple);
+    const lobeA = 0.003 + k * 0.075;
+    const twistA = 0.12 + k * 2.4;
+    const breathe = 0.005 * Math.sin(this._t * 0.35);
+    const ts = this._t * 0.15; // the faintest drift at rest, so it is never frozen
     for (let si = 0; si < SHEETS.length; si++) {
       const sh = SHEETS[si];
       const st = this._sheetState[si];
-      for (let i = 0; i < LOBES.length; i++) st.lp[i] += st.lw[i] * rate;
-      for (let i = 0; i < TWISTS.length; i++) st.tp[i] += st.tw[i] * rate;
-      // the thin inner ring stays truer than the outer film
-      const la = lobeA * (si === 2 ? 0.55 : 1);
-      const ta = twistA * (si === 2 ? 0.4 : 1);
+      st.m = Math.min(1, st.m + dt / 0.06);
+      const S = mixed(st);
+      const la = lobeA * (si === 2 ? 0.5 : 1);
+      const ta = twistA * (si === 2 ? 0.35 : 1);
       for (let b = 0; b < SHEET_BINS; b++) {
         const th = (b / SHEET_BINS) * 6.283185;
         let lobe = 0;
-        for (let i = 0; i < LOBES.length; i++) lobe += LOBES[i].a * Math.sin(LOBES[i].k * th + st.lp[i]);
-        let tw = 0;
-        for (let i = 0; i < TWISTS.length; i++) tw += TWISTS[i].a * Math.sin(TWISTS[i].m * th + st.tp[i]);
-        st.rc[b] = sh.r + breathe + drive * 0.012 + la * lobe;
-        st.cw[b] = sh.w * (1 + drive * 0.35) * Math.cos(tw * ta);
+        for (let i = 0; i < LOBE_KS.length; i++) lobe += S.la[i] * Math.sin(LOBE_KS[i] * th + S.lp[i]);
+        let tw = 0.25 * Math.sin(2 * th + ts + si);
+        for (let i = 0; i < TWIST_MS.length; i++) tw += S.ta[i] * Math.sin(TWIST_MS[i] * th + S.tp[i]);
+        st.rc[b] = sh.r + breathe + k * 0.01 + la * lobe + S.jag[b] * k * 0.02;
+        st.cw[b] = sh.w * (1 + k * 0.3) * Math.cos(tw * ta);
       }
     }
     return this._sheetState;
@@ -4331,7 +4392,7 @@ class HubbubbRingCard extends LitElement {
   _drawIm3(dt, ctx, cx, cy, half, cur, env, R, G, B) {
     const t = this._t;
     const boot = this._im3Boot(dt);
-    const sheets = this._sheetTables(dt, env, boot.burst);
+    const sheets = this._sheetTables(dt, cur, boot.burst);
     if (boot.ring > 0) {
       ctx.save();
       ctx.globalAlpha = boot.ring;
@@ -4340,15 +4401,16 @@ class HubbubbRingCard extends LitElement {
         ctx.scale(boot.scale, boot.scale);
         ctx.translate(-cx, -cy);
       }
+      this._drawSheetFilm(ctx, cx, cy, half, cur, sheets, R, G, B);
       this._drawSheetDots(ctx, cx, cy, half, cur, sheets, R, G, B);
       ctx.globalAlpha = boot.ring;
       this._drawIm3Rings(ctx, cx, cy, half, R, G, B, dt);
-      const SR = half * 0.3 * (1 + env * 0.04);
-      const glow = clamp(cur.bright * (1 + env * 0.35), 0.3, 1.9);
+      const SR = half * 0.29 * (1 + env * 0.04);
+      const glow = clamp(cur.bright * (1 + env * 0.35), 0.3, 1.9) * boot.globe;
       const lt = (c) => Math.round(c + (255 - c) * 0.35);
       this._drawGlobe(ctx, cx, cy, SR, half, glow * 0.5,
         `rgba(${lt(R)},${lt(G)},${lt(B)},${0.15 * glow})`, `rgba(${R},${G},${B},${0.045 * glow})`);
-      ctx.globalAlpha = boot.ring;
+      ctx.globalAlpha = boot.ring * boot.globe;
       ctx.strokeStyle = `rgba(${R},${G},${B},0.55)`;
       ctx.lineWidth = Math.max(0.8, half * 0.006);
       ctx.beginPath();
@@ -4386,7 +4448,7 @@ class HubbubbRingCard extends LitElement {
       let u = (th * 0.15915494) % 1;
       if (u < 0) u += 1;
       const b = (u * SHEET_BINS) | 0;
-      const rf = st.rc[b] + p.v * st.cw[b] + p.n * 0.004 + 0.002 * Math.sin(t * p.tw + p.ph);
+      const rf = st.rc[b] + p.v * st.cw[b] + p.n * 0.012 + 0.003 * Math.sin(t * p.tw + p.ph);
       const r = rf * half;
       MX[nm] = cx + r * Math.cos(th);
       MY[nm] = cy + r * Math.sin(th);
@@ -4394,33 +4456,12 @@ class HubbubbRingCard extends LitElement {
       // rims and the thin inner ring read as lines; the film between is mist
       const av = Math.abs(p.v);
       const edge = av > 0.9 && av < 1.1 ? 1.6 : 1;
-      const a = p.br * aMul * edge * (p.si === 2 ? 0.9 : 0.62) * (0.75 + 0.25 * Math.sin(t * p.tw * 0.7 + p.ph));
+      const a = p.br * aMul * edge * (p.si === 2 ? 0.6 : 0.75) * (0.75 + 0.25 * Math.sin(t * p.tw * 0.7 + p.ph));
       MB[nm++] = Math.min(MOTE_ALPHAS - 1, (clamp(a, 0, 1) * MOTE_ALPHAS) | 0);
     }
     const base = ctx.globalAlpha;
     ctx.globalCompositeOperation = "lighter";
     ctx.fillStyle = `rgb(${R},${G},${B})`;
-    /* The film's body: a faint glassy fill between each sheet's rims, so the
-       dots sit on a surface rather than in empty air. */
-    ctx.globalAlpha = base * 0.07;
-    for (let si = 0; si < 2; si++) {
-      const st = sheets[si];
-      const dir = SHEETS[si].dir;
-      ctx.beginPath();
-      for (let k = 0; k <= SHEET_BINS; k++) {
-        const b = k % SHEET_BINS;
-        const th = (b / SHEET_BINS) * 6.283185 + rot * dir;
-        const r = (st.rc[b] + Math.abs(st.cw[b])) * half;
-        k ? ctx.lineTo(cx + r * Math.cos(th), cy + r * Math.sin(th)) : ctx.moveTo(cx + r * Math.cos(th), cy + r * Math.sin(th));
-      }
-      for (let k = SHEET_BINS; k >= 0; k--) {
-        const b = k % SHEET_BINS;
-        const th = (b / SHEET_BINS) * 6.283185 + rot * dir;
-        const r = (st.rc[b] - Math.abs(st.cw[b])) * half;
-        ctx.lineTo(cx + r * Math.cos(th), cy + r * Math.sin(th));
-      }
-      ctx.fill("evenodd");
-    }
     for (let bk = 0; bk < MOTE_ALPHAS; bk++) {
       ctx.beginPath();
       let any = false;
@@ -4433,6 +4474,76 @@ class HubbubbRingCard extends LitElement {
       if (!any) continue;
       ctx.globalAlpha = base * ((bk + 0.5) / MOTE_ALPHAS);
       ctx.fill();
+    }
+    ctx.globalCompositeOperation = "source-over";
+    ctx.globalAlpha = base;
+  }
+
+  /* The film itself. Each sheet is a ribbon: quads between its two edges,
+     filled brighter the more edge-on the ribbon is turned there (narrow =
+     looking along it = more film in the line of sight), so folds glow on
+     their own. Thin threads run along its rows on top - the film's mesh. */
+  _drawSheetFilm(ctx, cx, cy, half, cur, sheets, R, G, B) {
+    const base = ctx.globalAlpha;
+    const rot = this._spin * 0.35;
+    const N = SHEET_BINS;
+    const NB = 10;
+    const bright = cur.bright / 1.6;
+    if (!this._fcos || this._fcos.length !== N + 1) {
+      this._fcos = new Float32Array(N + 1);
+      this._fsin = new Float32Array(N + 1);
+    }
+    ctx.globalCompositeOperation = "lighter";
+    ctx.fillStyle = `rgb(${R},${G},${B})`;
+    ctx.strokeStyle = `rgb(${R},${G},${B})`;
+    for (let si = 0; si < SHEETS.length; si++) {
+      const sh = SHEETS[si];
+      const st = sheets[si];
+      const a0 = rot * sh.dir;
+      const C = this._fcos, S = this._fsin;
+      for (let k = 0; k <= N; k++) {
+        const th = (k / N) * 6.283185 + a0;
+        C[k] = Math.cos(th);
+        S[k] = Math.sin(th);
+      }
+      // surface, bucketed by brightness
+      for (let bk = 0; bk < NB; bk++) {
+        ctx.beginPath();
+        let any = false;
+        for (let k = 0; k < N; k++) {
+          const b = k, b2 = (k + 1) % N;
+          const face = Math.abs(st.cw[b]) / sh.w; // 1 face-on, 0 edge-on
+          let a = 0.05 + 0.17 / (face + 0.16);
+          if (a > 0.9) a = 0.9;
+          if (Math.min(NB - 1, ((a / 0.9) * NB) | 0) !== bk) continue;
+          const r1 = (st.rc[b] - st.cw[b]) * half, r2 = (st.rc[b] + st.cw[b]) * half;
+          const r3 = (st.rc[b2] + st.cw[b2]) * half, r4 = (st.rc[b2] - st.cw[b2]) * half;
+          ctx.moveTo(cx + r1 * C[k], cy + r1 * S[k]);
+          ctx.lineTo(cx + r2 * C[k], cy + r2 * S[k]);
+          ctx.lineTo(cx + r3 * C[k + 1], cy + r3 * S[k + 1]);
+          ctx.lineTo(cx + r4 * C[k + 1], cy + r4 * S[k + 1]);
+          ctx.closePath();
+          any = true;
+        }
+        if (!any) continue;
+        ctx.globalAlpha = base * bright * (bk + 0.5) * (0.9 / NB) * (si === 2 ? 0.5 : 0.55);
+        ctx.fill();
+      }
+      // threads: every row, the rims brightest
+      const rows = sh.rows;
+      ctx.lineWidth = Math.max(0.5, half * 0.0028);
+      for (let ri = 0; ri < rows; ri++) {
+        const v = rows > 1 ? -1 + (2 * ri) / (rows - 1) : 0;
+        const rim = ri === 0 || ri === rows - 1;
+        ctx.globalAlpha = base * bright * (rim ? 0.5 : 0.09) * (si === 2 ? 1.2 : 1);
+        ctx.beginPath();
+        for (let k = 0; k <= N; k++) {
+          const b = k % N;
+          const r = (st.rc[b] + v * st.cw[b]) * half;
+          k ? ctx.lineTo(cx + r * C[k], cy + r * S[k]) : ctx.moveTo(cx + r * C[k], cy + r * S[k]);
+        }
+        ctx.stroke();
+      }
     }
     ctx.globalCompositeOperation = "source-over";
     ctx.globalAlpha = base;
@@ -4510,25 +4621,45 @@ class HubbubbRingCard extends LitElement {
   _im3Boot(dt) {
     const b = this._boot;
     const T = IM3_BOOT;
-    if (!b) return { ring: 1, scale: 1, burst: 0, phase: null };
+    if (!b) return { ring: 1, scale: 1, burst: 0, globe: 1, phase: null };
     const t = (b.t += dt);
-    const ease = (x) => 1 - (1 - x) * (1 - x) * (1 - x);
-    if (t < T.dot) {
-      const u = t / T.dot;
-      return { ring: 1 - u * 0.4, scale: 1 - 0.98 * u * u, burst: 0, phase: null };
+    const ease = (x) => 1 - (1 - x) ** 3;
+    const arrive = (t0) => {
+      const u = clamp((t - t0) / 0.28, 0, 1);
+      return {
+        ring: 0.3 + 0.7 * u,
+        scale: 0.45 + 0.55 * ease(u),
+        burst: 1.2 * (1 - ease(clamp((t - t0) / (T.settle - T.burst), 0, 1))),
+      };
+    };
+    // the globe gives way to whatever is showing in the ring
+    const win = (a, z) => clamp(Math.min(t - a, z - t) / 0.2, 0, 1);
+    const globe = 1 - Math.max(win(T.icons - 0.1, T.icons + 5 * T.iconStep), win(T.clock, T.clockEnd), win(T.imp, T.impEnd));
+    if (t < T.fold) {
+      const u = t / T.fold;
+      return { ring: 1 - u * 0.5, scale: 1 - 0.98 * u * u, burst: 0, globe: 1, phase: null };
     }
-    if (t < T.reactor) return { ring: 0, scale: 0.02, burst: 0, phase: "dot", t };
-    if (t < T.burst) return { ring: 0, scale: 0.02, burst: 0, phase: "reactor", u: (t - T.reactor) / (T.burst - T.reactor), t };
+    if (t < T.burst) return { ring: 0, scale: 1, burst: 0, globe: 1, phase: null };
+    if (t < T.down) {
+      const a = arrive(T.burst);
+      let phase = null, u = 0;
+      if (t >= T.word && t < T.wordEnd) phase = "word";
+      else if (t >= T.clock && t < T.clockEnd) (phase = "clock"), (u = (t - T.clock) / (T.clockEnd - T.clock));
+      else if (t >= T.imp && t < T.impEnd) (phase = "import"), (u = (t - T.imp) / (T.impEnd - T.imp));
+      return { ...a, globe, phase, u, t };
+    }
+    if (t < T.dot) {
+      const u = (t - T.down) / (T.dot - T.down);
+      return { ring: 1 - u * 0.5, scale: 1 - 0.98 * u * u, burst: 0, globe: 1, phase: null };
+    }
+    if (t < T.reactor) return { ring: 0, scale: 1, burst: 0, globe: 1, phase: "dot", t };
+    if (t < T.back) return { ring: 0, scale: 1, burst: 0, globe: 1, phase: "reactor", u: (t - T.reactor) / (T.back - T.reactor), t };
     if (t < T.end) {
-      const u = clamp((t - T.burst) / (T.word - T.burst), 0, 1);
-      const s = u < 1 ? 0.3 + 0.7 * (1 + 2.70158 * (u - 1) ** 3 + 1.70158 * (u - 1) ** 2) : 1;
-      // turbulence on arrival, settling as the name forms
-      const burst = 1.2 * (1 - ease(clamp((t - T.burst) / (T.hold - T.burst), 0, 1)));
-      const fadeIn = clamp((t - T.burst) / 0.3, 0, 1);
-      return { ring: fadeIn, scale: s, burst, phase: t >= T.word ? "word" : "burst", t };
+      const a = arrive(T.back);
+      return { ...a, burst: a.burst * 0.6, globe: 1, phase: t < T.back + 0.35 ? "reactorOut" : null, t };
     }
     this._boot = null;
-    return { ring: 1, scale: 1, burst: 0, phase: null };
+    return { ring: 1, scale: 1, burst: 0, globe: 1, phase: null };
   }
 
   _drawIm3Boot(ctx, cx, cy, half, boot, R, G, B, t) {
@@ -4546,14 +4677,98 @@ class HubbubbRingCard extends LitElement {
       ctx.fillRect(cx - half * 0.07, cy + half * 0.55, half * 0.14, Math.max(1, half * 0.006));
     } else if (boot.phase === "reactor") {
       this._drawReactor(ctx, cx, cy, half, boot.u, col, hi);
-    } else if (boot.phase === "burst" && boot.t < T.burst + 0.35) {
+    } else if (boot.phase === "reactorOut") {
       // the reactor lets go as the ring arrives
-      ctx.globalAlpha = 1 - (boot.t - T.burst) / 0.35;
+      ctx.globalAlpha = 1 - (boot.t - T.back) / 0.35;
       this._drawReactor(ctx, cx, cy, half, 1, col, hi);
     } else if (boot.phase === "word") {
       this._drawWordmark(ctx, cx, cy, half, boot.t - T.word, R, G, B);
+    } else if (boot.phase === "clock") {
+      this._drawIm3Clock(ctx, cx, cy, half, boot.u, col, hi);
+    } else if (boot.phase === "import") {
+      this._drawIm3Import(ctx, cx, cy, half, boot.u, col, hi);
     }
     ctx.restore();
+  }
+
+  /* "24 hours a day": a clock in the ring, digits tumbling before they
+     settle on the real time, a thin ring round it and a sweep chasing it. */
+  _drawIm3Clock(ctx, cx, cy, half, u, col, hi) {
+    const a = clamp(Math.min(u / 0.08, (1 - u) / 0.08), 0, 1);
+    ctx.globalAlpha = a;
+    const rr = half * 0.5;
+    ctx.strokeStyle = "rgba(235,250,255,0.75)";
+    ctx.lineWidth = Math.max(1, half * 0.007);
+    ctx.beginPath();
+    ctx.arc(cx, cy, rr, 0, 6.283185);
+    ctx.stroke();
+    ctx.strokeStyle = "rgba(235,250,255,0.4)";
+    ctx.lineWidth = Math.max(1, half * 0.004);
+    const sw = -1.5708 + u * 9;
+    ctx.beginPath();
+    ctx.arc(cx, cy, rr * 1.07, sw, sw + 4.2);
+    ctx.stroke();
+    ctx.strokeStyle = col(0.45);
+    ctx.beginPath();
+    ctx.moveTo(cx - rr * 1.25, cy);
+    ctx.lineTo(cx - rr * 0.92, cy);
+    ctx.moveTo(cx + rr * 0.92, cy);
+    ctx.lineTo(cx + rr * 1.25, cy);
+    ctx.stroke();
+    const now = new Date();
+    let h = now.getHours();
+    const ap = h < 12 ? "AM" : "PM";
+    h = h % 12 || 12;
+    let hm = `${h}:${String(now.getMinutes()).padStart(2, "0")}`;
+    let ss = `:${String(now.getSeconds()).padStart(2, "0")}`;
+    if (u < 0.25) {
+      // tumbling: a new random reading every few frames
+      const r = (n) => Math.floor(Math.random() * n);
+      if (!this._tumble || performance.now() - this._tumble.at > 70)
+        this._tumble = { at: performance.now(), hm: `${r(12) + 1}:${r(6)}${r(10)}`, ss: `:${r(6)}${r(10)}` };
+      hm = this._tumble.hm;
+      ss = this._tumble.ss;
+    }
+    const fs = half * 0.27;
+    ctx.fillStyle = "rgba(240,252,255,0.95)";
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "right";
+    ctx.font = `200 ${fs}px "Avenir Next", "Helvetica Neue", Roboto, sans-serif`;
+    ctx.fillText(hm, cx + half * 0.2, cy);
+    ctx.textAlign = "left";
+    ctx.font = `500 ${fs * 0.3}px "Avenir Next", "Helvetica Neue", Roboto, sans-serif`;
+    ctx.fillText(ap, cx + half * 0.23, cy - fs * 0.2);
+    ctx.fillText(ss, cx + half * 0.23, cy + fs * 0.2);
+    ctx.textAlign = "start";
+    ctx.globalAlpha = 1;
+  }
+
+  /* "Importing all preferences from home interface": a count and an arc
+     filling round the cog ring. */
+  _drawIm3Import(ctx, cx, cy, half, u, col, hi) {
+    const a = clamp(Math.min(u / 0.08, (1 - u) / 0.08), 0, 1);
+    const p = clamp(u / 0.85, 0, 1);
+    const pe = 1 - (1 - p) ** 2;
+    ctx.globalAlpha = a;
+    ctx.lineWidth = Math.max(1.5, half * 0.012);
+    ctx.strokeStyle = col(0.15);
+    ctx.beginPath();
+    ctx.arc(cx, cy, half * 0.5, 0, 6.283185);
+    ctx.stroke();
+    ctx.strokeStyle = hi(0.9);
+    ctx.beginPath();
+    ctx.arc(cx, cy, half * 0.5, -1.5708, -1.5708 + pe * 6.283185);
+    ctx.stroke();
+    ctx.fillStyle = hi(0.95);
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.font = `200 ${half * 0.2}px "Avenir Next", "Helvetica Neue", Roboto, sans-serif`;
+    ctx.fillText(`${Math.round(pe * 100)}%`, cx, cy + half * 0.04);
+    ctx.font = `600 ${half * 0.045}px "Avenir Next", "Helvetica Neue", Roboto, sans-serif`;
+    ctx.fillStyle = col(0.85);
+    ctx.fillText(pe < 1 ? "IMPORTING PREFERENCES" : "PREFERENCES LOADED", cx, cy - half * 0.16);
+    ctx.textAlign = "start";
+    ctx.globalAlpha = 1;
   }
 
   /* The suit's chest piece, without the suit: a segmented ring that lights
@@ -4654,7 +4869,8 @@ class HubbubbRingCard extends LitElement {
       const n = pts.length / 2;
       const from = new Float32Array(n * 2), seed = new Float32Array(n);
       for (let i = 0; i < n; i++) {
-        const a = rand() * 6.283185, r = half * (0.82 + rand() * 0.14);
+        // out of the film's left side, as in the film
+        const a = Math.PI + (rand() - 0.5) * 1.4, r = half * (0.82 + rand() * 0.14);
         from[i * 2] = r * Math.cos(a);
         from[i * 2 + 1] = r * Math.sin(a);
         seed[i] = rand();
@@ -4663,7 +4879,7 @@ class HubbubbRingCard extends LitElement {
     }
     const { pts, from, seed, w } = this._wm;
     const n = seed.length;
-    const fly = T.hold - T.word, gone = T.gone - T.word, end = T.end - T.word;
+    const fly = T.wordHold - T.word, gone = T.wordGone - T.word, end = T.wordEnd - T.word;
     const hiR = Math.round(R + (255 - R) * 0.45), hiG = Math.round(G + (255 - G) * 0.45), hiB = Math.round(B + (255 - B) * 0.45);
     ctx.globalCompositeOperation = "lighter";
     ctx.fillStyle = `rgb(${hiR},${hiG},${hiB})`;
@@ -4716,25 +4932,99 @@ class HubbubbRingCard extends LitElement {
     this._booting = true;
     clearTimeout(this._bootTimer);
     const im3 = this._config.animation === "jarvis-im3";
-    this._bootTimer = setTimeout(() => (this._booting = false), im3 ? IM3_BOOT.end * 1000 : 6500);
+    const run = (this._introRun = {});
+    this._bootTimer = setTimeout(() => {
+      this._booting = false;
+      this._landed = null;
+    }, im3 ? IM3_BOOT.end * 1000 : 6500);
     const name = this._name;
-    // the film's own introduction, word for word
-    const message =
-      this._config.intro_message ||
-      `Allow me to introduce myself. I am ${name}, a virtual artificial ` +
-        `intelligence, and I'm here to assist you with a variety of tasks as ` +
-        `best I can, 24 hours a day, 7 days a week. Importing all preferences ` +
-        `from home interface. Systems are now fully operational.`;
-    // spoken as the ring comes back, so the voice arrives with the bloom
-    setTimeout(() => {
+    const say = (message) =>
       Promise.resolve(
         this._hass?.callService("assist_satellite", "announce", {
           entity_id: this._config.entity,
           message,
           preannounce: false,
         })
-      ).catch(() => this._toast(`${name} could not speak the introduction.`));
-    }, im3 ? IM3_BOOT.burst * 1000 : 900);
+      );
+    if (!im3) {
+      const message =
+        this._config.intro_message ||
+        `Allow me to introduce myself. I am ${name}, a virtual artificial ` +
+          `intelligence, and I'm here to assist you with a variety of tasks as ` +
+          `best I can, 24 hours a day, 7 days a week. Importing all preferences ` +
+          `from home interface. Systems are now fully operational.`;
+      setTimeout(() => say(message).catch(() => this._toast(`${name} could not speak the introduction.`)), 900);
+      return;
+    }
+    // The bar starts empty; each button's icon arrives through the ring.
+    this._landed = new Set();
+    const T = IM3_BOOT;
+    for (let i = 0; i < 5; i++) setTimeout(() => this._flyIcon(i, run), (T.icons + i * T.iconStep) * 1000);
+    /* One line at a time, each on its beat or as soon as the one before has
+       finished playing (announce returns when the puck is done), so the
+       pauses land where the film's do and a slow line never overlaps. */
+    const lines = this._config.intro_message
+      ? [[T.burst, this._config.intro_message]]
+      : IM3_LINES.map(([at, text]) => [at, text.replace("{name}", name)]);
+    const t0 = performance.now();
+    (async () => {
+      for (const [at, text] of lines) {
+        const wait = at * 1000 - (performance.now() - t0);
+        if (wait > 0) await new Promise((r) => setTimeout(r, wait));
+        if (this._introRun !== run) return;
+        try {
+          await say(text);
+        } catch (e) {
+          this._toast(`${name} could not speak the introduction.`);
+          return;
+        }
+      }
+    })();
+  }
+
+  /* One dock button's arrival: its icon shows large in the middle of the
+     ring, holds, then drops into its slot in the bar - done on an overlay
+     element, since the canvas ends at the ring's edge. */
+  _flyIcon(i, run) {
+    const done = () => {
+      if (this._landed) this._landed = new Set([...this._landed, i]);
+    };
+    if (this._introRun !== run) return;
+    const root = this.shadowRoot;
+    const wrap = root?.querySelector(".wrap");
+    const ring = root?.querySelector(".ring");
+    const btn = root?.querySelectorAll(".dock button")[i];
+    const icon = btn?.querySelector("svg");
+    if (!wrap || !ring || !icon || !wrap.animate) return done();
+    const W = wrap.getBoundingClientRect();
+    const Rg = ring.getBoundingClientRect();
+    const Ic = icon.getBoundingClientRect();
+    const box = 30;
+    const el = document.createElement("div");
+    el.className = "flyicon";
+    el.innerHTML = icon.outerHTML;
+    const x0 = Rg.left + Rg.width / 2 - W.left - box / 2;
+    const y0 = Rg.top + Rg.height / 2 - W.top - box / 2;
+    el.style.left = `${x0}px`;
+    el.style.top = `${y0}px`;
+    wrap.appendChild(el);
+    const s0 = (Rg.width * 0.36) / box;
+    const s1 = Ic.width / box;
+    const dx = Ic.left + Ic.width / 2 - W.left - box / 2 - x0;
+    const dy = Ic.top + Ic.height / 2 - W.top - box / 2 - y0;
+    const anim = el.animate(
+      [
+        { transform: `translate(0,0) scale(${s0 * 0.55})`, opacity: 0, offset: 0 },
+        { transform: `translate(0,0) scale(${s0})`, opacity: 1, offset: 0.14 },
+        { transform: `translate(0,0) scale(${s0})`, opacity: 1, offset: 0.6 },
+        { transform: `translate(${dx}px,${dy}px) scale(${s1})`, opacity: 1, offset: 1 },
+      ],
+      { duration: 900, easing: "cubic-bezier(0.55, 0, 0.3, 1)", fill: "forwards" }
+    );
+    anim.onfinish = () => {
+      el.remove();
+      done();
+    };
   }
 
   async _openSheet(kind) {
@@ -4765,10 +5055,12 @@ class HubbubbRingCard extends LitElement {
     return html`<div class="sheet" @click=${(e) => e.target === e.currentTarget && (this._sheet = null)}>
       <div class="sheet-box">
         <div class="sheet-head">
-          <span>${sh.kind === "memories" ? "Memories" : `What ${this._name} can do`}</span>
+          <span>${sh.kind === "memories" ? "Memories" : sh.kind === "todos" ? "To-do lists" : `What ${this._name} can do`}</span>
           <button class="sheet-x" title="Close" @click=${() => (this._sheet = null)}>×</button>
         </div>
-        <input
+        ${sh.kind === "todos"
+          ? html`<div class="sheet-list">${this._renderTodos()}</div>`
+          : html`        <input
           type="search"
           placeholder="Filter"
           .value=${sh.q}
@@ -4790,6 +5082,7 @@ class HubbubbRingCard extends LitElement {
         ${sh.kind === "skills"
           ? html`<div class="dim pad small">Plus everything Home Assistant exposes to ${this._name}: lights, media, climate, scenes and scripts.</div>`
           : nothing}
+`}
       </div>
     </div>`;
   }
@@ -4843,8 +5136,15 @@ class HubbubbRingCard extends LitElement {
     }
   }
 
-  _renderTodos(build) {
-    if (build || this._config.todos === false || this._config.build_page || !this._todos?.length) return nothing;
+  _openTodos() {
+    this._todoSig = null;
+    this._watchTodos(this._hass);
+    this._sheet = { kind: "todos", items: [], q: "" };
+  }
+
+  _renderTodos() {
+    if (!this._todos) return html`<div class="dim pad">Loading…</div>`;
+    if (!this._todos.length) return html`<div class="dim pad">No to-do lists in Home Assistant.</div>`;
     return html`<section class="todos">
       ${this._todos.map(
         (l) => html`<div class="todo">
@@ -4871,23 +5171,26 @@ class HubbubbRingCard extends LitElement {
   _renderDock(build) {
     if (build || this._config.dock === false || this._config.build_page) return nothing;
     const ico = (d) => html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
+    // during the start-up a slot stays empty until its icon has dropped in
+    const pend = (i) => (this._landed && !this._landed.has(i) ? "pending" : "");
+    const open = this._todos?.reduce((n, l) => n + (l.items?.length || 0), 0) || 0;
     return html`<nav class="dock">
-      <button title="Calendar" @click=${() => this._navigate(this._config.calendar_path)}>
+      <button class=${pend(0)} title="Calendar" @click=${() => this._navigate(this._config.calendar_path)}>
         ${ico(svg`<rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/><path d="M7.5 13h2M11 13h2M14.5 13h2M7.5 16.5h2M11 16.5h2"/>`)}
         <span>Calendar</span>
       </button>
-      <button title="Memories" @click=${() => this._openSheet("memories")}>
-        ${ico(svg`<path d="M9 4.5a3 3 0 0 0-3 3 3 3 0 0 0-2 5 3 3 0 0 0 2 4.5 3 3 0 0 0 6 .5V6.5a2.5 2.5 0 0 0-3-2z"/><path d="M15 4.5a3 3 0 0 1 3 3 3 3 0 0 1 2 5 3 3 0 0 1-2 4.5 3 3 0 0 1-6 .5"/><path d="M12 9h-1.5M12 13H9.5M12 9h1.5M12 13h2.5"/>`)}
-        <span>Memory</span>
+      <button class=${pend(1)} title="To-do lists" @click=${() => this._openTodos()}>
+        ${ico(svg`<path d="M10 6.5h10.5M10 12h10.5M10 17.5h10.5"/><path d="M3.5 6.5l1.6 1.6 2.9-3.2M3.5 12l1.6 1.6 2.9-3.2"/><rect x="3.8" y="16" width="3.2" height="3.2" rx="0.6"/>`)}
+        <span>To-do${open ? html`<b class="badge">${open}</b>` : nothing}</span>
       </button>
-      <button class="power ${this._booting ? "on" : ""}" title="Start-up and introduction" @click=${this._intro}>
+      <button class="power ${this._booting ? "on" : ""} ${pend(2)}" title="Start-up and introduction" @click=${this._intro}>
         ${ico(svg`<path d="M12 3.5v7"/><path d="M7.2 6.6a7 7 0 1 0 9.6 0"/>`)}
       </button>
-      <button title="Skills" @click=${() => this._openSheet("skills")}>
-        ${ico(svg`<path d="M13 2.5 5 13.5h6l-1 8 8-11h-6z"/>`)}
-        <span>Skills</span>
+      <button class=${pend(3)} title="Jarvis Review" @click=${() => this._navigate(this._config.review_path)}>
+        ${ico(svg`<path d="M11 20.5H6.5a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2H14l4 4v3"/><path d="M14 3.5v4h4"/><circle cx="15.5" cy="15.5" r="3"/><path d="M17.7 17.7l2.6 2.6"/><path d="M7.5 8.5h3M7.5 12h4"/>`)}
+        <span>Review</span>
       </button>
-      <button title="Build mode" data-ai="toggle-build-mode" @click=${() => this._setBuild(true)}>
+      <button class=${pend(4)} title="Build mode" data-ai="toggle-build-mode" @click=${() => this._setBuild(true)}>
         ${ico(svg`<path d="M12 2.6c-4 0-7 2.5-7 6.5v4.3c0 2.1.8 4 2.2 5.4L9.6 21h4.8l2.4-2.2c1.4-1.4 2.2-3.3 2.2-5.4V9.1c0-4-3-6.5-7-6.5z"/><path d="M7.3 11.1l3.4 1M16.7 11.1l-3.4 1"/><path d="M12 2.8v4.4M9.8 17.2h4.4M7.4 14.2l2.3 1.6M16.6 14.2l-2.3 1.6"/>`)}
         <span>Build</span>
       </button>
@@ -5396,7 +5699,6 @@ class HubbubbRingCard extends LitElement {
             </svg>
           </div>
           ${this._renderDock(build)}
-          ${this._renderTodos(build)}
           ${this._sheet ? this._renderSheet() : nothing}
         </div>
       </ha-card>
@@ -5406,6 +5708,22 @@ class HubbubbRingCard extends LitElement {
   static styles = css`
     :host {
       display: block;
+      /* The build-mode chrome's palette as channels, so a whole look can
+         retint it: line = borders, glow = fills and shadows, glass = panel
+         background, ink = text. */
+      --jr-line: 53, 154, 210;
+      --jr-glow: 46, 157, 245;
+      --jr-glass-a: 10, 24, 32;
+      --jr-glass-b: 4, 10, 14;
+    }
+    /* jarvis-im3 is teal throughout, the build windows included. */
+    ha-card.im3 {
+      --jr-line: 63, 200, 190;
+      --jr-glow: 70, 220, 205;
+      --jr-glass-a: 6, 26, 26;
+      --jr-glass-b: 2, 10, 10;
+      --jr-ink: #cdf3ee;
+      --jr-ink-2: #b6ece5;
     }
     ha-card {
       display: flex;
@@ -5568,11 +5886,11 @@ class HubbubbRingCard extends LitElement {
       padding: 6px 8px;
       background: var(
         --jr-panel-bg,
-        linear-gradient(160deg, rgba(10, 24, 32, 0.92), rgba(4, 10, 14, 0.96))
+        linear-gradient(160deg, rgba(var(--jr-glass-a), 0.92), rgba(var(--jr-glass-b), 0.96))
       );
-      border: 1px solid var(--jr-panel-border, rgba(53, 154, 210, 0.35));
+      border: 1px solid var(--jr-panel-border, rgba(var(--jr-line), 0.35));
       border-radius: 10px;
-      box-shadow: inset 0 0 28px rgba(46, 157, 245, 0.08);
+      box-shadow: inset 0 0 28px rgba(var(--jr-glow), 0.08);
       font-family: "Avenir Next", "Segoe UI", Roboto, sans-serif;
       line-height: 1;
     }
@@ -5586,7 +5904,7 @@ class HubbubbRingCard extends LitElement {
       border: 1px solid transparent;
       border-radius: 6px;
       background: none;
-      color: var(--jr-panel-text, #bfe3f5);
+      color: var(--jr-panel-text, var(--jr-ink-2, #bfe3f5));
       opacity: 0.78;
       cursor: pointer;
       font-family: inherit;
@@ -5609,9 +5927,9 @@ class HubbubbRingCard extends LitElement {
     .dock button:hover,
     .dock button:focus-visible {
       opacity: 1;
-      background: rgba(46, 157, 245, 0.12);
-      border-color: rgba(53, 154, 210, 0.4);
-      box-shadow: 0 0 10px rgba(46, 157, 245, 0.25);
+      background: rgba(var(--jr-glow), 0.12);
+      border-color: rgba(var(--jr-line), 0.4);
+      box-shadow: 0 0 10px rgba(var(--jr-glow), 0.25);
       outline: none;
     }
     .dock button:active {
@@ -5624,9 +5942,9 @@ class HubbubbRingCard extends LitElement {
       margin-top: -34px;
       padding: 15px;
       border-radius: 50%;
-      border: 1px solid var(--jr-panel-border, rgba(53, 154, 210, 0.45));
+      border: 1px solid var(--jr-panel-border, rgba(var(--jr-line), 0.45));
       background: radial-gradient(circle at 50% 40%, rgba(16, 40, 48, 0.98), rgba(3, 8, 11, 0.98));
-      box-shadow: 0 0 0 4px rgba(3, 8, 11, 0.9), 0 0 16px rgba(46, 157, 245, 0.25), inset 0 0 14px rgba(46, 157, 245, 0.15);
+      box-shadow: 0 0 0 4px rgba(3, 8, 11, 0.9), 0 0 16px rgba(var(--jr-glow), 0.25), inset 0 0 14px rgba(var(--jr-glow), 0.15);
       opacity: 1;
     }
     .dock button.power svg {
@@ -5636,8 +5954,43 @@ class HubbubbRingCard extends LitElement {
     .dock button.power:hover,
     .dock button.power.on {
       border-color: var(--jr-color);
-      box-shadow: 0 0 0 4px rgba(3, 8, 11, 0.9), 0 0 22px var(--jr-color), inset 0 0 16px rgba(46, 157, 245, 0.25);
+      box-shadow: 0 0 0 4px rgba(3, 8, 11, 0.9), 0 0 22px var(--jr-color), inset 0 0 16px rgba(var(--jr-glow), 0.25);
       background: radial-gradient(circle at 50% 40%, rgba(16, 40, 48, 0.98), rgba(3, 8, 11, 0.98));
+    }
+
+    /* start-up: empty slots until each icon drops in */
+    .dock button svg,
+    .dock button span {
+      transition: opacity 0.25s;
+    }
+    .dock button.pending svg,
+    .dock button.pending span {
+      opacity: 0;
+    }
+    .badge {
+      margin-left: 5px;
+      padding: 0 5px;
+      border-radius: 7px;
+      background: rgba(var(--jr-glow), 0.25);
+      color: var(--jr-color);
+      font-size: 9px;
+      letter-spacing: 0.04em;
+    }
+    .flyicon {
+      position: absolute;
+      width: 30px;
+      height: 30px;
+      z-index: 4;
+      pointer-events: none;
+      color: var(--jr-color);
+      transform-origin: 50% 50%;
+      filter: drop-shadow(0 0 2px var(--jr-color)) drop-shadow(0 0 8px var(--jr-color));
+    }
+    .flyicon svg {
+      position: static;
+      width: 100%;
+      height: 100%;
+      stroke-width: 1.7;
     }
 
     /* ---------------- to-do lists ---------------- */
@@ -5652,13 +6005,13 @@ class HubbubbRingCard extends LitElement {
     .todo {
       background: var(
         --jr-panel-bg,
-        linear-gradient(160deg, rgba(10, 24, 32, 0.92), rgba(4, 10, 14, 0.96))
+        linear-gradient(160deg, rgba(var(--jr-glass-a), 0.92), rgba(var(--jr-glass-b), 0.96))
       );
-      border: 1px solid var(--jr-panel-border, rgba(53, 154, 210, 0.35));
+      border: 1px solid var(--jr-panel-border, rgba(var(--jr-line), 0.35));
       border-radius: 10px;
-      box-shadow: inset 0 0 28px rgba(46, 157, 245, 0.08);
+      box-shadow: inset 0 0 28px rgba(var(--jr-glow), 0.08);
       padding: 10px 12px;
-      color: var(--jr-panel-text, #cfe9f7);
+      color: var(--jr-panel-text, var(--jr-ink, #cfe9f7));
       font-family: "Avenir Next", "Segoe UI", Roboto, sans-serif;
       line-height: 1.4;
       text-align: left;
@@ -5689,7 +6042,7 @@ class HubbubbRingCard extends LitElement {
       cursor: pointer;
     }
     .titem:hover {
-      background: rgba(46, 157, 245, 0.1);
+      background: rgba(var(--jr-glow), 0.1);
     }
     .tbox {
       flex: none;
@@ -5845,7 +6198,7 @@ class HubbubbRingCard extends LitElement {
       flex: none;
       width: 6px;
       margin: 0 9px 0 9px;
-      border-left: 1px solid rgba(53, 154, 210, 0.3);
+      border-left: 1px solid rgba(var(--jr-line), 0.3);
       cursor: col-resize;
       touch-action: none;
       transition: border-color 0.2s;
@@ -5868,7 +6221,7 @@ class HubbubbRingCard extends LitElement {
       flex: 0 0 min(44%, 600px);
       padding-left: 12px;
       margin-left: 12px;
-      border-left: 1px solid rgba(53, 154, 210, 0.3);
+      border-left: 1px solid rgba(var(--jr-line), 0.3);
     }
     .flink {
       color: var(--jr-color);
@@ -5904,7 +6257,7 @@ class HubbubbRingCard extends LitElement {
       display: flex;
     }
     .vline.hit {
-      background: rgba(46, 157, 245, 0.18);
+      background: rgba(var(--jr-glow), 0.18);
     }
     .vno {
       flex: none;
@@ -6003,13 +6356,13 @@ class HubbubbRingCard extends LitElement {
       flex-direction: row;
       background: var(
         --jr-panel-bg,
-        linear-gradient(160deg, rgba(10, 24, 32, 0.92), rgba(4, 10, 14, 0.96))
+        linear-gradient(160deg, rgba(var(--jr-glass-a), 0.92), rgba(var(--jr-glass-b), 0.96))
       );
-      border: 1px solid var(--jr-panel-border, rgba(53, 154, 210, 0.35));
+      border: 1px solid var(--jr-panel-border, rgba(var(--jr-line), 0.35));
       border-radius: 10px;
-      box-shadow: inset 0 0 28px rgba(46, 157, 245, 0.08);
+      box-shadow: inset 0 0 28px rgba(var(--jr-glow), 0.08);
       padding: 10px 12px;
-      color: var(--jr-panel-text, #cfe9f7);
+      color: var(--jr-panel-text, var(--jr-ink, #cfe9f7));
       font-family: "Avenir Next", "Segoe UI", Roboto, sans-serif;
       line-height: 1.4;
       text-align: left;
@@ -6021,7 +6374,7 @@ class HubbubbRingCard extends LitElement {
       gap: 8px;
       padding-bottom: 8px;
       margin-bottom: 8px;
-      border-bottom: 1px solid rgba(53, 154, 210, 0.3);
+      border-bottom: 1px solid rgba(var(--jr-line), 0.3);
       flex: none;
     }
     .ptitle {
@@ -6035,13 +6388,13 @@ class HubbubbRingCard extends LitElement {
       letter-spacing: 0.22em;
       text-transform: uppercase;
       color: var(--jr-color);
-      text-shadow: 0 0 8px rgba(46, 157, 245, 0.5);
+      text-shadow: 0 0 8px rgba(var(--jr-glow), 0.5);
     }
     .hbtn {
       flex: none;
-      background: rgba(46, 157, 245, 0.06);
-      border: 1px solid rgba(53, 154, 210, 0.45);
-      color: #bfe3f5;
+      background: rgba(var(--jr-glow), 0.06);
+      border: 1px solid rgba(var(--jr-line), 0.45);
+      color: var(--jr-ink-2, #bfe3f5);
       font-size: 11px;
       letter-spacing: 0.12em;
       text-transform: uppercase;
@@ -6051,8 +6404,8 @@ class HubbubbRingCard extends LitElement {
       font-family: inherit;
     }
     .hbtn:hover {
-      background: rgba(46, 157, 245, 0.18);
-      box-shadow: 0 0 10px rgba(46, 157, 245, 0.35);
+      background: rgba(var(--jr-glow), 0.18);
+      box-shadow: 0 0 10px rgba(var(--jr-glow), 0.35);
     }
     .hbtn.danger {
       border-color: rgba(255, 90, 100, 0.5);
@@ -6072,9 +6425,9 @@ class HubbubbRingCard extends LitElement {
     }
     .chip {
       background: none;
-      border: 1px solid rgba(53, 154, 210, 0.4);
+      border: 1px solid rgba(var(--jr-line), 0.4);
       border-radius: 4px;
-      color: #b8dff2;
+      color: var(--jr-ink-2, #b8dff2);
       font-size: 11.5px;
       padding: 4px 10px;
       cursor: pointer;
@@ -6082,7 +6435,7 @@ class HubbubbRingCard extends LitElement {
       letter-spacing: 0.05em;
     }
     .chip:hover {
-      background: rgba(46, 157, 245, 0.15);
+      background: rgba(var(--jr-glow), 0.15);
     }
     .list {
       flex: 1;
@@ -6096,7 +6449,7 @@ class HubbubbRingCard extends LitElement {
       width: 100%;
       background: none;
       border: none;
-      border-bottom: 1px solid rgba(53, 154, 210, 0.14);
+      border-bottom: 1px solid rgba(var(--jr-line), 0.14);
       padding: 8px 4px 8px 14px;
       cursor: pointer;
       color: inherit;
@@ -6104,7 +6457,7 @@ class HubbubbRingCard extends LitElement {
       text-align: left;
     }
     .row:hover {
-      background: rgba(46, 157, 245, 0.08);
+      background: rgba(var(--jr-glow), 0.08);
     }
     .dot {
       flex: none;
@@ -6177,8 +6530,8 @@ class HubbubbRingCard extends LitElement {
       letter-spacing: 0.08em;
       text-transform: uppercase;
       color: var(--jr-color);
-      background: rgba(46, 157, 245, 0.12);
-      border: 1px solid rgba(53, 154, 210, 0.35);
+      background: rgba(var(--jr-glow), 0.12);
+      border: 1px solid rgba(var(--jr-line), 0.35);
       border-radius: 999px;
       padding: 2px 8px;
       white-space: nowrap;
@@ -6257,8 +6610,8 @@ class HubbubbRingCard extends LitElement {
       gap: 8px;
       margin-bottom: 8px;
       padding: 9px 10px;
-      background: rgba(46, 157, 245, 0.06);
-      border: 1px solid rgba(53, 154, 210, 0.28);
+      background: rgba(var(--jr-glow), 0.06);
+      border: 1px solid rgba(var(--jr-line), 0.28);
       border-radius: 8px;
     }
     .drow {
@@ -6300,7 +6653,7 @@ class HubbubbRingCard extends LitElement {
       gap: 8px;
       padding: 2px 2px 8px;
       scrollbar-width: thin;
-      scrollbar-color: rgba(53, 154, 210, 0.4) transparent;
+      scrollbar-color: rgba(var(--jr-line), 0.4) transparent;
       overscroll-behavior: contain;
     }
     /* The page around us (the companion app's webview especially) turns
@@ -6336,8 +6689,8 @@ class HubbubbRingCard extends LitElement {
     }
     .msg.user {
       align-self: flex-end;
-      background: rgba(46, 157, 245, 0.12);
-      border: 1px solid rgba(53, 154, 210, 0.25);
+      background: rgba(var(--jr-glow), 0.12);
+      border: 1px solid rgba(var(--jr-line), 0.25);
       padding: 5px 9px;
       color: #a8d8f0;
     }
@@ -6457,7 +6810,7 @@ class HubbubbRingCard extends LitElement {
       opacity: 0.85;
       background: rgba(0, 0, 0, 0.35);
       padding: 8px;
-      border: 1px solid rgba(53, 154, 210, 0.18);
+      border: 1px solid rgba(var(--jr-line), 0.18);
     }
     /* Everything the terminal shows: what Claude thought, every tool call
        and every result. Tools and their output are full-width mono blocks —
@@ -6481,7 +6834,7 @@ class HubbubbRingCard extends LitElement {
       line-height: 1.45;
       padding: 5px 8px;
       background: rgba(0, 0, 0, 0.32);
-      border-left: 2px solid rgba(53, 154, 210, 0.35);
+      border-left: 2px solid rgba(var(--jr-line), 0.35);
       color: #9fb4c4;
     }
     .msg.tool {
@@ -6517,7 +6870,7 @@ class HubbubbRingCard extends LitElement {
       color: var(--jr-term-text, inherit);
       font-size: 0.92em;
       color: #8fd0ff;
-      background: rgba(46, 157, 245, 0.13);
+      background: rgba(var(--jr-glow), 0.13);
       border-radius: 3px;
       padding: 0 3px;
     }
@@ -6529,7 +6882,7 @@ class HubbubbRingCard extends LitElement {
       display: block;
       flex: none;
       padding-top: 8px;
-      border-top: 1px solid rgba(53, 154, 210, 0.3);
+      border-top: 1px solid rgba(var(--jr-line), 0.3);
     }
     /* The box owns the border and background; the textarea and the button row
        stack inside it. The buttons used to be positioned over the textarea,
@@ -6539,14 +6892,14 @@ class HubbubbRingCard extends LitElement {
       display: flex;
       flex-direction: column;
       background: rgba(0, 10, 16, 0.6);
-      border: 1px solid rgba(53, 154, 210, 0.4);
+      border: 1px solid rgba(var(--jr-line), 0.4);
       border-radius: 6px;
       overflow: hidden;
     }
     .cbox:focus-within,
     .composer.drag .cbox {
       border-color: var(--jr-color);
-      box-shadow: 0 0 10px rgba(46, 157, 245, 0.35);
+      box-shadow: 0 0 10px rgba(var(--jr-glow), 0.35);
     }
     .composer.drag .cbox {
       border-style: dashed;
@@ -6639,7 +6992,7 @@ class HubbubbRingCard extends LitElement {
       color: #e8eaed;
     }
     .runsel:hover:not(:disabled) {
-      border-color: rgba(46, 157, 245, 0.7);
+      border-color: rgba(var(--jr-glow), 0.7);
       color: #cfe9ff;
     }
     .runsel:disabled {
@@ -6656,7 +7009,7 @@ class HubbubbRingCard extends LitElement {
       text-transform: lowercase;
     }
     .runsel.mode-manual {
-      border-color: rgba(46, 157, 245, 0.55);
+      border-color: rgba(var(--jr-glow), 0.55);
       color: #9fd4ff;
     }
     .runsel.mode-auto {
@@ -6706,8 +7059,8 @@ class HubbubbRingCard extends LitElement {
       max-width: 100%;
       font-size: 11px;
       color: #d6edf9;
-      background: rgba(46, 157, 245, 0.12);
-      border: 1px solid rgba(53, 154, 210, 0.35);
+      background: rgba(var(--jr-glow), 0.12);
+      border: 1px solid rgba(var(--jr-line), 0.35);
       border-radius: 999px;
       padding: 3px 5px 3px 10px;
     }
@@ -6743,8 +7096,8 @@ class HubbubbRingCard extends LitElement {
       font-size: 11.5px;
       line-height: 1.5;
       color: rgba(150, 195, 220, 0.75);
-      background: rgba(53, 154, 210, 0.07);
-      border-left: 2px solid rgba(53, 154, 210, 0.4);
+      background: rgba(var(--jr-line), 0.07);
+      border-left: 2px solid rgba(var(--jr-line), 0.4);
       padding: 4px 9px;
     }
 
@@ -6762,8 +7115,8 @@ class HubbubbRingCard extends LitElement {
     }
     .qitem.sent {
       border-style: solid;
-      border-color: rgba(53, 154, 210, 0.35);
-      background: rgba(46, 157, 245, 0.1);
+      border-color: rgba(var(--jr-line), 0.35);
+      background: rgba(var(--jr-glow), 0.1);
       opacity: 0.75;
     }
     .qtext {
@@ -6885,7 +7238,7 @@ class HubbubbRingCard extends LitElement {
       text-transform: uppercase;
       padding: 2px 7px;
       border-radius: 999px;
-      background: rgba(46, 157, 245, 0.18);
+      background: rgba(var(--jr-glow), 0.18);
       color: #9fd4ff;
     }
     .askstep,
@@ -6936,7 +7289,7 @@ class HubbubbRingCard extends LitElement {
       gap: 8px;
       text-align: left;
       background: rgba(0, 10, 16, 0.6);
-      border: 1px solid rgba(53, 154, 210, 0.4);
+      border: 1px solid rgba(var(--jr-line), 0.4);
       color: #e4f4fd;
       font-family: inherit;
       font-size: 12.5px;
@@ -6982,7 +7335,7 @@ class HubbubbRingCard extends LitElement {
     }
     .askmini {
       background: none;
-      border: 1px solid rgba(53, 154, 210, 0.3);
+      border: 1px solid rgba(var(--jr-line), 0.3);
       color: rgba(160, 200, 220, 0.7);
       font-family: inherit;
       font-size: 11px;
@@ -7424,7 +7777,7 @@ const EDITOR_LABELS = {
   size: "Ring size (px)",
   background: "Card background",
   honeycomb: "Honeycomb background",
-  todos: "To-do lists on the main screen",
+  todos: "To-do button in the dock",
   todo_entities: "Which to-do lists (empty = all)",
   follow_media_player: "Animate while the device is playing audio",
   audio_offset: "Audio sync offset (seconds)",
