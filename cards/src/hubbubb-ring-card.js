@@ -29,7 +29,7 @@ import {
   widestGap,
 } from "./pack.js";
 
-const CARD_VERSION = "4.14.3";
+const CARD_VERSION = "4.14.4";
 
 const SATELLITE_DOMAIN = "assist_satellite";
 
@@ -5353,10 +5353,10 @@ class HubbubbRingCard extends LitElement {
         <button
           class="hbtn hex"
           data-ai="toggle-build-mode"
-          title="Exit build mode"
+          title="Back"
           @click=${() => this._setBuild(false)}
         >
-          <svg viewBox="0 0 24 24"><path d="M12 2l8.66 5v10L12 22l-8.66-5V7L12 2z" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8.5 12h7M12 8.5v7" stroke="currentColor" stroke-width="1.5"/></svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5.5M11 6l-6 6 6 6"/></svg>
         </button>
         <span class="ptitle">${this._name} Agents</span>
         <button
@@ -5716,10 +5716,10 @@ class HubbubbRingCard extends LitElement {
             ? html`<button
             class="mode ${build ? "on" : ""}"
             data-ai="toggle-build-mode"
-            title="Build mode"
+            title=${build ? "Back" : "Build mode"}
             @click=${() => this._setBuild(!build)}
           >
-            <svg viewBox="0 0 24 24"><path d="M12 2l8.66 5v10L12 22l-8.66-5V7L12 2z" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8.5 12h7M12 8.5v7" stroke="currentColor" stroke-width="1.5"/></svg>
+            ${build ? html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5.5M11 6l-6 6 6 6"/></svg>` : html`<svg viewBox="0 0 24 24"><path d="M12 2l8.66 5v10L12 22l-8.66-5V7L12 2z" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8.5 12h7M12 8.5v7" stroke="currentColor" stroke-width="1.5"/></svg>`}
           </button>`
             : nothing}
           ${announce === null
@@ -6224,7 +6224,9 @@ class HubbubbRingCard extends LitElement {
     .sheet.review {
       position: fixed;
       z-index: 9;
-      padding: 16px;
+      /* below the phone's status bar and notch and HA's own header, so the
+         close button is reachable */
+      padding: calc(env(safe-area-inset-top, 0px) + 64px) 12px calc(env(safe-area-inset-bottom, 0px) + 12px);
       box-sizing: border-box;
       background: rgba(0, 0, 0, 0.72);
     }
@@ -6264,10 +6266,12 @@ class HubbubbRingCard extends LitElement {
       background: none;
       border: none;
       color: inherit;
-      font-size: 22px;
+      font-size: 26px;
       line-height: 1;
       cursor: pointer;
-      padding: 4px 6px;
+      min-width: 44px;
+      min-height: 44px;
+      margin: -10px -10px -10px 0;
     }
     .sheet input {
       margin: 4px 14px 8px;
