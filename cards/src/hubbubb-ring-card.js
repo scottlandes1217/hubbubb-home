@@ -28,7 +28,7 @@ import {
   widestGap,
 } from "./pack.js";
 
-const CARD_VERSION = "4.13.4";
+const CARD_VERSION = "4.13.5";
 
 const SATELLITE_DOMAIN = "assist_satellite";
 
@@ -973,33 +973,19 @@ class HubbubbRingCard extends LitElement {
       language: cfg.language,
       ...(cfg.voice ? { options: { voice: cfg.voice } } : {}),
     });
-    return res?.url || res?.path || null;
+    /* `path` first: it is relative, so it resolves against whatever address
+       this screen reached HA through. `url` is built from HA's internal_url
+       (http://192.168.1.62) - from a phone on the Nabu Casa https address
+       that is mixed content, the fetch is blocked, and the line went to the
+       puck instead of the phone. */
+    return res?.path || res?.url || null;
   }
 
   async _speakHere(text) {
     const hass = this._hass;
     if (!hass || !text) return;
     try {
-      if (!this._ttsCfg) {
-        const list = await hass.callWS({ type: "assist_pipeline/pipeline/list" });
-        const pipes = list?.pipelines || [];
-        const pick =
-          pipes.find((p) => p.id === list.preferred_pipeline) || pipes[0];
-        if (!pick?.tts_engine) return;
-        this._ttsCfg = {
-          engine_id: pick.tts_engine,
-          language: pick.tts_language,
-          voice: pick.tts_voice,
-        };
-      }
-      const cfg = this._ttsCfg;
-      const res = await hass.callApi("POST", "tts_get_url", {
-        engine_id: cfg.engine_id,
-        message: text,
-        language: cfg.language,
-        ...(cfg.voice ? { options: { voice: cfg.voice } } : {}),
-      });
-      const url = res?.url || res?.path;
+      const url = await this._ttsUrl(text);
       if (!url) return;
 
       /* Fetch the bytes and play a blob rather than pointing the element at the
@@ -5002,7 +4988,10 @@ class HubbubbRingCard extends LitElement {
     el.src = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=";
     el.play().catch(() => {});
     const here = this._hasSpeaker().then((ok) => {
-      if (!ok) return null;
+      if (!ok) {
+        this._toast("Speaking on the puck: this screen has no speaker.");
+        return null;
+      }
       const all = lines.map(([, text]) => this._fetchSpeech(text));
       all.forEach((p) => p.catch(() => {})); // a failure is handled at its turn
       return all;
@@ -5024,6 +5013,7 @@ class HubbubbRingCard extends LitElement {
             continue;
           } catch (e) {
             fetched = null; // no sound out of this screen: the puck takes over
+            this._toast(`Speaking on the puck: this screen could not play it (${e?.name || e?.message || "error"}).`);
           }
         }
         try {
