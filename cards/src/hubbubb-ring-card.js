@@ -29,7 +29,7 @@ import {
   widestGap,
 } from "./pack.js";
 
-const CARD_VERSION = "4.14.4";
+const CARD_VERSION = "4.14.5";
 
 const SATELLITE_DOMAIN = "assist_satellite";
 
@@ -5350,14 +5350,7 @@ class HubbubbRingCard extends LitElement {
     const sessions = this._sessions;
     return html`
       <div class="phead">
-        <button
-          class="hbtn hex"
-          data-ai="toggle-build-mode"
-          title="Back"
-          @click=${() => this._setBuild(false)}
-        >
-          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5.5M11 6l-6 6 6 6"/></svg>
-        </button>
+        <button class="hbtn back" data-ai="toggle-build-mode" title="Back" @click=${() => this._setBuild(false)}>‹</button>
         <span class="ptitle">${this._name} Agents</span>
         <button
           class="hbtn"
@@ -5719,7 +5712,7 @@ class HubbubbRingCard extends LitElement {
             title=${build ? "Back" : "Build mode"}
             @click=${() => this._setBuild(!build)}
           >
-            ${build ? html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M19 12H5.5M11 6l-6 6 6 6"/></svg>` : html`<svg viewBox="0 0 24 24"><path d="M12 2l8.66 5v10L12 22l-8.66-5V7L12 2z" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8.5 12h7M12 8.5v7" stroke="currentColor" stroke-width="1.5"/></svg>`}
+            ${build ? html`<span class="mode-back">‹</span>` : html`<svg viewBox="0 0 24 24"><path d="M12 2l8.66 5v10L12 22l-8.66-5V7L12 2z" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8.5 12h7M12 8.5v7" stroke="currentColor" stroke-width="1.5"/></svg>`}
           </button>`
             : nothing}
           ${announce === null
@@ -6449,6 +6442,12 @@ class HubbubbRingCard extends LitElement {
       display: block;
       padding: 3px 0;
       font-size: 13px;
+    }
+    .mode-back {
+      display: block;
+      font-size: 24px;
+      line-height: 20px;
+      text-align: center;
     }
     .mode {
       position: absolute;
