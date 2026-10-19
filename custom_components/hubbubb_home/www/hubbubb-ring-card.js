@@ -2116,21 +2116,25 @@ var wi=Object.defineProperty,xi=Object.defineProperties;var yi=Object.getOwnProp
       min-width: 0;
       margin-right: 10px;
     }
+    /* Bare red square, no border or padding to speak of: on a phone the
+       model picker needs the width more than the stop needs a frame. */
     .hbtn.stop {
-      border-color: rgba(255, 92, 92, 0.6);
+      border-color: transparent;
+      background: transparent;
+      padding: 4px;
       flex: 0 0 auto;
       display: inline-flex;
       align-items: center;
       justify-content: center;
     }
     .hbtn.stop i {
-      width: 11px;
-      height: 11px;
+      width: 9px;
+      height: 9px;
       border-radius: 2px;
       background: #ff4d4d;
     }
     .hbtn.stop:hover {
-      border-color: #ff5c5c;
+      border-color: transparent;
     }
     .hbtn.stop:hover i {
       background: #ff7070;
