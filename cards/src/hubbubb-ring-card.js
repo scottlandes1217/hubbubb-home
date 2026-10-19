@@ -31,7 +31,7 @@ import {
   widestGap,
 } from "./pack.js";
 
-const CARD_VERSION = "4.16.0";
+const CARD_VERSION = "4.17.0";
 
 const SATELLITE_DOMAIN = "assist_satellite";
 
@@ -287,31 +287,17 @@ const RIBBONS = [
   { r: 0.875, amp: 0.09, thick: 0.008, rev: 1, share: 0.28, glow: 1.4 },
 ];
 
-/* jarvis-im3: the Iron Man 3 second-screen JARVIS. Each band is a ribbon of
-   fine dots with a twist that varies round the ring: where the ribbon turns
-   edge-on its dots crowd into a bright crease, where it faces you they spread
-   into mist. At rest the twist is near zero - two clean bands with bright
-   edges. Speech drives the twist and a few broad lobes, each sheet on its own
-   phases, so the sheets fold, separate and cross the way the film's do. The
-   brightness is density (additive dots), not a per-dot alpha rule. */
-// rows: the film is threads of dots running round the band, not a cloud -
-// that is its mesh look, and twisting it draws the threads into the creases
-// the film's two bands with a dark gap between, and a hairline inside them
+/* Fine mesh annuli. Width is projected through a twist, so threads gather
+   into luminous creases instead of drawing an opaque, rubbery band. Leave
+   room outside the resting radius for speech and the start-up burst. */
 const SHEETS = [
-  { r: 0.915, w: 0.045, share: 0.5, dir: 1, rows: 9 },
-  { r: 0.83, w: 0.022, share: 0.35, dir: -1, rows: 5 },
-  { r: 0.795, w: 0.004, share: 0.15, dir: 1, rows: 2 },
+  { r: 0.855, w: 0.057, share: 0.58, dir: 1, rows: 17 },
+  { r: 0.785, w: 0.026, share: 0.35, dir: -1, rows: 9 },
+  { r: 0.73, w: 0.003, share: 0.07, dir: 1, rows: 2 },
 ];
 const SHEET_BINS = 360;
-/* The film talks syllable by syllable: each one snaps the ring into a fresh
-   crumple - a new random set of lobes and twists - and it relaxes back to a
-   clean circle in the gaps between words. Frame by frame at 24fps the film
-   goes crumpled, clean, crumpled, clean several times a second. */
-// mostly short lobes: the film dents and kinks locally rather than going oval
-const LOBE_KS = [3, 4, 5, 6, 7, 9, 11, 13];
-const TWIST_MS = [1, 2, 3, 4, 5, 7];
-// dots per sheet row round the ring: a grid, so the band shows the film's
-// fine radial striations as well as its threads
+const LOBE_KS = [3, 4, 5, 7, 9, 12];
+const TWIST_MS = [2, 3, 5, 7];
 const SHEET_COLS = 900;
 /* The film's introduction, in seconds, choreographed to its lines: the ring
    bursts in, the name assembles, each feature's icon shows in the ring and
@@ -432,6 +418,7 @@ const parseColor = (c) => {
 
 class HubbubbRingCard extends LitElement {
   static build = BUILD;
+  static version = CARD_VERSION;
 
   static properties = {
     _config: { state: true },
@@ -1043,16 +1030,20 @@ class HubbubbRingCard extends LitElement {
         const buf = await audioRes.arrayBuffer();
         this._speechBlob = URL.createObjectURL(new Blob([buf], { type: "audio/mpeg" }));
         el.src = this._speechBlob;
+        this._trackSpeech(el, this._speechBlob, buf);
       } catch (e) {
+        this._trackSpeech(el, url);
         el.src = url; // better a stalled element than no attempt at all
       }
-      el.onended = () => {
+      el.onended = el.onerror = () => {
+        this._releaseSpeech(el);
         if (this._speechBlob) {
           URL.revokeObjectURL(this._speechBlob);
           this._speechBlob = null;
         }
       };
       await el.play().catch(() => {
+        el.onended();
         this._toast("Tap anywhere to let it speak here.");
       });
     } catch (e) {
@@ -2579,10 +2570,7 @@ class HubbubbRingCard extends LitElement {
            output, but routing it through an AudioContext silences playback
            on iOS whenever the context will not resume — not a trade worth
            making for his actual voice.) */
-        this._envEl = v.audio;
-        this._envUrl = url;
-        this._env = null;
-        this._decodeAudio(url);
+        this._trackSpeech(v.audio, url);
         v.audio.src = url;
         v.audio.play().catch(() => this._stopLocalVoice());
         break;
@@ -2857,7 +2845,7 @@ class HubbubbRingCard extends LitElement {
      field, so the adaptive-quality prefix keeps every sheet's share. */
   _buildSheetField() {
     const configured = Number(this._config?.particles) || 0;
-    // the surface and threads carry the film now; dots are only its grain
+    // Stable grains lie on the same mesh that the threads trace.
     const auto = clamp(Math.round((this._w || 240) * 28), 5000, 12000);
     const count = Math.max(400, configured > 0 ? clamp(configured, 0, 26000) : auto);
     const rand = seeded(0x1a3e);
@@ -2870,7 +2858,7 @@ class HubbubbRingCard extends LitElement {
       const rows = SHEETS[si].rows;
       const row = Math.floor(rand() * rows);
       let v = rows > 1 ? -1 + (2 * row) / (rows - 1) : 0;
-      v += (rand() - 0.5) * 0.025;
+      v += (rand() - 0.5) * 0.012;
       p[i] = {
         si,
         th: (Math.floor(rand() * SHEET_COLS) / SHEET_COLS) * Math.PI * 2,
@@ -2886,93 +2874,68 @@ class HubbubbRingCard extends LitElement {
     this._particles = p;
   }
 
-  /* Per frame, per sheet: the centre-line radius and the signed half-width
-     (w * cos twist) round the ring, sampled into bins so a dot costs one
-     lookup. `env` is the voice; `burst` the start-up's turbulence. */
+  /* All layers sample in the sheet's local coordinates, then rotate once.
+     Previously the grains sampled after rotation while the film sampled
+     before it; the two surfaces drifted apart as the animation ran. */
+  _sheetPoint(st, angle, v, rotation, out) {
+    const u = ((angle / (2 * Math.PI)) % 1 + 1) % 1 * SHEET_BINS;
+    const b = Math.floor(u), n = (b + 1) % SHEET_BINS, f = u - b;
+    const mix = (a) => a[b] + (a[n] - a[b]) * f;
+    const r = mix(st.rc) + v * mix(st.cw);
+    const shear = v * mix(st.skew);
+    const th = angle + rotation;
+    out[0] = r * Math.cos(th) - shear * Math.sin(th);
+    out[1] = r * Math.sin(th) + shear * Math.cos(th);
+    return out;
+  }
+
   _sheetTables(dt, cur, burst) {
-    const rand = Math.random;
-    const shape = () => ({
-      // kinks: a rough, lightly smoothed random edge, so the outline creases
-      // instead of waving
-      jag: (() => {
-        const n = new Float32Array(SHEET_BINS);
-        for (let b = 0; b < SHEET_BINS; b++) n[b] = rand() * 2 - 1;
-        const o = new Float32Array(SHEET_BINS);
-        for (let b = 0; b < SHEET_BINS; b++)
-          o[b] = (n[(b + SHEET_BINS - 2) % SHEET_BINS] + 2 * n[(b + SHEET_BINS - 1) % SHEET_BINS] + 3 * n[b] + 2 * n[(b + 1) % SHEET_BINS] + n[(b + 2) % SHEET_BINS]) / 9;
-        return Array.from(o);
-      })(),
-      la: LOBE_KS.map((k) => ((rand() * 2 - 1) * (0.4 + rand() * 0.6)) / Math.sqrt(k)),
-      lp: LOBE_KS.map(() => rand() * 6.283),
-      ta: TWIST_MS.map((m) => ((rand() * 2 - 1) * (0.5 + rand() * 0.5)) / Math.sqrt(m)),
-      tp: TWIST_MS.map(() => rand() * 6.283),
-    });
-    // where a sheet is between its last shape and its next
-    const mixed = (st) => {
-      const m = st.m >= 1 ? 1 : st.m * st.m * (3 - 2 * st.m);
-      const f = (k) => st.a[k].map((v, i) => v + (st.b[k][i] - v) * m);
-      return { jag: f("jag"), la: f("la"), lp: f("lp"), ta: f("ta"), tp: f("tp") };
-    };
     if (!this._sheetState) {
-      this._sheetState = SHEETS.map(() => {
-        const a = shape();
-        return { a, b: a, m: 1, rc: new Float32Array(SHEET_BINS), cw: new Float32Array(SHEET_BINS) };
-      });
+      const rand = seeded(0x1a3e);
+      this._sheetRand = rand;
+      this._sheetState = SHEETS.map(() => ({
+        phase: Array.from({ length: 10 }, () => rand() * Math.PI * 2),
+        target: Array.from({ length: 10 }, () => rand() * Math.PI * 2),
+        rc: new Float32Array(SHEET_BINS),
+        cw: new Float32Array(SHEET_BINS),
+        skew: new Float32Array(SHEET_BINS),
+      }));
       this._crumple = 0;
-      this._reseed = 0;
     }
-    /* Crumple follows the loudness of the syllable being spoken - up on the
-       vowel, clean again in the gap - and while it is up the shape keeps
-       re-rolling about ten times a second, blended over a few frames so it
-       reads as the film churning rather than jitter. */
     const sp = this._speech;
-    let c = 0;
-    if (sp && cur.speech > 0.05) {
-      if (sp.live) c = sp.env;
-      else if (sp.syl) {
-        const u = (sp.t - sp.syl.start) / sp.syl.dur;
-        if (u >= 0 && u <= 1) c = sp.syl.peak * Math.pow(Math.sin(Math.PI * u), 0.6);
-      }
-      c *= cur.speech * 1.25;
+    const voice = (sp?.env || 0) * cur.speech;
+    const want = Math.max(burst, Math.min(1, voice * 1.35));
+    const tau = want > this._crumple ? 0.012 : 0.045;
+    this._crumple += (want - this._crumple) * (1 - Math.exp(-dt / tau));
+    // Only a real syllable onset chooses a new fold. Between onsets the same
+    // fabric travels continuously; no unrelated timer invents extra words.
+    if (sp && sp.count !== this._sheetSyllable && voice > 0.05) {
+      this._sheetSyllable = sp.count;
+      for (const st of this._sheetState)
+        st.target = st.phase.map((v) => v + (this._sheetRand() - 0.5) * 2.6);
     }
-    c = Math.max(c, burst);
-    // soft rise and a slower fall: the film eases into a fold and out of it
-    const tau = c > this._crumple ? 0.08 : 0.2;
-    this._crumple += (c - this._crumple) * (1 - Math.exp(-dt / tau));
-    // the folds glide round the ring, faster while he is loud
-    this._flowT = (this._flowT || 0) + dt * (0.25 + this._crumple * 2.2);
-    this._reseed -= dt;
-    if (this._crumple > 0.15 && this._reseed <= 0) {
-      for (const st of this._sheetState) {
-        st.a = mixed(st);
-        st.b = shape();
-        st.m = 0;
-      }
-      this._reseed = 0.22 + rand() * 0.12;
-    }
+    this._flowT = (this._flowT || 0) + dt * (0.12 + this._crumple * 0.9);
     const k = Math.min(1.2, this._crumple);
-    // never a perfect circle: the film's bands are softly lumpy even at rest
-    const lobeA = 0.007 + k * 0.045;
-    const twistA = 0.4 + k * 1.5;
     const ft = this._flowT;
-    const breathe = 0.005 * Math.sin(this._t * 0.35);
-    const ts = this._t * 0.15; // the faintest drift at rest, so it is never frozen
     for (let si = 0; si < SHEETS.length; si++) {
-      const sh = SHEETS[si];
-      const st = this._sheetState[si];
-      st.m = Math.min(1, st.m + dt / 0.2);
-      const S = mixed(st);
-      const la = lobeA * (si === 2 ? 0.5 : 1);
-      const ta = twistA * (si === 2 ? 0.35 : 1);
+      const sh = SHEETS[si], st = this._sheetState[si];
+      const follow = 1 - Math.exp(-dt / 0.055);
+      for (let i = 0; i < st.phase.length; i++)
+        st.phase[i] += (st.target[i] - st.phase[i]) * follow;
+      const strength = si === 2 ? 0.25 : 1;
       for (let b = 0; b < SHEET_BINS; b++) {
-        const th = (b / SHEET_BINS) * 6.283185;
-        let lobe = 0;
-        const dir = si === 1 ? -1 : 1; // the sheets' folds run opposite ways
-        for (let i = 0; i < LOBE_KS.length; i++) lobe += S.la[i] * Math.sin(LOBE_KS[i] * th + S.lp[i] + dir * ft * (1 + 0.15 * i));
-        let tw = 0.25 * Math.sin(2 * th + ts + si);
-        for (let i = 0; i < TWIST_MS.length; i++) tw += S.ta[i] * Math.sin(TWIST_MS[i] * th + S.tp[i] - dir * ft * (0.8 + 0.2 * i));
-        st.rc[b] = sh.r + breathe + k * 0.008 + la * lobe + S.jag[b] * k * 0.006;
-        st.cw[b] = sh.w * (1 + k * 0.3) * Math.cos(tw * ta);
+        const th = b / SHEET_BINS * Math.PI * 2;
+        let lobe = 0, twist = 0;
+        for (let i = 0; i < LOBE_KS.length; i++)
+          lobe += Math.sin(LOBE_KS[i] * th + st.phase[i] + sh.dir * ft * (0.4 + i * 0.08)) / (2.4 + i * 1.1);
+        for (let i = 0; i < TWIST_MS.length; i++)
+          twist += Math.sin(TWIST_MS[i] * th + st.phase[i + 6] - sh.dir * ft * 0.7) / (1.5 + i);
+        const fold = twist * (0.18 + k * 3.1) * strength;
+        const flutter = Math.sin(th * 23 + st.phase[0] + ft) * Math.sin(th * 11 - ft);
+        st.rc[b] = sh.r + (0.0025 + k * 0.05) * lobe * strength
+          + k * 0.003 * flutter * strength;
+        st.cw[b] = sh.w * (1 + k * 0.15) * Math.cos(fold);
+        st.skew[b] = sh.w * Math.sin(fold) * 0.42;
       }
     }
     return this._sheetState;
@@ -2984,14 +2947,22 @@ class HubbubbRingCard extends LitElement {
      Instead: fetch the exact file HA is playing, decode it once, keep an
      RMS envelope at ENV_HZ, and read that envelope at the player's own
      reported position — so the motes move with the real waveform. Anything
-     missing (no URL, cross-origin, an undecodable codec) falls back to the
-     synthetic generator below without a word. */
+     missing (no URL, cross-origin, an undecodable codec) leaves IM3 ambient;
+     the older styles retain their synthetic speech fallback. */
   _audioSync(st) {
+    // Satellite state updates must never erase this browser's waveform.
+    if (this._envEl) return;
     if (!st || st.state !== "playing") {
-      this._env = null;
-      this._envUrl = null;
+      // Keep the prefetched reply through the processing -> playing gap.
+      if (this._remotePlaying || !["processing", "responding"].includes(this._state)) {
+        this._env = null;
+        this._envUrl = null;
+        this._decodePending = false;
+      }
+      this._remotePlaying = false;
       return;
     }
+    this._remotePlaying = true;
     const a = st.attributes || {};
     const raw = String(a.media_content_id || "");
     // playable as-is: absolute, or a path on this same HA (tts_proxy, /local)
@@ -3044,7 +3015,7 @@ class HubbubbRingCard extends LitElement {
      ran through a pipeline — just leaves the synthetic generator in place. */
   async _grabTtsUrl() {
     const hass = this._hass;
-    if (!hass?.connection || this._grabbing) return;
+    if (!hass?.connection || this._grabbing || this._envEl) return;
     this._grabbing = true;
     try {
       const pipeline_id = await this._pipelineId(hass);
@@ -3071,6 +3042,7 @@ class HubbubbRingCard extends LitElement {
             const url =
               events[i]?.type === "tts-end" && events[i]?.data?.tts_output?.url;
             if (url) {
+              if (this._envEl) return;
               this._envUrl = url;
               this._env = null;
               await this._decodeAudio(url);
@@ -3088,18 +3060,45 @@ class HubbubbRingCard extends LitElement {
     }
   }
 
-  async _decodeAudio(url) {
+  async _decodeAudio(url, bytes) {
+    const request = this._decodeRequest = (this._decodeRequest || 0) + 1;
+    const current = () => request === this._decodeRequest && url === this._envUrl;
+    this._decodePending = true;
     try {
-      const buf = await (await fetch(url)).arrayBuffer();
+      if (!bytes) {
+        const response = await fetch(url);
+        if (!response.ok) throw new Error("audio fetch");
+        bytes = await response.arrayBuffer();
+      }
       const AC = window.AudioContext || window.webkitAudioContext;
       if (!AC) return;
       const actx = this._actx || (this._actx = new AC());
-      const audio = await actx.decodeAudioData(buf);
-      if (url !== this._envUrl) return; // playback moved on while decoding
-      this._env = rmsEnvelope(audio.getChannelData(0), audio.sampleRate, ENV_HZ);
+      const audio = await actx.decodeAudioData(bytes);
+      if (current()) this._env = rmsEnvelope(audio.getChannelData(0), audio.sampleRate, ENV_HZ);
     } catch {
-      this._env = null; // unreachable, cross-origin or undecodable
+      // An older request failing must not wipe a newer reply's waveform.
+      if (current()) this._env = null;
+    } finally {
+      if (current()) this._decodePending = false;
     }
+  }
+
+  _trackSpeech(el, url, bytes) {
+    this._envEl = el;
+    this._envUrl = url;
+    this._env = null;
+    this._voiceState = "responding";
+    this._decodeAudio(url, bytes);
+  }
+
+  _releaseSpeech(el) {
+    if (this._envEl !== el) return;
+    this._envEl = null;
+    this._envUrl = null;
+    this._env = null;
+    this._decodePending = false;
+    this._decodeRequest = (this._decodeRequest || 0) + 1;
+    if (!this._voice) this._voiceState = null;
   }
 
   /* Loudness right now, 0-1, or null when no decoded audio is playing.
@@ -3118,10 +3117,11 @@ class HubbubbRingCard extends LitElement {
       // nothing has left the speaker yet: silence we KNOW about, whether or
       // not the decode landed. Only once samples are flowing does a missing
       // envelope mean "no idea" and hand over to the generator.
-      if (!el.currentTime) return 0;
-      return env ? sample(env, el.currentTime) : null;
+      if (!el.currentTime || el.paused || el.ended || el.readyState < 3) return 0;
+      return env ? sample(env, el.currentTime) : this._decodePending ? 0 : null;
     }
-    if (!env || this._mp !== "playing") return null;
+    if (this._mp !== "playing") return null;
+    if (!env) return this._decodePending ? 0 : null;
     const t =
       this._envPos +
       (Date.now() - this._envAt) / 1000 +
@@ -3173,21 +3173,30 @@ class HubbubbRingCard extends LitElement {
        as a syllable onset, so the crests fire on the actual consonants. */
     const live = this._audioLevel();
     if (live != null) {
-      if (live > 0.2 && live > (sp.last || 0) * 1.4) {
+      if (live > 0.16 && live - (sp.last || 0) > 0.055 && sp.t - (sp.onsetAt ?? -1) > 0.09) {
         sp.count++;
+        sp.onsetAt = sp.t;
         sp.syl = { start: sp.t, dur: 0.22, peak: live, f: 5 + live * 4 };
         this._sylShapes(live, 0.22);
       }
       sp.last = live;
       sp.live = true;
       // the envelope IS the signal here, so barely smooth it
-      const tauL = live > sp.env ? 0.05 : 0.14;
+      const tauL = this._config.animation === "jarvis-im3"
+        ? (live > sp.env ? 0.012 : 0.05) : (live > sp.env ? 0.05 : 0.14);
       sp.env += (live - sp.env) * (1 - Math.exp(-dt / tauL));
       if (sp.env > 1) sp.env = 1;
       return;
     }
 
     sp.live = false;
+    // Without a waveform IM3 stays gently alive instead of pretending random
+    // pulses are synced speech. Other animation styles retain their fallback.
+    if (this._config.animation === "jarvis-im3") {
+      sp.env *= Math.exp(-dt / 0.06);
+      sp.last = 0;
+      return;
+    }
     if (sp.t >= sp.next) {
       const dur = 0.22 + Math.random() * 0.26;
       const peak = 0.5 + Math.random() * 0.5;
@@ -4196,7 +4205,9 @@ class HubbubbRingCard extends LitElement {
     const kOff = 1 - Math.exp(-dt / 0.16);
     const cur = this._cur;
     for (const key of Object.keys(energy)) {
-      const rate = key === "speech" && energy[key] < cur[key] ? kOff : k;
+      const rate = key === "speech" && im3
+        ? 1 - Math.exp(-dt / (energy[key] > cur[key] ? 0.025 : 0.055))
+        : key === "speech" && energy[key] < cur[key] ? kOff : k;
       cur[key] += (energy[key] - cur[key]) * rate;
     }
     for (let i = 0; i < 3; i++) this._rgb[i] += (rgb[i] - this._rgb[i]) * k;
@@ -4223,7 +4234,7 @@ class HubbubbRingCard extends LitElement {
       0.5 * Math.sin(sp.t * 0.5 + 0.8 * Math.sin(sp.t * 0.21));
     // real audio needs no help from the idle flow term — let it dominate
     const m = sp.live ? 0.88 : 0.62;
-    const env = (m * sp.env + (1 - m) * flow) * cur.speech;
+    const env = (im3 ? sp.env : m * sp.env + (1 - m) * flow) * cur.speech;
     const chopF = this._speech.syl ? this._speech.syl.f : 11;
     /* Per-mote churn runs on its own clock so speeding it up (busy state, loud
        syllable) never jumps the phase the way scaling `t` inline would. */
@@ -4578,23 +4589,19 @@ class HubbubbRingCard extends LitElement {
     const szMul = (Number(this._config.particle_size) || 1) * clamp(half / 200, 0.7, 1.8) * (1 + (1 - q) * 0.4);
     const aMul = (cur.bright / 1.6) * (1 + (1 - q) * 0.7);
     let nm = 0;
+    const point = this._sheetScratch || (this._sheetScratch = [0, 0]);
     for (let i = 0; i < nDraw; i++) {
       const p = all[i];
       const sh = SHEETS[p.si];
       const st = sheets[p.si];
-      let th = p.th + rot * sh.dir + p.dr * t;
-      let u = (th * 0.15915494) % 1;
-      if (u < 0) u += 1;
-      const b = (u * SHEET_BINS) | 0;
-      const rf = st.rc[b] + p.v * st.cw[b] + p.n * 0.005 + 0.002 * Math.sin(t * p.tw + p.ph);
-      const r = rf * half;
-      MX[nm] = cx + r * Math.cos(th);
-      MY[nm] = cy + r * Math.sin(th);
-      MR[nm] = p.sz * szMul * 0.8;
+      this._sheetPoint(st, p.th, p.v, rot * sh.dir, point);
+      MX[nm] = cx + point[0] * half;
+      MY[nm] = cy + point[1] * half;
+      MR[nm] = Math.max(0.22, p.sz * szMul * 0.68);
       // rims and the thin inner ring read as lines; the film between is mist
       const av = Math.abs(p.v);
       const edge = av > 0.9 && av < 1.1 ? 1.6 : 1;
-      const a = p.br * aMul * edge * (p.si === 2 ? 0.22 : 0.17) * (0.75 + 0.25 * Math.sin(t * p.tw * 0.7 + p.ph));
+      const a = p.br * aMul * edge * (p.si === 2 ? 0.16 : 0.48) * (0.75 + 0.25 * Math.sin(t * p.tw * 0.7 + p.ph));
       MB[nm++] = Math.min(MOTE_ALPHAS - 1, (clamp(a, 0, 1) * MOTE_ALPHAS) | 0);
     }
     const base = ctx.globalAlpha;
@@ -4617,79 +4624,54 @@ class HubbubbRingCard extends LitElement {
     ctx.globalAlpha = base;
   }
 
-  /* The film itself. Each sheet is a ribbon: quads between its two edges,
-     filled brighter the more edge-on the ribbon is turned there (narrow =
-     looking along it = more film in the line of sight), so folds glow on
-     their own. Thin threads run along its rows on top - the film's mesh. */
+  /* Open gauze, not a filled ribbon: concentric filaments and fine diagonal
+     stitches. Additive crossings light the folds without filling the gaps.
+     Every filament and grain uses the same projected surface. */
   _drawSheetFilm(ctx, cx, cy, half, cur, sheets, R, G, B) {
     const base = ctx.globalAlpha;
     const rot = this._spin * 0.35;
     const N = SHEET_BINS;
-    const NB = 10;
     const bright = cur.bright / 1.6;
-    if (!this._fcos || this._fcos.length !== N + 1) {
-      this._fcos = new Float32Array(N + 1);
-      this._fsin = new Float32Array(N + 1);
-    }
+    const point = this._sheetScratch || (this._sheetScratch = [0, 0]);
     ctx.globalCompositeOperation = "lighter";
-    ctx.fillStyle = `rgb(${R},${G},${B})`;
     ctx.strokeStyle = `rgb(${R},${G},${B})`;
     for (let si = 0; si < SHEETS.length; si++) {
-      const sh = SHEETS[si];
-      const st = sheets[si];
+      const sh = SHEETS[si], st = sheets[si];
       const a0 = rot * sh.dir;
-      const C = this._fcos, S = this._fsin;
-      for (let k = 0; k <= N; k++) {
-        const th = (k / N) * 6.283185 + a0;
-        C[k] = Math.cos(th);
-        S[k] = Math.sin(th);
-      }
-      // surface, bucketed by brightness
-      for (let bk = 0; bk < NB; bk++) {
+      const plot = (th, v, move) => {
+        this._sheetPoint(st, th, v, a0, point);
+        const x = cx + point[0] * half, y = cy + point[1] * half;
+        if (move) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+      };
+      for (let row = 0; row < sh.rows; row++) {
+        const v = -1 + 2 * row / (sh.rows - 1);
+        const rim = row === 0 || row === sh.rows - 1;
         ctx.beginPath();
-        let any = false;
-        for (let k = 0; k < N; k++) {
-          const b = k, b2 = (k + 1) % N;
-          const face = Math.abs(st.cw[b]) / sh.w; // 1 face-on, 0 edge-on
-          let a = 0.16 + 0.11 / (face + 0.18);
-          if (a > 0.9) a = 0.9;
-          if (Math.min(NB - 1, ((a / 0.9) * NB) | 0) !== bk) continue;
-          const r1 = (st.rc[b] - st.cw[b]) * half, r2 = (st.rc[b] + st.cw[b]) * half;
-          const r3 = (st.rc[b2] + st.cw[b2]) * half, r4 = (st.rc[b2] - st.cw[b2]) * half;
-          ctx.moveTo(cx + r1 * C[k], cy + r1 * S[k]);
-          ctx.lineTo(cx + r2 * C[k], cy + r2 * S[k]);
-          ctx.lineTo(cx + r3 * C[k + 1], cy + r3 * S[k + 1]);
-          ctx.lineTo(cx + r4 * C[k + 1], cy + r4 * S[k + 1]);
-          ctx.closePath();
-          any = true;
-        }
-        if (!any) continue;
-        ctx.globalAlpha = base * bright * (bk + 0.5) * (0.9 / NB) * (si === 2 ? 0.5 : 0.75);
-        ctx.fill();
-      }
-      // threads: every row, the rims brightest
-      // the rims glow first (a wide faint stroke), then get a crisp line -
-      // the film's edges are lit glass, not dotted
-      const rows = sh.rows;
-      const thin = Math.max(0.5, half * 0.0028);
-      for (let ri = 0; ri < rows; ri++) {
-        const v = rows > 1 ? -1 + (2 * ri) / (rows - 1) : 0;
-        const rim = ri === 0 || ri === rows - 1;
-        ctx.beginPath();
-        for (let k = 0; k <= N; k++) {
-          const b = k % N;
-          const r = (st.rc[b] + v * st.cw[b]) * half;
-          k ? ctx.lineTo(cx + r * C[k], cy + r * S[k]) : ctx.moveTo(cx + r * C[k], cy + r * S[k]);
-        }
+        for (let b = 0; b <= N; b++) plot(b / N * Math.PI * 2, v, b === 0);
         if (rim) {
-          ctx.lineWidth = Math.max(2, half * 0.016);
-          ctx.globalAlpha = base * bright * 0.12;
+          ctx.lineWidth = Math.max(1.2, half * 0.009);
+          ctx.globalAlpha = base * bright * 0.045;
           ctx.stroke();
         }
-        ctx.lineWidth = thin;
-        ctx.globalAlpha = base * bright * (rim ? 0.45 : 0.025) * (si === 2 ? 1.2 : 1);
+        ctx.lineWidth = Math.max(0.32, half * 0.0018);
+        ctx.globalAlpha = base * bright * (rim ? 0.22 : 0.085) * (si === 2 ? 0.7 : 1);
         ctx.stroke();
       }
+      if (si === 2) continue;
+      // Diagonals read as a woven net. Fewer stitches on small/slow screens
+      // avoid a solid band of subpixel lines and keep the tablet responsive.
+      const columns = Math.max(90, Math.min(360, Math.round(half * 1.6 * (this._perf?.q ?? 1))));
+      ctx.beginPath();
+      for (let col = 0; col < columns; col++) {
+        const th = col / columns * Math.PI * 2;
+        for (let row = 0; row < sh.rows; row++) {
+          const v = -1 + 2 * row / (sh.rows - 1);
+          plot(th + v * 0.009, v, row === 0);
+        }
+      }
+      ctx.lineWidth = Math.max(0.3, half * 0.0015);
+      ctx.globalAlpha = base * bright * 0.10;
+      ctx.stroke();
     }
     ctx.globalCompositeOperation = "source-over";
     ctx.globalAlpha = base;
@@ -5184,11 +5166,7 @@ class HubbubbRingCard extends LitElement {
   /* One line out of this screen, with the ring's mouth on its waveform;
      resolves when it has finished playing. */
   async _playHere(el, blob, run) {
-    this._envEl = el;
-    this._envUrl = blob;
-    this._env = null;
-    this._decodeAudio(blob);
-    this._voiceState = "responding";
+    this._trackSpeech(el, blob);
     try {
       await new Promise((res, rej) => {
         el.onended = res;
@@ -5198,11 +5176,7 @@ class HubbubbRingCard extends LitElement {
       });
     } finally {
       URL.revokeObjectURL(blob);
-      if (this._envEl === el) {
-        this._envEl = null;
-        this._env = null;
-        if (!this._voice) this._voiceState = null;
-      }
+      this._releaseSpeech(el);
     }
   }
 

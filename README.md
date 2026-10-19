@@ -363,6 +363,19 @@ thirty seconds and then froze solid, because the only thing that could end a
 bubble was growing into the ceiling — and once the packing settles, nothing is
 pressed hard enough against anything else to grow.
 
+`cards/test/ring.mjs` checks local/remote audio ownership, decode races,
+paused and missing audio, syllable response, and mesh seams and bounds.
+IM3 uses the decoded waveform and the local audio element's playback clock;
+when no waveform is available it keeps its ambient motion instead of
+inventing speech pulses. Remote speakers still use their reported position
+plus `audio_offset`.
+
+For a visual check, build, run `python3 -m http.server 8791 --bind 127.0.0.1`
+from the repo root, then open `http://127.0.0.1:8791/cards/preview/ring.html`.
+The preview runs the real renderer at 400px and 240px, includes a generated
+speech sample, accepts local audio, and can replay the startup sequence.
+The sample uses the macOS system voice, not the configured Home Assistant voice.
+
 ## Licence
 
 MIT — see [LICENSE](LICENSE).
