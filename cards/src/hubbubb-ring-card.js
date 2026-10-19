@@ -28,7 +28,7 @@ import {
   widestGap,
 } from "./pack.js";
 
-const CARD_VERSION = "4.13.0";
+const CARD_VERSION = "4.13.1";
 
 const SATELLITE_DOMAIN = "assist_satellite";
 
@@ -304,7 +304,7 @@ const SHEET_BINS = 360;
    clean circle in the gaps between words. Frame by frame at 24fps the film
    goes crumpled, clean, crumpled, clean several times a second. */
 // mostly short lobes: the film dents and kinks locally rather than going oval
-const LOBE_KS = [3, 4, 5, 6, 7, 9, 11, 13, 17, 21];
+const LOBE_KS = [3, 4, 5, 6, 7, 9, 11, 13];
 const TWIST_MS = [1, 2, 3, 4, 5, 7];
 // dots per sheet row round the ring: a grid, so the band shows the film's
 // fine radial striations as well as its threads
@@ -2743,7 +2743,7 @@ class HubbubbRingCard extends LitElement {
       const row = Math.floor(rand() * rows);
       let v = rows > 1 ? -1 + (2 * row) / (rows - 1) : 0;
       v += (rand() - 0.5) * 0.025;
-      if (rand() < 0.06) v *= 1.15 + rand() * 0.7; // fuzz and spray off the rims
+      if (rand() < 0.02) v *= 1.1 + rand() * 0.4; // a little fuzz off the rims
       p[i] = {
         si,
         th: (Math.floor(rand() * SHEET_COLS) / SHEET_COLS) * Math.PI * 2,
@@ -2809,8 +2809,11 @@ class HubbubbRingCard extends LitElement {
       c *= cur.speech * 1.25;
     }
     c = Math.max(c, burst);
-    const tau = c > this._crumple ? 0.03 : 0.06;
+    // soft rise and a slower fall: the film eases into a fold and out of it
+    const tau = c > this._crumple ? 0.08 : 0.2;
     this._crumple += (c - this._crumple) * (1 - Math.exp(-dt / tau));
+    // the folds glide round the ring, faster while he is loud
+    this._flowT = (this._flowT || 0) + dt * (0.25 + this._crumple * 2.2);
     this._reseed -= dt;
     if (this._crumple > 0.15 && this._reseed <= 0) {
       for (const st of this._sheetState) {
@@ -2818,27 +2821,29 @@ class HubbubbRingCard extends LitElement {
         st.b = shape();
         st.m = 0;
       }
-      this._reseed = 0.08 + rand() * 0.06;
+      this._reseed = 0.22 + rand() * 0.12;
     }
-    const k = Math.min(1.3, this._crumple);
-    const lobeA = 0.003 + k * 0.075;
-    const twistA = 0.12 + k * 2.4;
+    const k = Math.min(1.2, this._crumple);
+    const lobeA = 0.003 + k * 0.045;
+    const twistA = 0.12 + k * 1.5;
+    const ft = this._flowT;
     const breathe = 0.005 * Math.sin(this._t * 0.35);
     const ts = this._t * 0.15; // the faintest drift at rest, so it is never frozen
     for (let si = 0; si < SHEETS.length; si++) {
       const sh = SHEETS[si];
       const st = this._sheetState[si];
-      st.m = Math.min(1, st.m + dt / 0.06);
+      st.m = Math.min(1, st.m + dt / 0.2);
       const S = mixed(st);
       const la = lobeA * (si === 2 ? 0.5 : 1);
       const ta = twistA * (si === 2 ? 0.35 : 1);
       for (let b = 0; b < SHEET_BINS; b++) {
         const th = (b / SHEET_BINS) * 6.283185;
         let lobe = 0;
-        for (let i = 0; i < LOBE_KS.length; i++) lobe += S.la[i] * Math.sin(LOBE_KS[i] * th + S.lp[i]);
+        const dir = si === 1 ? -1 : 1; // the sheets' folds run opposite ways
+        for (let i = 0; i < LOBE_KS.length; i++) lobe += S.la[i] * Math.sin(LOBE_KS[i] * th + S.lp[i] + dir * ft * (1 + 0.15 * i));
         let tw = 0.25 * Math.sin(2 * th + ts + si);
-        for (let i = 0; i < TWIST_MS.length; i++) tw += S.ta[i] * Math.sin(TWIST_MS[i] * th + S.tp[i]);
-        st.rc[b] = sh.r + breathe + k * 0.01 + la * lobe + S.jag[b] * k * 0.02;
+        for (let i = 0; i < TWIST_MS.length; i++) tw += S.ta[i] * Math.sin(TWIST_MS[i] * th + S.tp[i] - dir * ft * (0.8 + 0.2 * i));
+        st.rc[b] = sh.r + breathe + k * 0.008 + la * lobe + S.jag[b] * k * 0.006;
         st.cw[b] = sh.w * (1 + k * 0.3) * Math.cos(tw * ta);
       }
     }
@@ -4448,7 +4453,7 @@ class HubbubbRingCard extends LitElement {
       let u = (th * 0.15915494) % 1;
       if (u < 0) u += 1;
       const b = (u * SHEET_BINS) | 0;
-      const rf = st.rc[b] + p.v * st.cw[b] + p.n * 0.012 + 0.003 * Math.sin(t * p.tw + p.ph);
+      const rf = st.rc[b] + p.v * st.cw[b] + p.n * 0.005 + 0.002 * Math.sin(t * p.tw + p.ph);
       const r = rf * half;
       MX[nm] = cx + r * Math.cos(th);
       MY[nm] = cy + r * Math.sin(th);
@@ -4456,7 +4461,7 @@ class HubbubbRingCard extends LitElement {
       // rims and the thin inner ring read as lines; the film between is mist
       const av = Math.abs(p.v);
       const edge = av > 0.9 && av < 1.1 ? 1.6 : 1;
-      const a = p.br * aMul * edge * (p.si === 2 ? 0.6 : 0.75) * (0.75 + 0.25 * Math.sin(t * p.tw * 0.7 + p.ph));
+      const a = p.br * aMul * edge * (p.si === 2 ? 0.4 : 0.42) * (0.75 + 0.25 * Math.sin(t * p.tw * 0.7 + p.ph));
       MB[nm++] = Math.min(MOTE_ALPHAS - 1, (clamp(a, 0, 1) * MOTE_ALPHAS) | 0);
     }
     const base = ctx.globalAlpha;
@@ -4513,7 +4518,7 @@ class HubbubbRingCard extends LitElement {
         for (let k = 0; k < N; k++) {
           const b = k, b2 = (k + 1) % N;
           const face = Math.abs(st.cw[b]) / sh.w; // 1 face-on, 0 edge-on
-          let a = 0.05 + 0.17 / (face + 0.16);
+          let a = 0.03 + 0.11 / (face + 0.18);
           if (a > 0.9) a = 0.9;
           if (Math.min(NB - 1, ((a / 0.9) * NB) | 0) !== bk) continue;
           const r1 = (st.rc[b] - st.cw[b]) * half, r2 = (st.rc[b] + st.cw[b]) * half;
@@ -4535,7 +4540,7 @@ class HubbubbRingCard extends LitElement {
       for (let ri = 0; ri < rows; ri++) {
         const v = rows > 1 ? -1 + (2 * ri) / (rows - 1) : 0;
         const rim = ri === 0 || ri === rows - 1;
-        ctx.globalAlpha = base * bright * (rim ? 0.5 : 0.09) * (si === 2 ? 1.2 : 1);
+        ctx.globalAlpha = base * bright * (rim ? 0.32 : 0.06) * (si === 2 ? 1.2 : 1);
         ctx.beginPath();
         for (let k = 0; k <= N; k++) {
           const b = k % N;
