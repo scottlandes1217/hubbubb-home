@@ -293,15 +293,15 @@ const RIBBONS = [
 const SHEETS = SHELL_RADII.map((r, i) => ({r, share: i === 0 ? .58 : .42, dir: i === 0 ? 1 : -1}));
 /* The film's introduction, in seconds, choreographed to its lines: the ring
    bursts in, the name assembles, each feature's icon shows in the ring and
-   drops into the bar, a clock, preferences importing, then "fully
-   operational" folds it to a dot and the reactor powers up to 100%. */
+   drops into the bar, a clock, preferences importing, then the suit powers
+   up to 100%. Only after that completes does the operational line play. */
 const IM3_BOOT = {
   fold: 0.4, burst: 0.9, settle: 2.4,
   word: 2.6, wordHold: 3.8, wordGone: 4.6, wordEnd: 5.0,
   icons: 5.3, iconStep: 0.5,
   clock: 9.3, clockEnd: 12.0,
   imp: 12.2, impEnd: 15.0,
-  down: 18.4, dot: 18.8, reactor: 19.2, back: 21.6, end: 25.0,
+  reactor: 15.0, back: 17.4, end: 20.8,
 };
 // The review card on its own page wears HA's theme; in the ring card's
 // pop-up it should match the build panels around it.
@@ -336,14 +336,12 @@ const IM3_LINES = [
   [5.3, "and I'm here to assist you with a variety of tasks as best I can,"],
   [9.3, "24 hours a day, 7 days a week."],
   [12.2, "Importing home preferences."],
-  [16.0, "Systems are now fully operational."],
-  // once the ring is back from the power-up
-  [22.0, "Let me know how I can assist."],
+  [IM3_BOOT.back, "All systems are operational."],
+  // Sequential playback adds a short breath after the operational line.
+  [IM3_BOOT.back + 0.35, "Let me know how I can assist."],
 ];
-// silence owed before each line however late the one before ran; "fully
-// operational" gets a real beat of quiet, as in the film
+// Minimum breath between spoken lines, even when a previous line runs late.
 const IM3_GAP = 0.35;
-const IM3_LAST_GAP = 1.2;
 
 /* Travelling peaks: a handful of localized bulges that drift around the
    band and breathe. Gentle at idle; when the voice talks they surge taller
@@ -4701,6 +4699,11 @@ class HubbubbRingCard extends LitElement {
     // Hold just before the import until its spoken cue is actually audible.
     b.t = b.waitForPreferences ? Math.min(b.t + dt, T.imp - .001) : b.t + dt;
     const t = b.t;
+    if (t >= T.back && this._introRun) {
+      this._introRun.powerComplete = true;
+      this._introRun.powerWaiter?.(true);
+      this._introRun.powerWaiter = null;
+    }
     const ease = (x) => 1 - (1 - x) ** 3;
     const arrive = (t0) => {
       const u = clamp((t - t0) / 0.28, 0, 1);
@@ -4718,7 +4721,7 @@ class HubbubbRingCard extends LitElement {
       return { ring: 1 - u * 0.5, scale: 1 - 0.98 * u * u, burst: 0, globe: 1, phase: null };
     }
     if (t < T.burst) return { ring: 0, scale: 1, burst: 0, globe: 1, phase: null };
-    if (t < T.down) {
+    if (t < T.reactor) {
       const a = arrive(T.burst);
       let phase = null, u = 0;
       if (t >= T.word && t < T.wordEnd) phase = "word";
@@ -4726,11 +4729,6 @@ class HubbubbRingCard extends LitElement {
       else if (t >= T.imp && t < T.impEnd) (phase = "import"), (u = (t - T.imp) / (T.impEnd - T.imp));
       return { ...a, globe, phase, u, t };
     }
-    if (t < T.dot) {
-      const u = (t - T.down) / (T.dot - T.down);
-      return { ring: 1 - u * 0.5, scale: 1 - 0.98 * u * u, burst: 0, globe: 1, phase: null };
-    }
-    if (t < T.reactor) return { ring: 0, scale: 1, burst: 0, globe: 1, phase: "dot", t };
     if (t < T.back) return { ring: 0, scale: 1, burst: 0, globe: 1, phase: "reactor", u: (t - T.reactor) / (T.back - T.reactor), t };
     if (t < T.end) {
       const a = arrive(T.back);
@@ -4745,15 +4743,7 @@ class HubbubbRingCard extends LitElement {
     const col = (a) => `rgba(${R},${G},${B},${a})`;
     const hi = (a) => `rgba(${Math.round(R + (255 - R) * 0.5)},${Math.round(G + (255 - G) * 0.5)},${Math.round(B + (255 - B) * 0.5)},${a})`;
     ctx.save();
-    if (boot.phase === "dot") {
-      const f = 0.55 + 0.45 * Math.abs(Math.sin((boot.t - T.dot) * 18));
-      ctx.fillStyle = hi(f);
-      ctx.beginPath();
-      ctx.arc(cx, cy, Math.max(1.6, half * 0.012), 0, 6.283185);
-      ctx.fill();
-      ctx.fillStyle = col(0.5 * f);
-      ctx.fillRect(cx - half * 0.07, cy + half * 0.55, half * 0.14, Math.max(1, half * 0.006));
-    } else if (boot.phase === "reactor") {
+    if (boot.phase === "reactor") {
       this._drawReactor(ctx, cx, cy, half, boot.u, col, hi);
     } else if (boot.phase === "reactorOut") {
       // the reactor lets go as the ring arrives
@@ -5009,6 +4999,7 @@ class HubbubbRingCard extends LitElement {
 
   _stopIntroVisuals() {
     this._introPreferenceCue = null;
+    this._introRun?.powerWaiter?.(false);
     this._introRun = null;
     clearTimeout(this._bootTimer);
     for (const timer of this._introIconTimers || []) clearTimeout(timer);
@@ -5103,10 +5094,13 @@ class HubbubbRingCard extends LitElement {
       let ended = 0;
       for (let i = 0; i < lines.length; i++) {
         const [at, text] = lines[i];
-        const gap = /^Systems are now/.test(text) ? IM3_LAST_GAP : IM3_GAP;
+        const gap = IM3_GAP;
         const wait = Math.max(at * 1000, ended + gap * 1000) - (performance.now() - t0);
         if (wait > 0) await new Promise((r) => setTimeout(r, wait));
         if (this._introRun !== run) return;
+        // A timer alone can outrun a slow/hidden canvas. Wait for the power
+        // animation to finish on screen before announcing operational status.
+        if (at === T.back && !(await this._waitIntroPower(run))) return;
         if (fetched) {
           try {
             const blob = await fetched[i];
@@ -5162,8 +5156,12 @@ class HubbubbRingCard extends LitElement {
     return URL.createObjectURL(new Blob([buf], { type: "audio/mpeg" }));
   }
 
-  /* One line out of this screen, with the ring's mouth on its waveform;
-     resolves when it has finished playing. */
+  _waitIntroPower(run) {
+    if (this._introRun !== run) return Promise.resolve(false);
+    if (run.powerComplete) return Promise.resolve(true);
+    return new Promise(resolve => { run.powerWaiter = resolve; });
+  }
+
   _beginIntroPreferences(run) {
     if (this._introRun !== run || !this._boot?.waitForPreferences) return false;
     this._introPreferenceCue = null;

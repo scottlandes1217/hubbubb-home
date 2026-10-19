@@ -249,3 +249,26 @@ console.log('rim-only speech deformation and entrance lifecycle ok');
   c._stopIntroVisuals();
 }
 console.log('preferences wait for actual local or satellite playback');
+
+{
+  const c=make(),run=c._introRun={};
+  c._boot={t:14.99};
+  assert.equal(c._im3Boot(0).phase,'import');
+  const power=c._im3Boot(.02);
+  assert.equal(power.phase,'reactor','preferences lead directly into the power bar');
+  assert.ok(power.u<.01,'power animation begins at the start');
+  let announced=false;
+  const ready=c._waitIntroPower(run).then(ok=>{announced=ok;});
+  // Elapsed wall time alone cannot release the announcement.
+  await Promise.resolve();assert.equal(announced,false);
+  c._boot.t=17.39;c._im3Boot(0);
+  await Promise.resolve();assert.equal(announced,false,'no announcement before the last power frame');
+  assert.equal(c._im3Boot(.02).phase,'reactorOut');
+  await ready;assert.equal(announced,true,'announcement releases only after power completes');
+  assert.equal(await c._waitIntroPower(run),true,'late speech can continue after completed animation');
+  const cancelled=c._introRun={};
+  const waiting=c._waitIntroPower(cancelled);
+  c._stopIntroVisuals();
+  assert.equal(await waiting,false,'stopping or replaying cancels an old announcement');
+}
+console.log('preferences → power → operational announcement ordering ok');
