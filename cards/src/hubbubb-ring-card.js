@@ -1316,6 +1316,10 @@ class HubbubbRingCard extends LitElement {
 
   async _poll(force = false) {
     if (!this._build || !this._hass) return;
+    // A reload into the build page enters build mode from setConfig, before
+    // hass arrives, so that first fetch threw and the picker stayed blank.
+    // Retry here until the list lands; it returns at once after that.
+    this._loadModels();
     // A poll asked for mid-flight runs straight after, so a tap never waits
     // out a whole interval for its result.
     if (this._polling) {
@@ -2105,7 +2109,8 @@ class HubbubbRingCard extends LitElement {
   /* The list is small and changes about as often as a model ships, so it is
      fetched once per build-mode session rather than on every poll. */
   async _loadModels() {
-    if (this._models) return;
+    if (this._models || this._modelsLoading) return;
+    this._modelsLoading = true;
     try {
       const res = await this._api("agent_models");
       this._models = res.models || [];
@@ -2113,6 +2118,7 @@ class HubbubbRingCard extends LitElement {
     } catch {
       /* leave the picker disabled rather than inventing a list */
     }
+    this._modelsLoading = false;
   }
 
   /* Ending is destructive and there is no undo, so the first press only arms
