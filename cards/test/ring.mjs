@@ -197,14 +197,14 @@ console.log('two-shell spacing and session context display ok');
   try {
     const old=c._startIntroVisuals();
     const stale=[...schedule.values()].filter(t=>t.ms<10000);
-    assert.equal(stale.length,5,'all five entrances scheduled');
+    assert.equal(stale.length,7,'corner toggles and all five dock entrances scheduled');
     const run=c._startIntroVisuals();
     assert.notEqual(old,run);
-    assert.equal(schedule.size,6,'replay clears previous icon and completion timers');
+    assert.equal(schedule.size,8,'replay clears previous icon and completion timers');
     stale.forEach(t=>t.fn());
     assert.equal(c._landed.size,0,'old callbacks cannot land icons in the new run');
     [...schedule.values()].filter(t=>t.ms<10000).forEach(t=>t.fn());
-    assert.equal(c._landed.size,5,'all slots become available even without animation support');
+    assert.equal(c._landed.size,7,'all slots become available even without animation support');
     let removed=0,cancelled=0;
     c._introOverlays=new Set([{getAnimations:()=>[{cancel:()=>cancelled++}],remove:()=>removed++}]);
     c._stopIntroVisuals();

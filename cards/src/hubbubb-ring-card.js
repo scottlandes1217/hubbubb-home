@@ -297,11 +297,37 @@ const SHEETS = SHELL_RADII.map((r, i) => ({r, share: i === 0 ? .58 : .42, dir: i
 const IM3_BOOT = {
   fold: 0.4, burst: 0.9, settle: 2.4,
   word: 2.6, wordHold: 3.8, wordGone: 4.6, wordEnd: 5.0,
-  icons: 5.3, iconStep: 0.75,
+  icons: 5.3, iconStep: 0.5,
   clock: 9.3, clockEnd: 12.0,
   imp: 12.2, impEnd: 15.0,
   down: 18.4, dot: 18.8, reactor: 19.2, back: 21.6, end: 25.0,
 };
+// The review card on its own page wears HA's theme; in the ring card's
+// pop-up it should match the build panels around it.
+const REVIEW_IN_SHEET = `
+  ha-card.jr-card { background: none; border: none; box-shadow: none; padding: 0;
+    color: var(--jr-panel-text, var(--jr-ink, #cfe9f7)); font-family: "Avenir Next", "Segoe UI", Roboto, sans-serif; }
+  .jr-h { display: none; }
+  .jr-top { align-items: center; padding-bottom: 10px; border-bottom: 1px solid rgba(var(--jr-line), 0.3); }
+  .jr-sub { flex: 1; min-width: 0; }
+  .jr-sub, .jr-body, .jr-empty, .jr-seen, .jr-head::after { color: rgba(160, 200, 220, 0.6); }
+  .jr-section { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-top: 16px;
+    padding-bottom: 6px; font-size: 11px; font-weight: 600; letter-spacing: 0.18em; text-transform: uppercase;
+    color: var(--jr-color); text-shadow: 0 0 8px rgba(var(--jr-glow), 0.5); }
+  .jr-item { border-top: 1px solid rgba(var(--jr-line), 0.15); }
+  .jr-title { color: var(--jr-panel-text, var(--jr-ink, #cfe9f7)); }
+  .jr-kind { background: none; border: 1px solid rgba(var(--jr-line), 0.4); border-radius: 4px; color: var(--jr-color); }
+  .jr-suggestion { border-color: rgba(255, 180, 80, 0.5); color: #ffc98a; }
+  .jr-yaml { background: rgba(0, 10, 16, 0.6); border: 1px solid rgba(var(--jr-line), 0.3); border-radius: 6px; }
+  .jr-btn { border: 1px solid rgba(var(--jr-line), 0.45); border-radius: 4px; padding: 5px 10px;
+    background: rgba(var(--jr-glow), 0.06); color: var(--jr-ink-2, #bfe3f5); font-size: 11px;
+    letter-spacing: 0.12em; text-transform: uppercase; text-shadow: none; transition: background 0.2s, box-shadow 0.2s; }
+  .jr-btn:hover { background: rgba(var(--jr-glow), 0.18); box-shadow: 0 0 10px rgba(var(--jr-glow), 0.35); }
+  .jr-btn[disabled] { opacity: 0.5; cursor: default; }
+  .jr-yes { border-color: rgba(90, 220, 140, 0.5); color: #a8f0c4; }
+  .jr-no { border-color: rgba(255, 90, 100, 0.5); color: #ffb3b8; }
+  .jr-toggle { color: var(--jr-color); letter-spacing: 0.12em; text-transform: uppercase; font-size: 11px; }
+`;
 // spoken one at a time on their beats, so the pauses fall where the film's do
 const IM3_LINES = [
   [0.9, "Allow me to introduce myself."],
@@ -4997,8 +5023,9 @@ class HubbubbRingCard extends LitElement {
     const im3 = this._config.animation === "jarvis-im3";
     if (im3) {
       this._landed = new Set();
-      this._introIconTimers = Array.from({length:5}, (_, i) =>
-        setTimeout(() => this._flyIcon(i, run), (IM3_BOOT.icons + i * IM3_BOOT.iconStep) * 1000));
+      // the corner toggles first, outer one leading, then the dock left to right
+      this._introIconTimers = ["speaker", "bell", 0, 1, 2, 3, 4].map((i, n) =>
+        setTimeout(() => this._flyIcon(i, run), (IM3_BOOT.icons + n * IM3_BOOT.iconStep) * 1000));
     }
     this._bootTimer = setTimeout(() => {
       if (this._introRun !== run) return;
@@ -5135,7 +5162,7 @@ class HubbubbRingCard extends LitElement {
     const root = this.shadowRoot;
     const wrap = root?.querySelector(".wrap");
     const ring = root?.querySelector(".ring");
-    const btn = root?.querySelectorAll(".dock button")[i];
+    const btn = typeof i === "number" ? root?.querySelectorAll(".dock button")[i] : root?.querySelector(`.mode.${i}`);
     const icon = btn?.querySelector("svg");
     if (!wrap || !ring || !icon || !wrap.animate) return done();
     const W = wrap.getBoundingClientRect(), Rg = ring.getBoundingClientRect();
@@ -5388,7 +5415,12 @@ class HubbubbRingCard extends LitElement {
          line-height: 0 }` crushed it into one row of overlapping text. A
          shadow root of its own keeps it looking as it does on its page. */
       this._reviewBox = document.createElement("div");
-      this._reviewBox.attachShadow({ mode: "open" }).appendChild(this._reviewEl);
+      const root = this._reviewBox.attachShadow({ mode: "open" });
+      /* Re-dress it in build mode's chrome inside the pop-up; the --jr-*
+         channels inherit through the shadow boundary. */
+      const style = document.createElement("style");
+      style.textContent = REVIEW_IN_SHEET;
+      root.append(style, this._reviewEl);
     }
     this._reviewEl.hass = this._hass;
     this._sheet = { kind: "review", items: [], q: "" };
@@ -5882,7 +5914,7 @@ class HubbubbRingCard extends LitElement {
           ${announce === null
             ? nothing
             : html`<button
-                class="mode speaker ${announce ? "on" : ""}"
+                class="mode speaker ${announce ? "on" : ""} ${this._landed && !this._landed.has("speaker") ? "pending" : ""}"
                 data-ai="toggle-agent-announcements"
                 title=${announce
                   ? `${this._name} finishes out loud - tap to send to your phone instead`
@@ -5901,7 +5933,7 @@ class HubbubbRingCard extends LitElement {
           ${messages === null
             ? nothing
             : html`<button
-                class="mode bell ${messages ? "on" : ""}"
+                class="mode bell ${messages ? "on" : ""} ${this._landed && !this._landed.has("bell") ? "pending" : ""}"
                 data-ai="toggle-hubbubb-messages"
                 title=${messages
                   ? "New Hubbubb messages are read out here - tap to go quiet"
@@ -6350,18 +6382,14 @@ class HubbubbRingCard extends LitElement {
       grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
       gap: 10px;
       box-sizing: border-box;
-      width: min(100% - 24px, 520px);
-      margin: 0 auto 14px;
+      width: 100%;
+      margin: 0 0 12px;
     }
     .todo {
-      background: var(
-        --jr-panel-bg,
-        linear-gradient(160deg, rgba(var(--jr-glass-a), 0.92), rgba(var(--jr-glass-b), 0.96))
-      );
-      border: 1px solid var(--jr-panel-border, rgba(var(--jr-line), 0.35));
-      border-radius: 10px;
-      box-shadow: inset 0 0 28px rgba(var(--jr-glow), 0.08);
-      padding: 10px 12px;
+      background: rgba(0, 10, 16, 0.45);
+      border: 1px solid rgba(var(--jr-line), 0.3);
+      border-radius: 8px;
+      padding: 10px 12px 12px;
       color: var(--jr-panel-text, var(--jr-ink, #cfe9f7));
       font-family: "Avenir Next", "Segoe UI", Roboto, sans-serif;
       line-height: 1.4;
@@ -6371,20 +6399,27 @@ class HubbubbRingCard extends LitElement {
     .todo .dim {
       font-size: 12.5px;
     }
+    .todo .phead .hbtn {
+      border-radius: 4px;
+    }
     .tcount {
+      min-width: 20px;
+      padding: 1px 6px;
+      box-sizing: border-box;
+      border: 1px solid rgba(var(--jr-line), 0.35);
+      border-radius: 10px;
       font-size: 11px;
-      letter-spacing: 0.1em;
+      text-align: center;
       color: var(--jr-color);
-      opacity: 0.8;
     }
     .titem {
       display: flex;
       align-items: center;
       gap: 9px;
       width: 100%;
-      padding: 5px 4px;
+      padding: 6px 6px;
       border: none;
-      border-radius: 4px;
+      border-radius: 6px;
       background: none;
       color: inherit;
       font: inherit;
@@ -6397,10 +6432,11 @@ class HubbubbRingCard extends LitElement {
     }
     .tbox {
       flex: none;
-      width: 11px;
-      height: 11px;
+      width: 14px;
+      height: 14px;
+      box-sizing: border-box;
       border: 1px solid var(--jr-color);
-      border-radius: 2px;
+      border-radius: 3px;
       opacity: 0.8;
     }
     .titem:hover .tbox {
@@ -6410,41 +6446,56 @@ class HubbubbRingCard extends LitElement {
       min-width: 0;
       overflow-wrap: anywhere;
     }
+    /* Input and + share one framed box, like build's composer, so they can
+       never sit at different heights. */
     .tadd {
       display: flex;
-      gap: 6px;
-      margin-top: 8px;
+      align-items: stretch;
+      height: 38px;
+      margin-top: 10px;
+      background: rgba(0, 10, 16, 0.6);
+      border: 1px solid rgba(var(--jr-line), 0.4);
+      border-radius: 6px;
+      overflow: hidden;
+      transition: border-color 0.2s, box-shadow 0.2s;
+    }
+    .tadd:focus-within {
+      border-color: var(--jr-color);
+      box-shadow: 0 0 10px rgba(var(--jr-glow), 0.35);
     }
     .tnew {
-      width: min(100% - 24px, 520px);
-      margin: 4px auto 14px;
-      box-sizing: border-box;
+      margin: 0;
     }
-    .tadd input {
+    .sheet .tadd input {
       flex: 1;
       min-width: 0;
       margin: 0;
-      padding: 7px 10px;
-      border-radius: 6px;
-      border: 1px solid rgba(var(--jr-line), 0.35);
-      background: rgba(var(--jr-glow), 0.06);
+      padding: 0 12px;
+      border: none;
+      border-radius: 0;
+      background: none;
       color: inherit;
       font: inherit;
       font-size: 16px; /* under 16px iOS zooms the page on focus */
-    }
-    .tadd input:focus {
       outline: none;
-      border-color: var(--jr-color);
+    }
+    .tadd input::placeholder {
+      color: rgba(160, 200, 220, 0.45);
     }
     .tadd button {
       flex: none;
-      width: 36px;
-      border-radius: 6px;
-      border: 1px solid rgba(var(--jr-line), 0.45);
-      background: rgba(var(--jr-glow), 0.12);
+      width: 40px;
+      border: none;
+      border-left: 1px solid rgba(var(--jr-line), 0.4);
+      background: rgba(var(--jr-glow), 0.08);
       color: var(--jr-color);
-      font-size: 18px;
+      font-size: 20px;
+      line-height: 1;
       cursor: pointer;
+      transition: background 0.2s;
+    }
+    .tadd button:hover {
+      background: rgba(var(--jr-glow), 0.2);
     }
 
     /* ---------------- memories / skills sheet ---------------- */
@@ -6510,10 +6561,6 @@ class HubbubbRingCard extends LitElement {
         flex: 1;
         min-height: 0;
       }
-      .sheet .todos,
-      .sheet .tnew {
-        width: calc(100% - 16px);
-      }
     }
     hubbubb-calendar {
       flex: 1;
@@ -6530,50 +6577,86 @@ class HubbubbRingCard extends LitElement {
       font-family: "Avenir Next", "Segoe UI", Roboto, sans-serif;
       width: min(440px, calc(100% - 32px));
       max-height: calc(100% - 32px);
-      background: #061014;
-      border: 1px solid var(--jr-color);
-      border-radius: 12px;
-      box-shadow: 0 0 24px rgba(0, 0, 0, 0.6);
-      color: #d6eef2;
+      background: var(
+        --jr-panel-bg,
+        linear-gradient(160deg, rgba(var(--jr-glass-a), 0.97), rgba(var(--jr-glass-b), 0.99))
+      );
+      border: 1px solid var(--jr-panel-border, rgba(var(--jr-line), 0.45));
+      border-radius: 10px;
+      box-shadow: inset 0 0 28px rgba(var(--jr-glow), 0.08), 0 0 0 1px rgba(0, 0, 0, 0.4),
+        0 18px 48px rgba(0, 0, 0, 0.6), 0 0 24px rgba(var(--jr-glow), 0.12);
+      color: var(--jr-panel-text, var(--jr-ink, #cfe9f7));
       overflow: hidden;
     }
+    /* Same header as build mode's panels: spaced caps title over a rule. */
     .sheet-head {
+      flex: none;
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      padding: 12px 14px 6px;
+      gap: 8px;
+      margin: 0 14px 12px;
+      padding: 12px 0 10px;
+      border-bottom: 1px solid rgba(var(--jr-line), 0.3);
+      font-size: 12px;
       font-weight: 600;
-      letter-spacing: 0.04em;
+      letter-spacing: 0.22em;
+      text-transform: uppercase;
       color: var(--jr-color);
+      text-shadow: 0 0 8px rgba(var(--jr-glow), 0.5);
+    }
+    .sheet-head > span {
+      flex: 1;
+      min-width: 0;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
     }
     .sheet-x {
-      background: none;
-      border: none;
-      color: inherit;
-      font-size: 26px;
+      flex: none;
+      display: grid;
+      place-items: center;
+      width: 30px;
+      height: 30px;
+      padding: 0;
+      background: rgba(var(--jr-glow), 0.06);
+      border: 1px solid rgba(var(--jr-line), 0.45);
+      border-radius: 4px;
+      color: var(--jr-ink-2, #bfe3f5);
+      font-size: 18px;
       line-height: 1;
+      text-shadow: none;
       cursor: pointer;
-      min-width: 44px;
-      min-height: 44px;
-      margin: -10px -10px -10px 0;
+      transition: background 0.2s, box-shadow 0.2s;
     }
-    .sheet input {
-      margin: 4px 14px 8px;
-      padding: 7px 10px;
-      border-radius: 8px;
-      border: 1px solid rgba(255, 255, 255, 0.15);
-      background: rgba(255, 255, 255, 0.05);
+    .sheet-x:hover {
+      background: rgba(var(--jr-glow), 0.18);
+      box-shadow: 0 0 10px rgba(var(--jr-glow), 0.35);
+    }
+    /* the filter box only - a bare ".sheet input" also caught the to-do inputs */
+    .sheet-box > input {
+      flex: none;
+      margin: 0 14px 10px;
+      padding: 8px 12px;
+      border-radius: 6px;
+      border: 1px solid rgba(var(--jr-line), 0.4);
+      background: rgba(0, 10, 16, 0.6);
       color: inherit;
       font: inherit;
+      outline: none;
+    }
+    .sheet-box > input:focus {
+      border-color: var(--jr-color);
+      box-shadow: 0 0 10px rgba(var(--jr-glow), 0.35);
     }
     .sheet-list {
       overflow-y: auto;
-      padding: 0 14px 10px;
+      padding: 0 14px 12px;
       font-size: 14px;
+      scrollbar-width: thin;
     }
     .sheet-row {
-      padding: 8px 0;
-      border-top: 1px solid rgba(255, 255, 255, 0.07);
+      padding: 9px 2px;
+      border-top: 1px solid rgba(var(--jr-line), 0.15);
     }
     .sheet-row b {
       display: block;
@@ -6786,6 +6869,10 @@ class HubbubbRingCard extends LitElement {
     .mode.speaker svg path,
     .mode.bell svg path {
       transition: fill 0.25s;
+    }
+    /* start-up: hidden until its icon has flown in from the ring */
+    .mode.pending svg {
+      opacity: 0;
     }
 
     /* Conditionally rendered, so there is no "before" state to transition
