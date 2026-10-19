@@ -168,7 +168,7 @@ from hubbubb_home.nightly import FindingsReport, _days  # noqa: E402
 from hubbubb_home.review import ReviewReport, parse_proposals  # noqa: E402
 from hubbubb_home.appletv import _TEMPLATE, _match_source, decide_plan  # noqa: E402
 from hubbubb_home.companion import relevant_text  # noqa: E402
-from hubbubb_home.grounding import trim_by_turns, ungrounded  # noqa: E402
+from hubbubb_home.grounding import same_request, trim_by_turns, ungrounded  # noqa: E402
 
 
 # --- memory: spoken question -> FTS5 query -----------------------------------
@@ -408,6 +408,47 @@ def test_speaker_prompt_line_three_cases():
 
     book.record({"person": "Scott", "confidence": 0.92, "ts": _time.time()})
     assert book.prompt_line() == "The person speaking is Scott."
+
+
+def test_titles_replace_sir():
+    from hubbubb_home.speakers import address, spoken_name
+
+    book = SpeakerBook(None, "", "", titles="scott: sir\nAnna: ma'am")
+    assert book.title_for("Scott") == "sir"
+    assert book.title_for("anna") == "ma'am"
+    assert book.title_for("Vega") == "Vega"  # known, no line: by name
+    assert book.title_for(None) == ""
+    assert SpeakerBook(None, "", "").title_for(None) == "sir"  # unconfigured
+
+    assert address("On it sir.", "sir") == "On it sir."
+    assert address("On it sir.", "Vega") == "On it Vega."
+    assert address("Sir, the door is open.", "ma'am") == "Ma'am, the door is open."
+    assert address("On it sir.", "") == "On it."
+    assert address("Yes, sir. Done.", "") == "Yes. Done."
+    assert address("Sir, the door is open.", "") == "The door is open."
+    assert address("I desire coffee sir", "") == "I desire coffee"
+
+    assert spoken_name("It's Anna.") == "Anna"
+    assert spoken_name("this is vega") == "Vega"
+    assert spoken_name("Hi, I'm Mary Jane") == "Mary Jane"
+    assert spoken_name("scott") == "Scott"
+    assert spoken_name("no") is None
+    assert spoken_name("I'd rather not say who I am today") is None
+    assert spoken_name("Jarvis", "Jarvis") is None
+
+
+def test_voice_event_for_matches_text_not_recency():
+    import asyncio
+    import time as _t
+
+    book = SpeakerBook(None, "", "")
+    book.record({"text": "turn on the lights", "ts": _t.time(), "ask": True,
+                 "person": None})
+    run = asyncio.run
+    assert run(book.async_event_for("Turn on the lights "))["ask"]
+    assert run(book.async_event_for("something else", wait=0.1)) is None
+    book.record({"text": "hello", "ts": _t.time(), "person": "Vega"})
+    assert book.last_known == "Vega"
 
 
 def test_speaker_map_parses_forgivingly():
@@ -2185,6 +2226,15 @@ def test_history_trim_counts_turns_not_tool_messages():
     short = [sys_, *c, *now]
     assert trim_by_turns(short, 2) == short
     assert trim_by_turns([sys_, *a, *b, *c, *now], 0) == [sys_, *a, *b, *c, *now]
+
+
+def test_same_request_spots_a_repeat_not_a_new_command():
+    assert same_request("set my lights to my bright scene", "set the lights to bright")
+    assert same_request("can I get the movie lighting", "I said movie lighting")
+    assert not same_request("turn on the bedroom fan", "turn off the bedroom fan")
+    assert not same_request("add milk to my list", "add eggs to my list")
+    assert not same_request("what is the weather", "turn on the bedroom fan")
+    assert not same_request("the", "a")
 
 
 if __name__ == "__main__":

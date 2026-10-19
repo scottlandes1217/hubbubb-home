@@ -164,3 +164,26 @@ def async_uninstall() -> None:
     else:
         cls.supports_streaming = _original["streaming"]
     _original.clear()
+
+
+# Words that carry no request of their own, so "set my lights to my bright
+# scene" and "set the lights to bright" read as the same ask. "on/off/up/down"
+# are kept on purpose: they are the whole difference between two commands.
+_FILLER = frozenset(
+    "a an the my our your to please can could would you i me it in of for "
+    "just said again now jarvis hey ok okay so".split()
+)
+# Share of the shorter request's words the longer one must contain. The
+# tuning knob: lower catches looser rewordings, and more false repeats.
+SAME_REQUEST = 0.8
+
+
+def same_request(a: str, b: str) -> bool:
+    """Whether b is the speaker asking for a again, perhaps reworded."""
+    words = [
+        {w for w in re.findall(r"[a-z0-9']+", t.lower()) if w not in _FILLER}
+        for t in (a, b)
+    ]
+    if not all(words):
+        return False
+    return len(words[0] & words[1]) / min(map(len, words)) >= SAME_REQUEST

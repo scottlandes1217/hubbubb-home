@@ -74,6 +74,8 @@ from .const import (
     DEFAULT_QUIET_END,
     DEFAULT_QUIET_START,
     CONF_APPROVERS,
+    CONF_FRONT_DOOR,
+    CONF_HONORIFICS,
     CONF_SENTENCES,
     CONF_SENTENCES_SECTION,
     CONF_SPEAKER_MAP,
@@ -370,6 +372,14 @@ class HubbubbHomeOptionsFlow(OptionsFlow):
                                 )
                             ),
                             vol.Optional(CONF_VOICE_TOKEN): _PASSWORD,
+                            vol.Optional(CONF_HONORIFICS, default=""): TextSelector(
+                                TextSelectorConfig(
+                                    type=TextSelectorType.TEXT, multiline=True
+                                )
+                            ),
+                            vol.Optional(CONF_FRONT_DOOR): EntitySelector(
+                                EntitySelectorConfig(domain="conversation")
+                            ),
                             vol.Optional(CONF_PERSON_LISTS, default=""): TextSelector(
                                 TextSelectorConfig(
                                     type=TextSelectorType.TEXT, multiline=True

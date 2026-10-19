@@ -38,6 +38,37 @@ _LOGGER = logging.getLogger(__name__)
 API_ID = DOMAIN
 
 
+def agent_tools(runtime) -> list[llm.Tool]:
+    """Every tool the agent gets, which is also what the ring's Skills sheet lists."""
+    tools: list[llm.Tool] = [
+        RememberTool(runtime),
+        RecallTool(runtime),
+        ForgetTool(runtime),
+        FindRecipeTool(runtime),
+        SaveRecipeTool(runtime),
+        DeleteRecipeTool(runtime),
+        AddToListTool(runtime),
+        ReadListTool(runtime),
+        SetSpeakerTool(runtime),
+        CameraActivityTool(runtime),
+        StartTimerTool(runtime),
+        CancelTimerTool(runtime),
+        TimerStatusTool(runtime),
+        FindingsTool(runtime),
+        CalculateTool(runtime),
+        DateTool(runtime),
+    ]
+    if runtime.hubbubb is not None:
+        tools.append(AskHubbubbTool(runtime))
+    if runtime.companion.configured:
+        tools.append(EscalateTool(runtime))
+        tools.append(UseComputerTool(runtime))
+        tools.append(WebSearchTool(runtime))
+    if runtime.speakers.configured:
+        tools.append(TrainWakeWordTool(runtime))
+    return tools
+
+
 class HubbubbAPI(llm.API):
     """Memory, timers, Hubbubb and the overnight findings, as tools."""
 
@@ -49,32 +80,7 @@ class HubbubbAPI(llm.API):
         self, llm_context: llm.LLMContext
     ) -> llm.APIInstance:
         runtime = self._runtime
-        tools: list[llm.Tool] = [
-            RememberTool(runtime),
-            RecallTool(runtime),
-            ForgetTool(runtime),
-            FindRecipeTool(runtime),
-            SaveRecipeTool(runtime),
-            DeleteRecipeTool(runtime),
-            AddToListTool(runtime),
-            ReadListTool(runtime),
-            SetSpeakerTool(runtime),
-            CameraActivityTool(runtime),
-            StartTimerTool(runtime),
-            CancelTimerTool(runtime),
-            TimerStatusTool(runtime),
-            FindingsTool(runtime),
-            CalculateTool(runtime),
-            DateTool(runtime),
-        ]
-        if runtime.hubbubb is not None:
-            tools.append(AskHubbubbTool(runtime))
-        if runtime.companion.configured:
-            tools.append(EscalateTool(runtime))
-            tools.append(UseComputerTool(runtime))
-            tools.append(WebSearchTool(runtime))
-        if runtime.speakers.configured:
-            tools.append(TrainWakeWordTool(runtime))
+        tools = agent_tools(runtime)
 
         speaker = runtime.speakers.prompt_line(
             getattr(llm_context, "device_id", None)

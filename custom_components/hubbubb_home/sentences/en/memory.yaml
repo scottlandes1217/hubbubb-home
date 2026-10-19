@@ -2,6 +2,11 @@ language: en
 intents:
   # No wildcards here, so it goes first: the wildcard rules below would
   # otherwise eat these words as a query.
+  HubbubbNotMe:
+    data:
+      - sentences:
+          - "that (wasn't|was not) (me|him|her)"
+          - "you got the wrong person"
   HubbubbWhoAmI:
     data:
       - sentences:

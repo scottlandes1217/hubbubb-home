@@ -43,6 +43,7 @@ INTENT_FINDINGS = "HubbubbFindings"
 INTENT_HUBBUBB = "HubbubbAsk"
 INTENT_IDENTIFY = "HubbubbIdentify"
 INTENT_WHO = "HubbubbWhoAmI"
+INTENT_NOT_ME = "HubbubbNotMe"
 INTENT_MY_DAY = "HubbubbMyDay"
 INTENT_INTERCOM = "HubbubbIntercom"
 INTENT_LIST_ADD = "HubbubbListAdd"
@@ -75,6 +76,7 @@ def async_register_all(hass: HomeAssistant, runtime) -> None:
         AskHubbubbHandler(runtime),
         IdentifyHandler(runtime),
         WhoAmIHandler(runtime),
+        NotMeHandler(runtime),
         MyDayHandler(runtime),
         IntercomHandler(runtime),
         ListAddHandler(runtime),
@@ -689,6 +691,25 @@ class WhoAmIHandler(_Handler):
         return self._say(
             intent_obj, f"Probably {person}, but I haven't heard enough "
             "of your voice to be sure."
+        )
+
+
+class NotMeHandler(_Handler):
+    intent_type = INTENT_NOT_ME
+    slot_schema = {}
+    description = "The last thing the house learned about a voice was wrong"
+
+    async def async_handle(self, intent_obj: intent.Intent):
+        try:
+            info = await self._runtime.speakers.async_unlearn()
+        except SpeakerServiceError as err:
+            _LOGGER.debug("nothing to unlearn: %s", err)
+            return self._say(
+                intent_obj, "I haven't learned anything from that, so no harm done."
+            )
+        whose = f"{info['person']}'s" if info.get("person") else "the"
+        return self._say(
+            intent_obj, f"Sorry. I've taken that out of {whose} voice profile."
         )
 
 
