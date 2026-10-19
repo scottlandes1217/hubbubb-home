@@ -142,6 +142,9 @@ agent_file:
   fields:
     id: { selector: { text: } }
     path: { required: true, selector: { text: } }
+agent_screen:
+  fields:
+    display: { selector: { text: } }
 run_review:
   name: Run the nightly review
   description: >-

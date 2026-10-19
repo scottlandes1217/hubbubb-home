@@ -456,6 +456,7 @@ class HubbubbRingCard extends LitElement {
     _swipe: { state: true },
     _details: { state: true },
     _view: { state: true },
+    _zoom: { state: true },
     _sideW: { state: true },
     _files: { state: true },
     _dragging: { state: true },
@@ -1609,6 +1610,7 @@ class HubbubbRingCard extends LitElement {
      session's, so the listener resolves them against its working directory. */
   async _openFile(path, line) {
     const ln = line ? parseInt(line.slice(1), 10) : 0;
+    this._zoom = 1;
     this._view = { path, line: ln, loading: true };
     try {
       const res = await this._api("agent_file", { id: this._sel || "", path });
@@ -1619,6 +1621,55 @@ class HubbubbRingCard extends LitElement {
     }
     await this.updateComplete;
     this.renderRoot.querySelector(".vline.hit")?.scrollIntoView({ block: "center" });
+  }
+
+  /* The Mac's screen in the viewer column, refreshed while it stays open: what
+     Claude or Codex is doing in a browser, from a phone. Opening a file or
+     closing the viewer ends the loop; a second tap starts a fresh one. */
+  async _openScreen() {
+    const run = (this._screenRun = {});
+    const live = () => this._screenRun === run && this._view?.screen && this.isConnected;
+    this._zoom = 1;
+    this._view = { path: "Mac screen", screen: true, loading: true };
+    while (live()) {
+      let next;
+      try {
+        next = { ...(await this._api("agent_screen", {})), path: "Mac screen", screen: true };
+      } catch (e) {
+        next = { path: "Mac screen", screen: true, error: this._errText(e) };
+      }
+      if (!live()) break;
+      this._view = next;
+      await new Promise((r) => setTimeout(r, 1500));
+    }
+  }
+
+  /* Pinch or tap to zoom an image in the viewer; the column scrolls to pan.
+     The HA app blocks page zoom, so the image has to do it itself. */
+  _zoomTap(e) {
+    const img = e.currentTarget;
+    const box = img.parentElement;
+    const r = img.getBoundingClientRect();
+    const fx = (e.clientX - r.left) / r.width;
+    const fy = (e.clientY - r.top) / r.height;
+    this._zoom = (this._zoom || 1) > 1 ? 1 : 2.5;
+    // Keep the tapped spot under the finger.
+    this.updateComplete.then(() => {
+      box.scrollLeft = fx * img.offsetWidth - box.clientWidth / 2;
+      box.scrollTop = fy * img.offsetHeight - box.clientHeight / 2;
+    });
+  }
+
+  _pinch(e) {
+    if (e.touches.length !== 2) {
+      this._pinchFrom = null;
+      return;
+    }
+    e.preventDefault();
+    const [a, b] = e.touches;
+    const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
+    if (!this._pinchFrom) this._pinchFrom = { d, z: this._zoom || 1 };
+    this._zoom = Math.min(8, Math.max(1, (this._pinchFrom.z * d) / this._pinchFrom.d));
   }
 
   _renderViewer() {
@@ -1636,7 +1687,16 @@ class HubbubbRingCard extends LitElement {
           : v.error
             ? html`<div class="dim pad">${v.error}</div>`
             : v.image
-              ? html`<img class="vimg" src=${v.image} alt=${name} />`
+              ? html`<img
+                  class="vimg"
+                  src=${v.image}
+                  alt=${name}
+                  style=${(this._zoom || 1) > 1 ? `width:${this._zoom * 100}%;max-width:none` : ""}
+                  @click=${this._zoomTap}
+                  @touchstart=${{ handleEvent: (e) => this._pinch(e), passive: false }}
+                  @touchmove=${{ handleEvent: (e) => this._pinch(e), passive: false }}
+                  @touchend=${() => (this._pinchFrom = null)}
+                />`
               : v.dir
                 ? v.dir.map(
                     (n) => html`<a
@@ -5433,6 +5493,7 @@ class HubbubbRingCard extends LitElement {
       <div class="phead">
         <button class="hbtn back" data-ai="toggle-build-mode" title="Back" @click=${() => this._setBuild(false)}>‹</button>
         <span class="ptitle">${this._name} Agents</span>
+        <button class="hbtn" data-ai="view-mac-screen" title="See the Mac's screen" @click=${() => this._openScreen()}>Screen</button>
         <button
           class="hbtn"
           data-ai="create-session"
@@ -6563,6 +6624,8 @@ class HubbubbRingCard extends LitElement {
       display: block;
       max-width: 100%;
       height: auto;
+      cursor: zoom-in;
+      touch-action: pan-x pan-y;
     }
     .vent {
       display: block;
