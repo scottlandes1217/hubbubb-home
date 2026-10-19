@@ -21,6 +21,9 @@ class HubbubbReviewCard extends HTMLElement {
     }
     this._config = { ...config };
     this._showDecided = false;
+    // which items are open: every hass update rewrites the card, and the
+    // ones you opened have to stay open through it
+    this._open = new Set();
   }
 
   static getStubConfig(hass) {
@@ -75,18 +78,19 @@ class HubbubbReviewCard extends HTMLElement {
 
   _item(p, buttons) {
     const yaml = p.yaml ? `<pre class="jr-yaml">${this._esc(p.yaml)}</pre>` : "";
+    // collapsed to its title; tap to read the details and decide
     return `
-      <div class="jr-item" data-id="${this._esc(p.id)}">
-        <div class="jr-head">
+      <details class="jr-item" data-id="${this._esc(p.id)}" ${this._open.has(p.id) ? "open" : ""}>
+        <summary class="jr-head">
           <span class="jr-kind jr-${p.kind}">${p.kind}</span>
           <span class="jr-title">${this._esc(p.title)}</span>
-        </div>
+        </summary>
         <div class="jr-body">${markup(p.body, (s) => this._esc(s))}${yaml}</div>
         <div class="jr-actions">
           <span class="jr-seen">${p.resolved ? this._esc(p.resolved) : `${p.status === "pending" ? "first seen" : p.status} ${this._esc(p.first_seen || "")}`}</span>
           ${buttons}
         </div>
-      </div>`;
+      </details>`;
   }
 
   _render() {
@@ -117,7 +121,11 @@ class HubbubbReviewCard extends HTMLElement {
         .jr-sub { font-size: 12px; color: var(--secondary-text-color); }
         .jr-section { margin-top: 12px; font-size: 13px; font-weight: 500; color: var(--primary-text-color); }
         .jr-item { padding: 10px 0; border-top: 1px solid var(--divider-color); }
-        .jr-head { display: flex; gap: 8px; align-items: baseline; }
+        .jr-head { display: flex; gap: 8px; align-items: baseline; cursor: pointer; list-style: none; }
+        .jr-head::-webkit-details-marker { display: none; }
+        .jr-head::after { content: "›"; margin-left: auto; padding-left: 8px; color: var(--secondary-text-color);
+                          font-size: 18px; line-height: 1; transition: transform .2s; }
+        .jr-item[open] > .jr-head::after { transform: rotate(90deg); }
         .jr-kind { font-size: 11px; text-transform: uppercase; letter-spacing: .04em; border-radius: 8px; padding: 1px 7px;
                    background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.12); color: var(--primary-color); white-space: nowrap; }
         .jr-suggestion { background: rgba(var(--rgb-warning-color, 255, 152, 0), 0.15); color: var(--warning-color, #ff9800); }
@@ -153,11 +161,14 @@ class HubbubbReviewCard extends HTMLElement {
         ${this._showDecided ? decided : ""}
       </ha-card>`;
 
-    this.querySelectorAll(".jr-item").forEach((item) =>
+    this.querySelectorAll(".jr-item").forEach((item) => {
+      item.addEventListener("toggle", () =>
+        item.open ? this._open.add(item.dataset.id) : this._open.delete(item.dataset.id)
+      );
       item.querySelectorAll("[data-decide]").forEach((b) =>
         b.addEventListener("click", () => this._decide(item.dataset.id, b.dataset.decide))
-      )
-    );
+      );
+    });
     this.querySelector("[data-accept-all]")?.addEventListener("click", () =>
       this._acceptAll(groups.pending.map((p) => p.id))
     );

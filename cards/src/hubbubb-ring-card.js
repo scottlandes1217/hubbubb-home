@@ -29,7 +29,7 @@ import {
   widestGap,
 } from "./pack.js";
 
-const CARD_VERSION = "4.14.5";
+const CARD_VERSION = "4.15.0";
 
 const SATELLITE_DOMAIN = "assist_satellite";
 
@@ -5224,6 +5224,25 @@ class HubbubbRingCard extends LitElement {
     this._todos = lists;
   }
 
+  async _todoAdd(e, list) {
+    e.preventDefault();
+    const input = e.target.querySelector("input");
+    const text = input.value.trim();
+    if (!text) return;
+    input.value = "";
+    // on the screen at once; the count change reloads the truth after
+    this._todos = this._todos.map((l) =>
+      l.id === list.id ? { ...l, items: [...l.items, { uid: `new-${Date.now()}`, summary: text }] } : l
+    );
+    try {
+      await this._hass.callService("todo", "add_item", { item: text }, { entity_id: list.id });
+    } catch (err) {
+      this._toast(`Could not add ${text} to ${list.name}.`);
+      this._todoSig = null;
+      this._watchTodos(this._hass);
+    }
+  }
+
   async _todoDone(list, item) {
     // off the screen at once; the count change reloads the truth after
     this._todos = this._todos.map((l) =>
@@ -5277,13 +5296,17 @@ class HubbubbRingCard extends LitElement {
             ? html`<div class="dim">Unavailable</div>`
             : l.err
             ? html`<div class="perr">${l.err}</div>`
-            : !l.items.length
-            ? html`<div class="dim">Nothing on the list.</div>`
-            : l.items.map(
-                (it) => html`<button class="titem" title="Tick off" @click=${() => this._todoDone(l, it)}>
-                  <span class="tbox"></span><span class="ttext">${it.summary}</span>
-                </button>`
-              )}
+            : html`${!l.items.length
+                ? html`<div class="dim">Nothing on the list.</div>`
+                : l.items.map(
+                    (it) => html`<button class="titem" title="Tick off" @click=${() => this._todoDone(l, it)}>
+                      <span class="tbox"></span><span class="ttext">${it.summary}</span>
+                    </button>`
+                  )}
+                <form class="tadd" @submit=${(e) => this._todoAdd(e, l)}>
+                  <input type="text" placeholder="Add to ${l.name}…" enterkeyhint="done" />
+                  <button type="submit" title="Add">+</button>
+                </form>`}
         </div>`
       )}
     </section>`;
@@ -6200,6 +6223,37 @@ class HubbubbRingCard extends LitElement {
     .ttext {
       min-width: 0;
       overflow-wrap: anywhere;
+    }
+    .tadd {
+      display: flex;
+      gap: 6px;
+      margin-top: 8px;
+    }
+    .tadd input {
+      flex: 1;
+      min-width: 0;
+      margin: 0;
+      padding: 7px 10px;
+      border-radius: 6px;
+      border: 1px solid rgba(var(--jr-line), 0.35);
+      background: rgba(var(--jr-glow), 0.06);
+      color: inherit;
+      font: inherit;
+      font-size: 16px; /* under 16px iOS zooms the page on focus */
+    }
+    .tadd input:focus {
+      outline: none;
+      border-color: var(--jr-color);
+    }
+    .tadd button {
+      flex: none;
+      width: 36px;
+      border-radius: 6px;
+      border: 1px solid rgba(var(--jr-line), 0.45);
+      background: rgba(var(--jr-glow), 0.12);
+      color: var(--jr-color);
+      font-size: 18px;
+      cursor: pointer;
     }
 
     /* ---------------- memories / skills sheet ---------------- */
