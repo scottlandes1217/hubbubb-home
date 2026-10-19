@@ -28,7 +28,7 @@ import {
   widestGap,
 } from "./pack.js";
 
-const CARD_VERSION = "4.13.2";
+const CARD_VERSION = "4.13.4";
 
 const SATELLITE_DOMAIN = "assist_satellite";
 
@@ -319,7 +319,7 @@ const IM3_BOOT = {
   icons: 5.3, iconStep: 0.75,
   clock: 9.3, clockEnd: 12.0,
   imp: 12.2, impEnd: 15.0,
-  down: 16.8, dot: 17.2, reactor: 17.6, back: 20.0, end: 20.8,
+  down: 18.4, dot: 18.8, reactor: 19.2, back: 21.6, end: 22.4,
 };
 // spoken one at a time on their beats, so the pauses fall where the film's do
 const IM3_LINES = [
@@ -328,8 +328,12 @@ const IM3_LINES = [
   [5.3, "and I'm here to assist you with a variety of tasks as best I can,"],
   [9.3, "24 hours a day, 7 days a week."],
   [12.2, "Importing all preferences from home interface."],
-  [15.2, "Systems are now fully operational."],
+  [16.0, "Systems are now fully operational."],
 ];
+// silence owed before each line however late the one before ran; the last
+// line gets a real beat of quiet, as in the film
+const IM3_GAP = 0.35;
+const IM3_LAST_GAP = 1.2;
 
 /* Travelling peaks: a handful of localized bulges that drift around the
    band and breathe. Gentle at idle; when the voice talks they surge taller
@@ -950,12 +954,32 @@ class HubbubbRingCard extends LitElement {
     this._speechAudio = el;
   }
 
+  /* The same voice the pipeline uses, so anything spoken on a screen sounds
+     like the assistant rather than whatever engine is first in the list.
+     -> the audio's URL, or null. */
+  async _ttsUrl(text) {
+    const hass = this._hass;
+    if (!this._ttsCfg) {
+      const list = await hass.callWS({ type: "assist_pipeline/pipeline/list" });
+      const pipes = list?.pipelines || [];
+      const pick = pipes.find((p) => p.id === list.preferred_pipeline) || pipes[0];
+      if (!pick?.tts_engine) return null;
+      this._ttsCfg = { engine_id: pick.tts_engine, language: pick.tts_language, voice: pick.tts_voice };
+    }
+    const cfg = this._ttsCfg;
+    const res = await hass.callApi("POST", "tts_get_url", {
+      engine_id: cfg.engine_id,
+      message: text,
+      language: cfg.language,
+      ...(cfg.voice ? { options: { voice: cfg.voice } } : {}),
+    });
+    return res?.url || res?.path || null;
+  }
+
   async _speakHere(text) {
     const hass = this._hass;
     if (!hass || !text) return;
     try {
-      /* The same voice the pipeline uses, so a finish sounds like the assistant
-         rather than whatever engine happens to be first in the list. */
       if (!this._ttsCfg) {
         const list = await hass.callWS({ type: "assist_pipeline/pipeline/list" });
         const pipes = list?.pipelines || [];
@@ -4971,20 +4995,94 @@ class HubbubbRingCard extends LitElement {
     const lines = this._config.intro_message
       ? [[T.burst, this._config.intro_message]]
       : IM3_LINES.map(([at, text]) => [at, text.replace("{name}", name)]);
+    /* The voice comes out of the screen that was tapped. Unlock its speaker
+       now, inside the tap - iOS only lets audio start from a gesture, and
+       the first line is fetched after this returns. */
+    const el = this._speechAudio || (this._speechAudio = new Audio());
+    el.src = "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA=";
+    el.play().catch(() => {});
+    const here = this._hasSpeaker().then((ok) => {
+      if (!ok) return null;
+      const all = lines.map(([, text]) => this._fetchSpeech(text));
+      all.forEach((p) => p.catch(() => {})); // a failure is handled at its turn
+      return all;
+    });
     const t0 = performance.now();
     (async () => {
-      for (const [at, text] of lines) {
-        const wait = at * 1000 - (performance.now() - t0);
+      let fetched = await here; // started now, so the lines are ready by their beats
+      let ended = 0;
+      for (let i = 0; i < lines.length; i++) {
+        const [at, text] = lines[i];
+        const gap = i === lines.length - 1 && i > 0 ? IM3_LAST_GAP : IM3_GAP;
+        const wait = Math.max(at * 1000, ended + gap * 1000) - (performance.now() - t0);
         if (wait > 0) await new Promise((r) => setTimeout(r, wait));
         if (this._introRun !== run) return;
+        if (fetched) {
+          try {
+            await this._playHere(el, await fetched[i], run);
+            ended = performance.now() - t0;
+            continue;
+          } catch (e) {
+            fetched = null; // no sound out of this screen: the puck takes over
+          }
+        }
         try {
           await say(text);
+          ended = performance.now() - t0;
         } catch (e) {
           this._toast(`${name} could not speak the introduction.`);
           return;
         }
       }
     })();
+  }
+
+  /* Whether this screen can make a sound. Only desktop Chrome lists audio
+     outputs (Android and Safari never do), and it lists none on a machine
+     with no speaker. Everywhere else assume yes - a play() that fails still
+     hands the line to the puck. */
+  async _hasSpeaker() {
+    const ua = navigator.userAgent;
+    if (!/Chrome/.test(ua) || /Android|Mobile/.test(ua)) return true;
+    try {
+      const devs = await navigator.mediaDevices?.enumerateDevices?.();
+      return !devs || devs.some((d) => d.kind === "audiooutput");
+    } catch (e) {
+      return true;
+    }
+  }
+
+  // -> a blob URL of the line in the assistant's voice (throws on failure)
+  async _fetchSpeech(text) {
+    const url = await this._ttsUrl(text);
+    if (!url) throw new Error("no voice");
+    const buf = await (await fetch(url)).arrayBuffer();
+    return URL.createObjectURL(new Blob([buf], { type: "audio/mpeg" }));
+  }
+
+  /* One line out of this screen, with the ring's mouth on its waveform;
+     resolves when it has finished playing. */
+  async _playHere(el, blob, run) {
+    this._envEl = el;
+    this._envUrl = blob;
+    this._env = null;
+    this._decodeAudio(blob);
+    this._voiceState = "responding";
+    try {
+      await new Promise((res, rej) => {
+        el.onended = res;
+        el.onerror = () => rej(new Error("playback"));
+        el.src = blob;
+        el.play().catch(rej);
+      });
+    } finally {
+      URL.revokeObjectURL(blob);
+      if (this._envEl === el) {
+        this._envEl = null;
+        this._env = null;
+        if (!this._voice) this._voiceState = null;
+      }
+    }
   }
 
   /* One dock button's arrival: its icon shows large in the middle of the
