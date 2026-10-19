@@ -29,7 +29,7 @@ import {
   widestGap,
 } from "./pack.js";
 
-const CARD_VERSION = "4.14.2";
+const CARD_VERSION = "4.14.3";
 
 const SATELLITE_DOMAIN = "assist_satellite";
 
@@ -2586,21 +2586,23 @@ class HubbubbRingCard extends LitElement {
       }
     }
 
-    if (!window.isSecureContext) {
-      // plain http (the wall panel): no mic API exists — puck, silently
+    /* This screen's own mic when the page can have one; otherwise, inside
+       the companion app, the app's native Assist - still the phone's mic and
+       speaker, and it works over plain http, which the page's mic never
+       does. The puck only answers a screen that has no way to listen. */
+    const app = this._hass?.auth?.external?.config?.hasAssist;
+    const elsewhere = (why) => {
+      if (app) {
+        this._toast(`${why} - listening through the app instead.`);
+        return this._openAssist();
+      }
+      this._toast(`${why} - waking ${this._name} instead.`);
       this._wakePuck();
-      return;
-    }
-    if (!navigator.mediaDevices?.getUserMedia) {
-      this._toast(`This browser exposes no microphone — waking ${this._name} instead.`);
-      this._wakePuck();
-      return;
-    }
+    };
+    if (!window.isSecureContext) return elsewhere("No microphone on a plain-http page");
+    if (!navigator.mediaDevices?.getUserMedia) return elsewhere("This browser exposes no microphone");
     const result = await this._startLocalVoice();
-    if (result !== true) {
-      this._toast(`Couldn't use this device's mic (${result}) — waking ${this._name} instead.`);
-      this._wakePuck();
-    }
+    if (result !== true) elsewhere(`Couldn't use this device's mic (${result})`);
   }
 
   firstUpdated() {
