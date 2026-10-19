@@ -17,7 +17,10 @@ export function membranePoint(angle, latitude, time, voice, shell, out) {
   const rim=1-u*u*(3-2*u);
   const pressure=.3+.7*Math.pow(.5+.5*Math.sin(a*2+t*.9),2);
   const motion=k*rim*pressure, ambient=.2+.8*rim;
-  const r=SHELL_RADII[shell]+(.006*ambient+motion*.045)*broad
+  // Broad swells travel around the rim even in silence; both shells share
+  // the main swell to preserve their gap, with a smaller independent ripple.
+  const swell=.012*Math.sin(a*2-t*.8)+.005*Math.sin(a*3+t*.45+shell*.6);
+  const r=SHELL_RADII[shell]+rim*swell-motion*.014+(.006*ambient+motion*.045)*broad
     +(.006*ambient+motion*.022)*fold+(.002*ambient+motion*.006)*fold2;
   const cb=Math.cos(b);
   out[0]=r*cb*Math.cos(a);out[1]=r*cb*Math.sin(a);out[2]=r*Math.sin(b);
@@ -42,7 +45,8 @@ vec3 surface(vec2 uv) {
   float rim = 1.0-smoothstep(.18,.55,abs(sin(b)));
   float pressure = .3+.7*pow(.5+.5*sin(a*2.0+t*.9),2.0);
   float motion = uVoice*rim*pressure, ambient = .2+.8*rim;
-  float r = uRadius + (.006*ambient+motion*.045)*broad
+  float swell = .012*sin(a*2.0-t*.8)+.005*sin(a*3.0+t*.45+uShell*.6);
+  float r = uRadius + rim*swell-motion*.014 + (.006*ambient+motion*.045)*broad
     + (.006*ambient+motion*.022)*fold + (.002*ambient+motion*.006)*fold2;
   float cb = cos(b);
   return r * vec3(cb*cos(a), cb*sin(a), sin(b));

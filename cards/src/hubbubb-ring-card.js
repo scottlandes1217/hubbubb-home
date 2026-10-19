@@ -32,7 +32,7 @@ import {
   widestGap,
 } from "./pack.js";
 
-const CARD_VERSION = "4.20.0";
+const CARD_VERSION = "4.21.0";
 
 const SATELLITE_DOMAIN = "assist_satellite";
 
@@ -2871,7 +2871,7 @@ class HubbubbRingCard extends LitElement {
     this._crumple = current + (want - current) * (1 - Math.exp(-dt / tau));
     // Continuous advection: pauses relax the skin, without resetting its
     // texture or rotating a fixed arrangement of vertices around the globe.
-    this._flowT = (this._flowT || 0) + dt * (0.12 + this._crumple * 0.9);
+    this._flowT = (this._flowT || 0) + dt * (0.35 + this._crumple * 0.65);
     if (!this._sheetState) this._sheetState = SHEETS.map((s,index) => ({index}));
     for (const st of this._sheetState) {
       st.time = this._flowT;
