@@ -10,8 +10,9 @@ export const SHELL_RADII = [0.90, 0.78];
 export function membranePoint(angle, latitude, time, voice, shell, out) {
   const a=angle,b=latitude,t=time,k=Math.max(0,Math.min(1.2,voice));
   const broad=Math.sin(a*3+t*.51)*.46 + Math.sin(a*5-t*.37+1.8)*.27 + Math.sin(a*7+t*.26)*.17;
-  const fold=Math.sin(a*5+b*13+Math.sin(a*3-b*4+t*.7)*1.6-t*.8+shell*2.1);
-  const fold2=Math.sin(a*9-b*19+t*.6+shell*1.3);
+  const flow=a+t*(shell===0?.12:-.10);
+  const fold=Math.sin(flow*5+b*13+Math.sin(flow*3-b*4+t*.7)*1.6-t*.8+shell*2.1);
+  const fold2=Math.sin(flow*9-b*19+t*.6+shell*1.3);
   const depth=Math.abs(Math.sin(b));
   const u=Math.max(0,Math.min(1,(depth-.18)/.37));
   const rim=1-u*u*(3-2*u);
@@ -19,9 +20,9 @@ export function membranePoint(angle, latitude, time, voice, shell, out) {
   const motion=k*rim*pressure, ambient=.2+.8*rim;
   // Broad swells travel around the rim even in silence; both shells share
   // the main swell to preserve their gap, with a smaller independent ripple.
-  const swell=.012*Math.sin(a*2-t*.8)+.005*Math.sin(a*3+t*.45+shell*.6);
-  const r=SHELL_RADII[shell]+rim*swell-motion*.014+(.006*ambient+motion*.045)*broad
-    +(.006*ambient+motion*.022)*fold+(.002*ambient+motion*.006)*fold2;
+  const swell=.018*Math.sin(a*2-t*.8)+.008*Math.sin(a*3+t*.45+shell*.6);
+  const r=SHELL_RADII[shell]+rim*swell-motion*.014+(.009*ambient+motion*.045)*broad
+    +(.009*ambient+motion*.022)*fold+(.003*ambient+motion*.006)*fold2;
   const cb=Math.cos(b);
   out[0]=r*cb*Math.cos(a);out[1]=r*cb*Math.sin(a);out[2]=r*Math.sin(b);
   return out;
@@ -38,16 +39,17 @@ vec3 surface(vec2 uv) {
     + sin(a*5.0-t*.37+1.8)*.27 + sin(a*7.0+t*.26)*.17;
   // Shared pressure keeps two silhouettes separate; depth-dependent folds
   // travel independently through each skin, including its rear hemisphere.
-  float fold = sin(a*5.0+b*13.0+sin(a*3.0-b*4.0+t*.7)*1.6-t*.8+uShell*2.1);
-  float fold2 = sin(a*9.0-b*19.0+t*.6+uShell*1.3);
+  float flow = a+t*(uShell<.5 ? .12 : -.10);
+  float fold = sin(flow*5.0+b*13.0+sin(flow*3.0-b*4.0+t*.7)*1.6-t*.8+uShell*2.1);
+  float fold2 = sin(flow*9.0-b*19.0+t*.6+uShell*1.3);
   // Speech acts on the outer ~16% of the projected skin. The front/back
   // faces retain only their quiet drift, instead of crumpling with each word.
   float rim = 1.0-smoothstep(.18,.55,abs(sin(b)));
   float pressure = .3+.7*pow(.5+.5*sin(a*2.0+t*.9),2.0);
   float motion = uVoice*rim*pressure, ambient = .2+.8*rim;
-  float swell = .012*sin(a*2.0-t*.8)+.005*sin(a*3.0+t*.45+uShell*.6);
-  float r = uRadius + rim*swell-motion*.014 + (.006*ambient+motion*.045)*broad
-    + (.006*ambient+motion*.022)*fold + (.002*ambient+motion*.006)*fold2;
+  float swell = .018*sin(a*2.0-t*.8)+.008*sin(a*3.0+t*.45+uShell*.6);
+  float r = uRadius + rim*swell-motion*.014 + (.009*ambient+motion*.045)*broad
+    + (.009*ambient+motion*.022)*fold + (.003*ambient+motion*.006)*fold2;
   float cb = cos(b);
   return r * vec3(cb*cos(a), cb*sin(a), sin(b));
 }
@@ -78,7 +80,12 @@ float noise(vec3 p) {
                  mix(hash(i+vec3(0,1,1)),hash(i+vec3(1,1,1)),f.x),f.y),f.z);
 }
 void main() {
-  vec3 p=vPoint*4.5+vec3(uShell*7.0,uTime*.12,-uTime*.18);
+  // Counter-flowing highlights reveal the skins' movement in standby.
+  // Advect the light pattern, rather than spinning the entire sphere.
+  float turn=uTime*(uShell<.5 ? .18 : -.14);
+  float cs=cos(turn), sn=sin(turn);
+  vec2 flow=vec2(cs*vPoint.x-sn*vPoint.y,sn*vPoint.x+cs*vPoint.y);
+  vec3 p=vec3(flow,vPoint.z)*4.5+vec3(uShell*7.0,uTime*.14,-uTime*.22);
   float n=noise(p), n2=noise(p*2.3+vec3(n*1.8));
   float smoke=.35+.65*(n*.55+n2*.45);
   float edge=pow(1.0-abs(normalize(vNormal).z),3.8);
