@@ -1,5 +1,5 @@
 import { LitElement, css, html, nothing, svg } from "lit";
-import { drawArmorSequence, prepareArmor, HELMET_OUTLINE, HELMET_PLATES, HELMET_EYES } from "./im3-armor.js";
+import { drawArmorSequence, prepareArmor, ARMOR_CHARGE_PROGRESS, HELMET_OUTLINE, HELMET_PLATES, HELMET_EYES } from "./im3-armor.js";
 import { keyed } from "lit/directives/keyed.js";
 
 /* The integration serves this file from a path carrying its version, so the
@@ -294,7 +294,7 @@ const SHEETS = SHELL_RADII.map((r, i) => ({r, share: i === 0 ? .58 : .42, dir: i
 /* The film's introduction, in seconds, choreographed to its lines: the ring
    bursts in, the name assembles, each feature's icon shows in the ring and
    drops into the bar, a clock, preferences importing, then the suit powers
-   up to 100%. Only after that completes does the operational line play. */
+   up as the operational line plays, reaching 100% on its last word. */
 const IM3_BOOT = {
   fold: 0.4, burst: 0.9, settle: 2.4,
   word: 2.6, wordHold: 3.8, wordGone: 4.6, wordEnd: 5.0,
@@ -336,7 +336,7 @@ const IM3_LINES = [
   [5.3, "and I'm here to assist you with a variety of tasks as best I can,"],
   [9.3, "24 hours a day, 7 days a week."],
   [12.2, "Importing home preferences."],
-  [IM3_BOOT.back, "All systems are operational."],
+  [IM3_BOOT.reactor, "All systems are operational."],
   // Sequential playback adds a short breath after the operational line.
   [IM3_BOOT.back + 0.35, "Let me know how I can assist."],
 ];
@@ -2926,7 +2926,19 @@ class HubbubbRingCard extends LitElement {
       this._remotePlaying = false;
       return;
     }
-    if (!this._remotePlaying) this._introPreferenceCue?.();
+    if (!this._remotePlaying) {
+      this._introPreferenceCue?.();
+      this._introPowerCue?.();
+    }
+    const powerVoice = this._boot?.powerVoice;
+    if (powerVoice && !powerVoice.audio && Number(st.attributes?.media_duration) > 0) {
+      powerVoice.duration = Number(st.attributes.media_duration);
+      if (Number.isFinite(st.attributes.media_position)) {
+        const updated = Date.parse(st.attributes.media_position_updated_at || "");
+        const elapsed = Number.isFinite(updated) ? Math.max(0, (Date.now()-updated)/1000) : 0;
+        powerVoice.started = performance.now() - (st.attributes.media_position+elapsed)*1000;
+      }
+    }
     this._remotePlaying = true;
     const a = st.attributes || {};
     const raw = String(a.media_content_id || "");
@@ -4698,7 +4710,22 @@ class HubbubbRingCard extends LitElement {
     if (!b) return { ring: 1, scale: 1, burst: 0, globe: 1, phase: null };
     // Hold just before the import until its spoken cue is actually audible.
     b.t = b.waitForPreferences ? Math.min(b.t + dt, T.imp - .001) : b.t + dt;
+    if (b.waitForPowerSpeech) b.t = Math.min(b.t, T.reactor);
+    if (b.powerVoice) {
+      const v = b.powerVoice;
+      const duration = v.audio ? v.audio.duration : v.duration;
+      const position = v.audio ? v.audio.currentTime : (performance.now()-v.started)/1000;
+      // Atlas frame 38 is the first fully assembled / 100% frame. Audio is
+      // the clock: buffering or a longer voice must not finish the bar early.
+      const progress = Number.isFinite(duration) && duration > 0 ? clamp(position/duration, 0, .999) : 0;
+      b.t = T.reactor + (T.back-T.reactor) * ARMOR_CHARGE_PROGRESS * progress;
+    }
     const t = b.t;
+    if (t >= T.reactor && this._introRun) {
+      this._introRun.powerStarted = true;
+      this._introRun.powerStartWaiter?.(true);
+      this._introRun.powerStartWaiter = null;
+    }
     if (t >= T.back && this._introRun) {
       this._introRun.powerComplete = true;
       this._introRun.powerWaiter?.(true);
@@ -4999,6 +5026,8 @@ class HubbubbRingCard extends LitElement {
 
   _stopIntroVisuals() {
     this._introPreferenceCue = null;
+    this._introPowerCue = null;
+    this._introRun?.powerStartWaiter?.(false);
     this._introRun?.powerWaiter?.(false);
     this._introRun = null;
     clearTimeout(this._bootTimer);
@@ -5061,6 +5090,7 @@ class HubbubbRingCard extends LitElement {
     const T = IM3_BOOT;
     if (!this._config.intro_message) {
       this._boot.waitForPreferences = true;
+      this._boot.waitForPowerSpeech = true;
       clearTimeout(this._bootTimer);
     }
     /* One line at a time, each on its beat or as soon as the one before has
@@ -5098,14 +5128,15 @@ class HubbubbRingCard extends LitElement {
         const wait = Math.max(at * 1000, ended + gap * 1000) - (performance.now() - t0);
         if (wait > 0) await new Promise((r) => setTimeout(r, wait));
         if (this._introRun !== run) return;
-        // A timer alone can outrun a slow/hidden canvas. Wait for the power
-        // animation to finish on screen before announcing operational status.
-        if (at === T.back && !(await this._waitIntroPower(run))) return;
+        if (at === T.reactor && !(await this._waitIntroPower(run, true))) return;
+        if (at > T.back && !(await this._waitIntroPower(run))) return;
         if (fetched) {
           try {
             const blob = await fetched[i];
             if (this._introRun !== run) { URL.revokeObjectURL(blob); return; }
-            await this._playHere(el, blob, run, at === T.imp ? preferencesPlaying : null);
+            await this._playHere(el, blob, run,
+              at === T.imp ? preferencesPlaying : at === T.reactor ? () => this._beginIntroPower(run, el) : null,
+              at === T.reactor ? () => this._endIntroPower(run) : null);
             ended = performance.now() - t0;
             continue;
           } catch (e) {
@@ -5119,7 +5150,12 @@ class HubbubbRingCard extends LitElement {
             this._introPreferenceCue = preferencesPlaying;
             if (this._config.follow_media_player === false || !this._resolveMediaPlayer(this._hass)) preferencesPlaying();
           }
+          if (at === T.reactor) {
+            this._introPowerCue = () => this._beginIntroPower(run);
+            if (this._config.follow_media_player === false || !this._resolveMediaPlayer(this._hass)) this._introPowerCue();
+          }
           await say(text);
+          if (at === T.reactor) this._endIntroPower(run);
           // Some devices do not publish a playback state; release the hold
           // on completion rather than leaving the introduction stuck.
           if (at === T.imp) preferencesPlaying();
@@ -5156,10 +5192,36 @@ class HubbubbRingCard extends LitElement {
     return URL.createObjectURL(new Blob([buf], { type: "audio/mpeg" }));
   }
 
-  _waitIntroPower(run) {
+  _waitIntroPower(run, start = false) {
     if (this._introRun !== run) return Promise.resolve(false);
-    if (run.powerComplete) return Promise.resolve(true);
-    return new Promise(resolve => { run.powerWaiter = resolve; });
+    if (start ? run.powerStarted : run.powerComplete) return Promise.resolve(true);
+    return new Promise(resolve => { run[start ? "powerStartWaiter" : "powerWaiter"] = resolve; });
+  }
+
+  _beginIntroPower(run, audio = null) {
+    if (this._introRun !== run || !this._boot) return;
+    this._introPowerCue = null;
+    this._boot.waitForPowerSpeech = false;
+    this._boot.powerVoice = {audio, started:performance.now(), duration:IM3_BOOT.back-IM3_BOOT.reactor};
+    clearTimeout(this._bootTimer);
+  }
+
+  _endIntroPower(run) {
+    if (this._introRun !== run || !this._boot) return;
+    this._introPowerCue = null;
+    this._boot.waitForPowerSpeech = false;
+    this._boot.powerVoice = null;
+    this._boot.t = IM3_BOOT.reactor + (IM3_BOOT.back-IM3_BOOT.reactor) * ARMOR_CHARGE_PROGRESS;
+    this._scheduleIntroFinish(run);
+  }
+
+  _scheduleIntroFinish(run) {
+    clearTimeout(this._bootTimer);
+    this._bootTimer = setTimeout(() => {
+      if (this._introRun !== run) return;
+      this._booting = false;
+      this._landed = null;
+    }, (IM3_BOOT.end - this._boot.t) * 1000);
   }
 
   _beginIntroPreferences(run) {
@@ -5167,16 +5229,11 @@ class HubbubbRingCard extends LitElement {
     this._introPreferenceCue = null;
     this._boot.waitForPreferences = false;
     this._boot.t = IM3_BOOT.imp;
-    clearTimeout(this._bootTimer);
-    this._bootTimer = setTimeout(() => {
-      if (this._introRun !== run) return;
-      this._booting = false;
-      this._landed = null;
-    }, (IM3_BOOT.end - IM3_BOOT.imp) * 1000);
+    if (!this._boot.waitForPowerSpeech) this._scheduleIntroFinish(run);
     return true;
   }
 
-  async _playHere(el, blob, run, onPlaying = null) {
+  async _playHere(el, blob, run, onPlaying = null, onEnded = null) {
     this._trackSpeech(el, blob);
     try {
       await new Promise((res, rej) => {
@@ -5184,7 +5241,7 @@ class HubbubbRingCard extends LitElement {
           if (this._introRun === run) onPlaying?.();
           el.onplaying = null;
         };
-        el.onended = res;
+        el.onended = () => { if (this._introRun === run) onEnded?.(); res(); };
         el.onerror = () => rej(new Error("playback"));
         el.src = blob;
         el.play().catch(rej);

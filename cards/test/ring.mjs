@@ -251,24 +251,34 @@ console.log('rim-only speech deformation and entrance lifecycle ok');
 console.log('preferences wait for actual local or satellite playback');
 
 {
+  for (const duration of [1.2, 2.4, 5.6]) {
+    const c=make(),run=c._introRun={};
+    c._boot={t:14.99,waitForPowerSpeech:true};
+    assert.equal(c._im3Boot(0).phase,'import');
+    const starting=c._waitIntroPower(run,true);
+    assert.equal(c._im3Boot(.02).phase,'reactor','preferences lead directly into the power bar');
+    assert.equal(await starting,true);
+    assert.equal(c._im3Boot(10).u,0,'network delay holds power at zero until voice plays');
+    const audio={duration,currentTime:0};
+    c._beginIntroPower(run,audio);
+    for (const fraction of [0,.25,.5,.9]) {
+      audio.currentTime=duration*fraction;
+      const frame=c._im3Boot(.05);
+      assert.ok(Math.abs(frame.u-(38/58)*fraction)<1e-8,'armor follows actual speech progress at any voice duration');
+      assert.equal(c._im3Boot(10).u,frame.u,'buffered or paused audio cannot be outrun by animation');
+    }
+    c._endIntroPower(run);
+    assert.ok(Math.abs(c._im3Boot(0).u-38/58)<1e-8,'100% frame lands on the audio ended event');
+    const finished=c._waitIntroPower(run);
+    c._im3Boot(1);
+    assert.equal(await finished,true,'the final assistance line waits for the completed suit hold');
+    c._stopIntroVisuals();
+  }
   const c=make(),run=c._introRun={};
-  c._boot={t:14.99};
-  assert.equal(c._im3Boot(0).phase,'import');
-  const power=c._im3Boot(.02);
-  assert.equal(power.phase,'reactor','preferences lead directly into the power bar');
-  assert.ok(power.u<.01,'power animation begins at the start');
-  let announced=false;
-  const ready=c._waitIntroPower(run).then(ok=>{announced=ok;});
-  // Elapsed wall time alone cannot release the announcement.
-  await Promise.resolve();assert.equal(announced,false);
-  c._boot.t=17.39;c._im3Boot(0);
-  await Promise.resolve();assert.equal(announced,false,'no announcement before the last power frame');
-  assert.equal(c._im3Boot(.02).phase,'reactorOut');
-  await ready;assert.equal(announced,true,'announcement releases only after power completes');
-  assert.equal(await c._waitIntroPower(run),true,'late speech can continue after completed animation');
-  const cancelled=c._introRun={};
-  const waiting=c._waitIntroPower(cancelled);
+  const waiting=c._waitIntroPower(run,true);
   c._stopIntroVisuals();
-  assert.equal(await waiting,false,'stopping or replaying cancels an old announcement');
+  assert.equal(await waiting,false,'replaying cancels a waiting narration');
+  c._beginIntroPower(run,{duration:1,currentTime:1});
+  assert.equal(c._boot,null,'stale playback cannot restart a stopped suit');
 }
-console.log('preferences → power → operational announcement ordering ok');
+console.log('operational speech and 100% armor frame finish together across voice durations');

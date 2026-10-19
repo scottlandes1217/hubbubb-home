@@ -14,6 +14,8 @@ export const HELMET_EYES = 'M5.6 10.9 10.6 12 10.1 12.9 6.3 12.3ZM18.4 10.9 13.4
 // Keep the original suit AND its meter together: geometry, assembly and
 // percentage cannot drift. The atlas is embedded so the versioned card has no separate asset request.
 import armorAtlas from "./im3-armor-atlas.js";
+// First 100% frame, verified against the reference meter.
+export const ARMOR_CHARGE_PROGRESS = 38 / 58;
 let atlas, film;
 export function prepareArmor() {
   if (!atlas && typeof Image !== 'undefined') {
@@ -44,7 +46,7 @@ export function prepareArmor() {
 export function drawArmorSequence(ctx, cx, cy, half, u, outro = false) {
   prepareArmor();
   if (!film) return false;
-  const frame = outro ? Math.min(65, 58 + Math.floor(u * 8)) : Math.min(57, Math.floor(Math.max(0, u) * 58));
+  const frame = outro ? Math.min(65, 58 + Math.floor(u * 8)) : Math.min(57, Math.floor(Math.max(0, u) * 58 + 1e-7));
   const h = half * 1.94, w = h * 360 / 525;
   ctx.save();
   ctx.globalCompositeOperation = 'lighter';
