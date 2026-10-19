@@ -172,3 +172,45 @@ console.log('ring audio ownership, silence, onset timing, and membrane bounds ok
   assert.equal(c._segMap.size,0,'closed sessions disappear');
 }
 console.log('two-shell spacing and session context display ok');
+
+{
+  const {membranePoint}=await import('../src/im3-membrane.js');
+  const quiet=[0,0,0], speaking=[0,0,0];
+  let rimMotion=0;
+  for(let shell=0;shell<2;shell++) for(let t=0;t<12;t+=.7) for(let a=0;a<Math.PI*2;a+=.2) {
+    for(const latitude of [-1.2,-.7,.7,1.2]) {
+      membranePoint(a,latitude,t,0,shell,quiet);
+      membranePoint(a,latitude,t,1,shell,speaking);
+      assert.deepEqual(speaking,quiet,'speech leaves the front/back faces calm');
+    }
+    membranePoint(a,0,t,0,shell,quiet);
+    membranePoint(a,0,t,1,shell,speaking);
+    rimMotion=Math.max(rimMotion,Math.hypot(...speaking.map((v,i)=>v-quiet[i])));
+  }
+  assert.ok(rimMotion>.025,'the rim still visibly responds to speech');
+}
+{
+  const c=make(), schedule=new Map();let next=1;
+  const realSet=globalThis.setTimeout, realClear=globalThis.clearTimeout;
+  globalThis.setTimeout=(fn,ms)=>{const id=next++;schedule.set(id,{fn,ms});return id;};
+  globalThis.clearTimeout=id=>schedule.delete(id);
+  try {
+    const old=c._startIntroVisuals();
+    const stale=[...schedule.values()].filter(t=>t.ms<10000);
+    assert.equal(stale.length,5,'all five entrances scheduled');
+    const run=c._startIntroVisuals();
+    assert.notEqual(old,run);
+    assert.equal(schedule.size,6,'replay clears previous icon and completion timers');
+    stale.forEach(t=>t.fn());
+    assert.equal(c._landed.size,0,'old callbacks cannot land icons in the new run');
+    [...schedule.values()].filter(t=>t.ms<10000).forEach(t=>t.fn());
+    assert.equal(c._landed.size,5,'all slots become available even without animation support');
+    let removed=0,cancelled=0;
+    c._introOverlays=new Set([{getAnimations:()=>[{cancel:()=>cancelled++}],remove:()=>removed++}]);
+    c._stopIntroVisuals();
+    assert.equal(schedule.size,0);
+    assert.equal(removed,1);assert.equal(cancelled,1);
+    assert.equal(c._introRun,null);assert.equal(c._landed,null);assert.equal(c._booting,false);
+  } finally {globalThis.setTimeout=realSet;globalThis.clearTimeout=realClear;}
+}
+console.log('rim-only speech deformation and entrance lifecycle ok');

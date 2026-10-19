@@ -12,7 +12,13 @@ export function membranePoint(angle, latitude, time, voice, shell, out) {
   const broad=Math.sin(a*3+t*.51)*.46 + Math.sin(a*5-t*.37+1.8)*.27 + Math.sin(a*7+t*.26)*.17;
   const fold=Math.sin(a*5+b*13+Math.sin(a*3-b*4+t*.7)*1.6-t*.8+shell*2.1);
   const fold2=Math.sin(a*9-b*19+t*.6+shell*1.3);
-  const r=SHELL_RADII[shell]+(.006+k*.045)*broad+(.006+k*.022)*fold+(.002+k*.006)*fold2;
+  const depth=Math.abs(Math.sin(b));
+  const u=Math.max(0,Math.min(1,(depth-.18)/.37));
+  const rim=1-u*u*(3-2*u);
+  const pressure=.3+.7*Math.pow(.5+.5*Math.sin(a*2+t*.9),2);
+  const motion=k*rim*pressure, ambient=.2+.8*rim;
+  const r=SHELL_RADII[shell]+(.006*ambient+motion*.045)*broad
+    +(.006*ambient+motion*.022)*fold+(.002*ambient+motion*.006)*fold2;
   const cb=Math.cos(b);
   out[0]=r*cb*Math.cos(a);out[1]=r*cb*Math.sin(a);out[2]=r*Math.sin(b);
   return out;
@@ -31,8 +37,13 @@ vec3 surface(vec2 uv) {
   // travel independently through each skin, including its rear hemisphere.
   float fold = sin(a*5.0+b*13.0+sin(a*3.0-b*4.0+t*.7)*1.6-t*.8+uShell*2.1);
   float fold2 = sin(a*9.0-b*19.0+t*.6+uShell*1.3);
-  float r = uRadius + (.006+uVoice*.045)*broad
-    + (.006+uVoice*.022)*fold + (.002+uVoice*.006)*fold2;
+  // Speech acts on the outer ~16% of the projected skin. The front/back
+  // faces retain only their quiet drift, instead of crumpling with each word.
+  float rim = 1.0-smoothstep(.18,.55,abs(sin(b)));
+  float pressure = .3+.7*pow(.5+.5*sin(a*2.0+t*.9),2.0);
+  float motion = uVoice*rim*pressure, ambient = .2+.8*rim;
+  float r = uRadius + (.006*ambient+motion*.045)*broad
+    + (.006*ambient+motion*.022)*fold + (.002*ambient+motion*.006)*fold2;
   float cb = cos(b);
   return r * vec3(cb*cos(a), cb*sin(a), sin(b));
 }

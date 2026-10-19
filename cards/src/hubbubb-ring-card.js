@@ -32,7 +32,7 @@ import {
   widestGap,
 } from "./pack.js";
 
-const CARD_VERSION = "4.19.0";
+const CARD_VERSION = "4.20.0";
 
 const SATELLITE_DOMAIN = "assist_satellite";
 
@@ -831,6 +831,7 @@ class HubbubbRingCard extends LitElement {
     this._stop();
     this._membrane?.dispose();
     this._membrane = undefined;
+    this._stopIntroVisuals();
     this._stopPolling();
     this._stopLocalVoice();
     clearInterval(this._sessTimer);
@@ -4681,7 +4682,7 @@ class HubbubbRingCard extends LitElement {
     };
     // the globe gives way to whatever is showing in the ring
     const win = (a, z) => clamp(Math.min(t - a, z - t) / 0.2, 0, 1);
-    const globe = 1 - Math.max(win(T.icons - 0.1, T.icons + 5 * T.iconStep), win(T.clock, T.clockEnd), win(T.imp, T.impEnd));
+    const globe = 1 - Math.max(.82 * win(T.icons - 0.1, T.icons + 5 * T.iconStep), win(T.clock, T.clockEnd), win(T.imp, T.impEnd));
     if (t < T.fold) {
       const u = t / T.fold;
       return { ring: 1 - u * 0.5, scale: 1 - 0.98 * u * u, burst: 0, globe: 1, phase: null };
@@ -4973,17 +4974,44 @@ class HubbubbRingCard extends LitElement {
     return 1;
   }
 
-  _intro() {
-    if (this._booting) return;
-    this._boot = { t: 0 };
-    this._booting = true;
+  _stopIntroVisuals() {
+    this._introRun = null;
     clearTimeout(this._bootTimer);
+    for (const timer of this._introIconTimers || []) clearTimeout(timer);
+    this._introIconTimers = [];
+    for (const el of this._introOverlays || []) {
+      for (const anim of el.getAnimations?.({subtree:true}) || []) anim.cancel();
+      el.remove();
+    }
+    this._introOverlays = new Set();
+    this._boot = null;
+    this._booting = false;
+    this._landed = null;
+  }
+
+  _startIntroVisuals() {
+    this._stopIntroVisuals();
+    this._boot = {t:0};
+    this._booting = true;
+    const run = this._introRun = {};
     const im3 = this._config.animation === "jarvis-im3";
-    const run = (this._introRun = {});
+    if (im3) {
+      this._landed = new Set();
+      this._introIconTimers = Array.from({length:5}, (_, i) =>
+        setTimeout(() => this._flyIcon(i, run), (IM3_BOOT.icons + i * IM3_BOOT.iconStep) * 1000));
+    }
     this._bootTimer = setTimeout(() => {
+      if (this._introRun !== run) return;
       this._booting = false;
       this._landed = null;
     }, im3 ? IM3_BOOT.end * 1000 : 6500);
+    return run;
+  }
+
+  _intro() {
+    if (this._booting) return;
+    const run = this._startIntroVisuals();
+    const im3 = this._config.animation === "jarvis-im3";
     const name = this._name;
     const say = (message) =>
       Promise.resolve(
@@ -5003,10 +5031,7 @@ class HubbubbRingCard extends LitElement {
       setTimeout(() => say(message).catch(() => this._toast(`${name} could not speak the introduction.`)), 900);
       return;
     }
-    // The bar starts empty; each button's icon arrives through the ring.
-    this._landed = new Set();
     const T = IM3_BOOT;
-    for (let i = 0; i < 5; i++) setTimeout(() => this._flyIcon(i, run), (T.icons + i * T.iconStep) * 1000);
     /* One line at a time, each on its beat or as soon as the one before has
        finished playing (announce returns when the puck is done), so the
        pauses land where the film's do and a slow line never overlaps. */
@@ -5099,12 +5124,12 @@ class HubbubbRingCard extends LitElement {
     }
   }
 
-  /* One dock button's arrival: its icon shows large in the middle of the
-     ring, holds, then drops into its slot in the bar - done on an overlay
-     element, since the canvas ends at the ring's edge. */
+  /* Assemble a holographic glyph in the globe, turn it edge-on, then
+     carry it into its real dock slot. The overlay spans ring and dock. */
   _flyIcon(i, run) {
     const done = () => {
-      if (this._landed) this._landed = new Set([...this._landed, i]);
+      if (this._introRun === run && this._landed)
+        this._landed = new Set([...this._landed, i]);
     };
     if (this._introRun !== run) return;
     const root = this.shadowRoot;
@@ -5113,34 +5138,51 @@ class HubbubbRingCard extends LitElement {
     const btn = root?.querySelectorAll(".dock button")[i];
     const icon = btn?.querySelector("svg");
     if (!wrap || !ring || !icon || !wrap.animate) return done();
-    const W = wrap.getBoundingClientRect();
-    const Rg = ring.getBoundingClientRect();
-    const Ic = icon.getBoundingClientRect();
-    const box = 30;
+    const W = wrap.getBoundingClientRect(), Rg = ring.getBoundingClientRect();
+    const Ic = icon.getBoundingClientRect(), box = 40;
     const el = document.createElement("div");
     el.className = "flyicon";
-    el.innerHTML = icon.outerHTML;
+    el.setAttribute("aria-hidden", "true");
+    el.innerHTML = `<svg class="fly-halo" viewBox="0 0 40 40" fill="none" stroke="currentColor">
+      <circle cx="20" cy="20" r="18" stroke-width=".35" opacity=".5"/>
+      <circle class="fly-orbit" cx="20" cy="20" r="16.5" stroke-width=".8" stroke-dasharray="24 9 12 7"/>
+      <circle class="fly-orbit reverse" cx="20" cy="20" r="19.5" stroke-width=".3" stroke-dasharray="2 4"/>
+      </svg><div class="fly-glyph">${icon.outerHTML}</div><div class="fly-scan"></div>`;
     const x0 = Rg.left + Rg.width / 2 - W.left - box / 2;
     const y0 = Rg.top + Rg.height / 2 - W.top - box / 2;
     el.style.left = `${x0}px`;
     el.style.top = `${y0}px`;
     wrap.appendChild(el);
-    const s0 = (Rg.width * 0.36) / box;
-    const s1 = Ic.width / box;
+    this._introOverlays ||= new Set();
+    this._introOverlays.add(el);
+    // Match the glyph's final dimensions to the padded SVG in the button.
+    const padding = parseFloat(getComputedStyle(icon).paddingLeft) || 0;
+    const s0 = (Rg.width * .38) / box;
+    const s1 = (Ic.width - padding * 2) / (box * .58);
     const dx = Ic.left + Ic.width / 2 - W.left - box / 2 - x0;
     const dy = Ic.top + Ic.height / 2 - W.top - box / 2 - y0;
-    const anim = el.animate(
-      [
-        { transform: `translate(0,0) scale(${s0 * 0.55})`, opacity: 0, offset: 0 },
-        { transform: `translate(0,0) scale(${s0})`, opacity: 1, offset: 0.14 },
-        { transform: `translate(0,0) scale(${s0})`, opacity: 1, offset: 0.6 },
-        { transform: `translate(${dx}px,${dy}px) scale(${s1})`, opacity: 1, offset: 1 },
-      ],
-      { duration: 900, easing: "cubic-bezier(0.55, 0, 0.3, 1)", fill: "forwards" }
-    );
+    for (const path of el.querySelectorAll(".fly-glyph path,.fly-glyph rect,.fly-glyph circle")) {
+      const length = path.getTotalLength();
+      path.style.strokeDasharray = `${length}`;
+      path.animate([{strokeDashoffset:length,opacity:0},{strokeDashoffset:0,opacity:1}],
+        {duration:310,delay:35,easing:"ease-out",fill:"both"});
+    }
+    const anim = el.animate([
+      {transform:`perspective(500px) scale(${s0*.65}) rotateY(-65deg)`,opacity:0,offset:0},
+      {transform:`perspective(500px) scale(${s0}) rotateY(0deg)`,opacity:1,offset:.22},
+      {transform:`perspective(500px) scale(${s0}) rotateY(0deg)`,opacity:1,offset:.43},
+      {transform:`perspective(500px) translate(${dx*.18}px,${dy*.2}px) scale(${s0*.8}) rotateY(62deg) rotateZ(-12deg)`,opacity:.85,offset:.64},
+      {transform:`perspective(500px) translate(${dx}px,${dy}px) scale(${s1}) rotateY(0deg) rotateZ(0deg)`,opacity:1,offset:1},
+    ], {duration:1050,easing:"cubic-bezier(.35,0,.2,1)",fill:"forwards"});
+    el.querySelector(".fly-halo").animate([{opacity:0},{opacity:.85,offset:.2},{opacity:.8,offset:.58},{opacity:0}],
+      {duration:1050,fill:"both"});
     anim.onfinish = () => {
       el.remove();
+      this._introOverlays.delete(el);
+      if (this._introRun !== run) return;
       done();
+      btn.animate([{filter:"brightness(2.5) drop-shadow(0 0 8px currentColor)",transform:"scale(1.12)"},
+        {filter:"brightness(1)",transform:"scale(1)"}],{duration:420,easing:"ease-out"});
     };
   }
 
@@ -5413,7 +5455,7 @@ class HubbubbRingCard extends LitElement {
     const meet = this._meetLabel;
     // the count rides on the icon's corner; keyed so a new value pops in
     const badge = (i, v, cls = "") => (v && !pend(i) ? keyed(v, html`<b class="badge ${cls}">${v}</b>`) : nothing);
-    return html`<nav class="dock">
+    return html`<nav class="dock ${this._booting && this._config.animation === "jarvis-im3" ? "assembling" : ""}">
       <button class=${pend(0)} title=${meet ? `Calendar - next meeting in ${meet}` : "Calendar"} aria-label="Calendar" @click=${() => this._openCalendar()}>
         ${ico(svg`<rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/><path d="M7.5 13h2M11 13h2M14.5 13h2M7.5 16.5h2M11 16.5h2"/>`)}
         ${badge(0, meet)}
@@ -6267,21 +6309,39 @@ class HubbubbRingCard extends LitElement {
       60% { opacity: 1; box-shadow: 0 0 12px var(--jr-color); }
       100% { transform: scale(1); box-shadow: 0 0 0 transparent; }
     }
+    .dock.assembling {
+      animation: jrDockArrive .6s 4.6s cubic-bezier(.2,.75,.2,1) both;
+    }
+    .dock.assembling button svg { transition: none; }
+    @keyframes jrDockArrive {
+      from { opacity: 0; transform: translateY(28px) scaleX(.72); clip-path: inset(0 46% 0 46%); }
+      to { opacity: 1; transform: translateY(0) scaleX(1); clip-path: inset(-30px -20px -20px -20px); }
+    }
     .flyicon {
       position: absolute;
-      width: 30px;
-      height: 30px;
+      width: 40px;
+      height: 40px;
       z-index: 4;
       pointer-events: none;
       color: var(--jr-color);
       transform-origin: 50% 50%;
-      filter: drop-shadow(0 0 2px var(--jr-color)) drop-shadow(0 0 8px var(--jr-color));
+      filter: drop-shadow(0 0 .25px rgba(var(--jr-line),.5));
     }
-    .flyicon svg {
-      position: static;
-      width: 100%;
-      height: 100%;
-      stroke-width: 1.7;
+    .flyicon .fly-halo { position: absolute; inset: 0; width: 100%; height: 100%; }
+    .fly-glyph { position: absolute; inset: 21%; }
+    .fly-glyph svg { position: static; width: 100%; height: 100%; stroke-width: 1; }
+    .fly-orbit { transform-origin: 20px 20px; animation: jrFlyOrbit 1.5s linear infinite; }
+    .fly-orbit.reverse { animation-direction: reverse; animation-duration: 2.2s; }
+    @keyframes jrFlyOrbit { to { transform: rotate(360deg); } }
+    .fly-scan {
+      position: absolute; inset: 10%; border-radius: 50%; overflow: hidden;
+      background: repeating-linear-gradient(0deg, transparent 0 1.4px, rgba(var(--jr-line),.16) 1.4px 1.6px);
+      animation: jrFlyScan .65s ease-out both;
+    }
+    @keyframes jrFlyScan {
+      0% { clip-path: inset(100% 0 0); opacity: 0; }
+      35% { opacity: .75; }
+      100% { clip-path: inset(0); opacity: 0; }
     }
 
     /* ---------------- to-do lists ---------------- */
