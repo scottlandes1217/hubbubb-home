@@ -2094,9 +2094,10 @@ class HubbubbRingCard extends LitElement {
             type="button"
             class="hbtn stop"
             data-ai="interrupt-turn"
-            title="Interrupt this turn (sends Escape)"
+            title="Stop - interrupt this turn (sends Escape)"
+            aria-label="Stop"
             @click=${() => this._sendKey("Escape", { keepOpen: true })}
-          >Stop</button>`
+          ><i></i></button>`
         : nothing}
     </div>`;
   }
@@ -7218,12 +7219,22 @@ class HubbubbRingCard extends LitElement {
     }
     .hbtn.stop {
       border-color: rgba(255, 92, 92, 0.6);
-      color: #ff9d9d;
       flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+    }
+    .hbtn.stop i {
+      width: 11px;
+      height: 11px;
+      border-radius: 2px;
+      background: #ff4d4d;
     }
     .hbtn.stop:hover {
       border-color: #ff5c5c;
-      color: #ffc4c4;
+    }
+    .hbtn.stop:hover i {
+      background: #ff7070;
     }
     .runsel {
       border: 1px solid rgba(255, 255, 255, 0.14);

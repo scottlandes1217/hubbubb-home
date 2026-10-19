@@ -59,6 +59,9 @@ intents:
           - "(add|put) {item} (to|on) the (shopping|house|grocery) list"
         slots:
           scope: house
+      # Any other list by its name; "list" at the end fences the wildcard.
+      - sentences:
+          - "(add|put) {item} (to|on) [my|the|our] {list_name} list"
   HubbubbListDone:
     data:
       - sentences:
@@ -89,4 +92,6 @@ lists:
   message:
     wildcard: true
   item:
+    wildcard: true
+  list_name:
     wildcard: true

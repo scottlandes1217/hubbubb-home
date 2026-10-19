@@ -2237,6 +2237,20 @@ def test_same_request_spots_a_repeat_not_a_new_command():
     assert not same_request("the", "a")
 
 
+def test_named_list_match():
+    from hubbubb_home.intents import match_list
+
+    names = {"todo.shopping_list": "Shopping List",
+             "todo.house_projects": "House Projects"}
+    assert match_list(names, None) == ""                  # no name: default
+    assert match_list(names, "my") == ""                  # "my list"
+    assert match_list(names, "the house") == ""           # "the house list"
+    assert match_list(names, "shopping") == "todo.shopping_list"
+    assert match_list(names, "house projects list") == "todo.house_projects"
+    assert match_list(names, "my project") == "todo.house_projects"
+    assert match_list(names, "christmas") is None
+
+
 if __name__ == "__main__":
     passed = 0
     for name, fn in sorted(globals().items()):

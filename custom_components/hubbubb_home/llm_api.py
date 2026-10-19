@@ -30,7 +30,7 @@ from .approvals import VERIFY_CONFIDENCE
 from .companion import CompanionError
 from .const import DOMAIN
 from .hubbubb import HubbubbError, HubbubbPending
-from .intents import _open_items, resolve_list
+from .intents import _open_items, named_list, resolve_list
 from .speakers import SpeakerServiceError
 
 _LOGGER = logging.getLogger(__name__)
@@ -345,12 +345,15 @@ class AddToListTool(_RuntimeTool):
     description = (
         "Put an item on a to-do or shopping list. personal=true means the "
         "speaker's own list (falling back to the household list when they "
-        "have none); personal=false means the household list."
+        "have none); personal=false means the household list. When the "
+        "speaker names a list (\"add paint to house projects\"), pass that "
+        "name as list."
     )
     parameters = vol.Schema(
         {
             vol.Required("item"): vol.All(str, vol.Length(min=1, max=200)),
             vol.Optional("personal", default=True): bool,
+            vol.Optional("list"): vol.All(str, vol.Length(max=80)),
         }
     )
 
@@ -360,7 +363,12 @@ class AddToListTool(_RuntimeTool):
         # Same rule as memory: a stranger doesn't write to the house's lists.
         if self._guest(llm_context):
             return {"error": _GUEST_ERROR}
-        entity, owner = resolve_list(
+        spoken = tool_input.tool_args.get("list")
+        named = named_list(hass, spoken)
+        if named is None:
+            return {"error": f"there is no list called {spoken}",
+                    "lists": [s.name for s in hass.states.async_all("todo")]}
+        entity, owner = (named, "named") if named else resolve_list(
             self._runtime,
             self._speaker(llm_context),
             tool_input.tool_args.get("personal", True),
@@ -374,7 +382,8 @@ class AddToListTool(_RuntimeTool):
         )
         return {
             "added": tool_input.tool_args["item"],
-            "list": "the speaker's own" if owner == "mine" else "household",
+            "list": hass.states.get(entity).name if owner == "named"
+            else "the speaker's own" if owner == "mine" else "household",
         }
 
 

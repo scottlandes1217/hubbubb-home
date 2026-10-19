@@ -155,6 +155,44 @@ def resolve_list(runtime, person: str | None, personal: bool = True):
     return None, None
 
 
+# Words that name the default list rather than a particular one.
+_DEFAULT_LISTS = {"", "my", "house", "household", "grocery", "groceries", "to do", "todo"}
+
+
+def _list_key(name: str) -> str:
+    words = name.lower().replace("-", " ").replace("_", " ").split()
+    while words and words[0] in ("my", "the", "our"):
+        words = words[1:]
+    if words and words[-1] in ("list", "lists"):
+        words = words[:-1]
+    return " ".join(words)
+
+
+def match_list(names: dict[str, str], spoken: str | None) -> str | None:
+    """The to-do entity a spoken list name means: "" for the default list
+    (no name, "my list", "the house list"), None for no such list.
+
+    names maps entity_id -> friendly name. Exact name first, then substring.
+    """
+    want = _list_key(spoken or "")
+    keys = {e: _list_key(n) for e, n in names.items()}
+    for e, k in keys.items():
+        if k == want and want:
+            return e
+    if want in _DEFAULT_LISTS:
+        return ""
+    for e, k in keys.items():
+        if k and (want in k or k in want):
+            return e
+    return None
+
+
+def named_list(hass: HomeAssistant, spoken: str | None) -> str | None:
+    return match_list(
+        {s.entity_id: s.name for s in hass.states.async_all("todo")}, spoken
+    )
+
+
 def match_item(summaries: list[str], spoken: str) -> str | None:
     """The list entry a spoken phrase means, or None.
 
@@ -793,15 +831,23 @@ class ListAddHandler(_Handler):
     slot_schema = {
         vol.Required("item"): cv.string,
         vol.Optional("scope"): cv.string,
+        vol.Optional("list_name"): cv.string,
     }
-    description = "Add something to the speaker's or the household's list"
+    description = "Add something to the speaker's, the household's or a named list"
 
     async def async_handle(self, intent_obj: intent.Intent):
         slots = self.async_validate_slots(intent_obj.slots)
         item = str(slots["item"]["value"]).strip()
         personal = slots.get("scope", {}).get("value") != "house"
+        spoken = slots.get("list_name", {}).get("value")
+        named = named_list(intent_obj.hass, spoken)
+        if named is None:
+            return self._say(intent_obj, f"I don't have a list called {spoken}.")
         person, _, _ = self._speaker(intent_obj)
-        entity, owner = resolve_list(self._runtime, person, personal)
+        entity, owner = (
+            (named, "named") if named
+            else resolve_list(self._runtime, person, personal)
+        )
         if entity is None:
             return self._say(
                 intent_obj,
@@ -820,6 +866,9 @@ class ListAddHandler(_Handler):
         if personal and owner == "house":
             # They said "my list" but have none mapped; say where it went.
             return self._say(intent_obj, f"{item} went on the house list.")
+        if owner == "named":
+            name = intent_obj.hass.states.get(entity)
+            return self._say(intent_obj, f"{item} is on {name.name if name else spoken}.")
         where = "your list" if owner == "mine" else "the house list"
         return self._say(intent_obj, f"{item} is on {where}.")
 
