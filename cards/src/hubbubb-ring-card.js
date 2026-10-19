@@ -2067,7 +2067,7 @@ class HubbubbRingCard extends LitElement {
     // A local pick wins until the transcript confirms it; otherwise the model
     // the session last replied with, read by the listener — so a fresh console
     // shows the real model instead of the placeholder.
-    const model = this._model || s?.model || "";
+    const model = this._model || this._latestAlias(models, s?.model) || "";
     return html`<div class="runbar">
       <select
         class="runsel ${this._modelBusy && this._modelBusy !== "perm" ? "busy" : ""}"
@@ -2104,6 +2104,16 @@ class HubbubbRingCard extends LitElement {
           ><i></i></button>`
         : nothing}
     </div>`;
+  }
+
+  /* The transcript stamps the full id (claude-opus-5-5). When that is the
+     newest of its family, show the "Opus (latest)" alias instead: the live
+     list comes newest first, so the first claude-opus-* in it is the latest. */
+  _latestAlias(models, id) {
+    const fam = /^claude-([a-z]+)-/.exec(id || "")?.[1];
+    if (!fam || !models.some((m) => m.id === fam)) return id;
+    const newest = models.find((m) => m.id.startsWith(`claude-${fam}-`));
+    return newest?.id === id ? fam : id;
   }
 
   /* The list is small and changes about as often as a model ships, so it is
