@@ -30,7 +30,7 @@ from .approvals import VERIFY_CONFIDENCE
 from .companion import CompanionError
 from .const import DOMAIN
 from .hubbubb import HubbubbError, HubbubbPending
-from .intents import _open_items, named_list, resolve_list
+from .intents import _open_items, match_item, pick_list
 from .speakers import SpeakerServiceError
 
 _LOGGER = logging.getLogger(__name__)
@@ -49,6 +49,7 @@ def agent_tools(runtime) -> list[llm.Tool]:
         DeleteRecipeTool(runtime),
         AddToListTool(runtime),
         ReadListTool(runtime),
+        CheckOffListTool(runtime),
         SetSpeakerTool(runtime),
         CameraActivityTool(runtime),
         StartTimerTool(runtime),
@@ -363,18 +364,9 @@ class AddToListTool(_RuntimeTool):
         # Same rule as memory: a stranger doesn't write to the house's lists.
         if self._guest(llm_context):
             return {"error": _GUEST_ERROR}
-        spoken = tool_input.tool_args.get("list")
-        named = named_list(hass, spoken)
-        if named is None:
-            return {"error": f"there is no list called {spoken}",
-                    "lists": [s.name for s in hass.states.async_all("todo")]}
-        entity, owner = (named, "named") if named else resolve_list(
-            self._runtime,
-            self._speaker(llm_context),
-            tool_input.tool_args.get("personal", True),
-        )
-        if entity is None:
-            return {"error": "no list is configured in the options"}
+        entity, err = _pick(self, hass, tool_input, llm_context)
+        if err:
+            return err
         await hass.services.async_call(
             "todo", "add_item",
             {"entity_id": entity, "item": tool_input.tool_args["item"]},
@@ -382,8 +374,7 @@ class AddToListTool(_RuntimeTool):
         )
         return {
             "added": tool_input.tool_args["item"],
-            "list": hass.states.get(entity).name if owner == "named"
-            else "the speaker's own" if owner == "mine" else "household",
+            "list": hass.states.get(entity).name,
         }
 
 
@@ -392,24 +383,75 @@ class ReadListTool(_RuntimeTool):
     description = (
         "Read the unfinished items on a list. personal=true is the "
         "speaker's own list (or the household's when they have none); "
-        "personal=false is the household list."
+        "personal=false is the household list. Pass list when the speaker "
+        "names one."
     )
-    parameters = vol.Schema({vol.Optional("personal", default=True): bool})
+    parameters = vol.Schema(
+        {
+            vol.Optional("personal", default=True): bool,
+            vol.Optional("list"): vol.All(str, vol.Length(max=80)),
+        }
+    )
 
     async def async_call(
         self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context
     ) -> JsonObjectType:
-        entity, owner = resolve_list(
-            self._runtime,
-            self._speaker(llm_context),
-            tool_input.tool_args.get("personal", True),
-        )
-        if entity is None:
-            return {"error": "no list is configured in the options"}
+        entity, err = _pick(self, hass, tool_input, llm_context)
+        if err:
+            return err
         return {
             "items": await _open_items(hass, entity),
-            "list": "the speaker's own" if owner == "mine" else "household",
+            "list": hass.states.get(entity).name,
         }
+
+
+class CheckOffListTool(_RuntimeTool):
+    name = "check_off_list"
+    description = (
+        "Cross an item off a to-do or shopping list (mark it done). Same "
+        "personal/list rules as read_list."
+    )
+    parameters = vol.Schema(
+        {
+            vol.Required("item"): vol.All(str, vol.Length(min=1, max=200)),
+            vol.Optional("personal", default=True): bool,
+            vol.Optional("list"): vol.All(str, vol.Length(max=80)),
+        }
+    )
+
+    async def async_call(
+        self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context
+    ) -> JsonObjectType:
+        if self._guest(llm_context):
+            return {"error": _GUEST_ERROR}
+        entity, err = _pick(self, hass, tool_input, llm_context)
+        if err:
+            return err
+        items = await _open_items(hass, entity)
+        found = match_item(items, tool_input.tool_args["item"])
+        if found is None:
+            return {"error": "not on that list", "items": items}
+        await hass.services.async_call(
+            "todo", "update_item",
+            {"entity_id": entity, "item": found, "status": "completed"},
+            blocking=True,
+        )
+        return {"done": found, "list": hass.states.get(entity).name}
+
+
+def _pick(tool, hass, tool_input, llm_context):
+    """The list a tool call means -> (entity_id, None) or (None, error)."""
+    spoken = tool_input.tool_args.get("list")
+    entity, owner = pick_list(
+        hass, tool._runtime, tool._speaker(llm_context),
+        tool_input.tool_args.get("personal", True), spoken,
+    )
+    if owner == "missing":
+        return None, {"error": f"there is no list called {spoken}",
+                      "lists": [s.name for s in hass.states.async_all("todo")]}
+    if entity is None:
+        return None, {"error": "no list is configured in the options"}
+    return entity, None
 
 
 class SetSpeakerTool(_RuntimeTool):

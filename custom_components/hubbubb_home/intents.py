@@ -193,6 +193,25 @@ def named_list(hass: HomeAssistant, spoken: str | None) -> str | None:
     )
 
 
+def pick_list(hass, runtime, person, personal: bool, spoken: str | None):
+    """resolve_list, unless a list was named: -> (entity_id, "named"), or
+    (None, "missing") when no list has that name."""
+    named = named_list(hass, spoken)
+    if named is None:
+        return None, "missing"
+    if named:
+        return named, "named"
+    return resolve_list(runtime, person, personal)
+
+
+def list_label(hass, entity: str, owner: str) -> str:
+    """How a reply names the list: "House Projects", "your list"..."""
+    if owner == "named":
+        state = hass.states.get(entity)
+        return state.name if state else "that list"
+    return "your list" if owner == "mine" else "the house list"
+
+
 def match_item(summaries: list[str], spoken: str) -> str | None:
     """The list entry a spoken phrase means, or None.
 
@@ -840,14 +859,12 @@ class ListAddHandler(_Handler):
         item = str(slots["item"]["value"]).strip()
         personal = slots.get("scope", {}).get("value") != "house"
         spoken = slots.get("list_name", {}).get("value")
-        named = named_list(intent_obj.hass, spoken)
-        if named is None:
-            return self._say(intent_obj, f"I don't have a list called {spoken}.")
         person, _, _ = self._speaker(intent_obj)
-        entity, owner = (
-            (named, "named") if named
-            else resolve_list(self._runtime, person, personal)
+        entity, owner = pick_list(
+            intent_obj.hass, self._runtime, person, personal, spoken
         )
+        if owner == "missing":
+            return self._say(intent_obj, f"I don't have a list called {spoken}.")
         if entity is None:
             return self._say(
                 intent_obj,
@@ -866,27 +883,32 @@ class ListAddHandler(_Handler):
         if personal and owner == "house":
             # They said "my list" but have none mapped; say where it went.
             return self._say(intent_obj, f"{item} went on the house list.")
-        if owner == "named":
-            name = intent_obj.hass.states.get(entity)
-            return self._say(intent_obj, f"{item} is on {name.name if name else spoken}.")
-        where = "your list" if owner == "mine" else "the house list"
+        where = list_label(intent_obj.hass, entity, owner)
         return self._say(intent_obj, f"{item} is on {where}.")
 
 
 class ListReadHandler(_Handler):
     intent_type = INTENT_LIST_READ
-    slot_schema = {vol.Optional("scope"): cv.string}
-    description = "Read the speaker's or the household's list"
+    slot_schema = {
+        vol.Optional("scope"): cv.string,
+        vol.Optional("list_name"): cv.string,
+    }
+    description = "Read the speaker's, the household's or a named list"
 
     async def async_handle(self, intent_obj: intent.Intent):
         slots = self.async_validate_slots(intent_obj.slots)
         personal = slots.get("scope", {}).get("value") != "house"
+        spoken = slots.get("list_name", {}).get("value")
         person, _, _ = self._speaker(intent_obj)
-        entity, owner = resolve_list(self._runtime, person, personal)
+        entity, owner = pick_list(
+            intent_obj.hass, self._runtime, person, personal, spoken
+        )
+        if owner == "missing":
+            return self._say(intent_obj, f"I don't have a list called {spoken}.")
         if entity is None:
             return self._say(intent_obj, "No list is set up yet.")
         items = await _open_items(intent_obj.hass, entity)
-        where = "your list" if owner == "mine" else "the house list"
+        where = list_label(intent_obj.hass, entity, owner)
         if not items:
             return self._say(intent_obj, f"Nothing on {where}.")
         # Spoken: eight items is already a lot to hold in your head.
@@ -897,19 +919,28 @@ class ListReadHandler(_Handler):
 
 class ListDoneHandler(_Handler):
     intent_type = INTENT_LIST_DONE
-    slot_schema = {vol.Required("item"): cv.string}
-    description = "Cross something off the speaker's list"
+    slot_schema = {
+        vol.Required("item"): cv.string,
+        vol.Optional("list_name"): cv.string,
+    }
+    description = "Cross something off the speaker's or a named list"
 
     async def async_handle(self, intent_obj: intent.Intent):
         slots = self.async_validate_slots(intent_obj.slots)
         spoken = str(slots["item"]["value"]).strip()
+        name = slots.get("list_name", {}).get("value")
         person, _, _ = self._speaker(intent_obj)
-        entity, _owner = resolve_list(self._runtime, person, True)
+        entity, owner = pick_list(
+            intent_obj.hass, self._runtime, person, True, name
+        )
+        if owner == "missing":
+            return self._say(intent_obj, f"I don't have a list called {name}.")
         if entity is None:
             return self._say(intent_obj, "No list is set up yet.")
         found = match_item(await _open_items(intent_obj.hass, entity), spoken)
         if found is None:
-            return self._say(intent_obj, f"I don't see {spoken} on the list.")
+            where = list_label(intent_obj.hass, entity, owner)
+            return self._say(intent_obj, f"I don't see {spoken} on {where}.")
         try:
             await intent_obj.hass.services.async_call(
                 "todo", "update_item",

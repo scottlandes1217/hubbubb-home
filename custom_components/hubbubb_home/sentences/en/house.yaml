@@ -49,6 +49,9 @@ intents:
           - "read [me] the (shopping|house|grocery) list"
         slots:
           scope: house
+      - sentences:
+          - "(what's|what is) on [my|the|our] {list_name} list"
+          - "read [me] [my|the|our] {list_name} list"
   # The {item} wildcard is fenced by mandatory literals on both sides, so it
   # cannot eat the sentence the way a bare wildcard would.
   HubbubbListAdd:
@@ -67,6 +70,9 @@ intents:
       - sentences:
           - "(cross|check|tick|take) {item} off [of] (my|the) list"
           - "mark {item} [as] done on (my|the) list"
+      - sentences:
+          - "(cross|check|tick|take) {item} off [of] [my|the|our] {list_name} list"
+          - "mark {item} [as] done on [my|the|our] {list_name} list"
   HubbubbAsk:
     data:
       # Every spelling speech-to-text has for the name: "hubbub" is a real
