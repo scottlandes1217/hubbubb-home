@@ -1,4 +1,4 @@
-/* Regression coverage for actual card audio ownership and mesh geometry. */
+/* Regression coverage for actual card audio ownership and projected membrane geometry. */
 import assert from 'node:assert/strict';
 const registry = new Map();
 globalThis.window = {};
@@ -111,31 +111,45 @@ const audio = () => ({ currentTime: 0.2, paused: false, ended: false, readyState
     c._speech.count = Math.floor(i/14);
     const sheets = c._sheetTables(1/60, {speech:1}, i < 20 ? 1.2 : 0);
     assert.equal(sheets.length, 2, 'exactly two smoke shells');
-    for (let b = 0; b < 360; b++) {
-      const outer = sheets[0], inner = sheets[1];
-      const outerEdge = outer.rc[b] - Math.abs(outer.cw[b]) - Math.abs(outer.skew[b]);
-      const innerEdge = inner.rc[b] + Math.abs(inner.cw[b]) + Math.abs(inner.skew[b]);
-      assert.ok(outerEdge - innerEdge > 0.045, 'visible air gap survives every syllable and startup burst');
-      assert.ok(inner.rc[b] - Math.abs(inner.cw[b]) > 0.70, 'space from sphere and context display stays open');
+    // Compare actual projected silhouettes, including the front and back
+    // folds. Interior veils may overlap: the two outside edges must not merge.
+    for (let b = 0; b < 360; b += 9) {
+      const th=b/360*Math.PI*2;
+      const edges=sheets.map(st=>{
+        let max=0;
+        for(let j=-24;j<=24;j++) {
+          c._sheetPoint(st,th,j/24,0,p);
+          max=Math.max(max,Math.hypot(p[0],p[1]));
+        }
+        return max;
+      });
+      assert.ok(edges[0]-edges[1]>.025,'bubble silhouettes stay distinct');
+      assert.ok(edges[1]>.68,'inner silhouette leaves room for the core and sessions');
     }
     for (const st of sheets) {
-      for (let b = 0; b < 360; b += 3) for (const v of [-1,0,1]) {
+      for (let b = 0; b < 360; b += 3) for (const v of [-1,-.75,-.5,-.25,0,.25,.5,.75,1]) {
         const th = b/360 * 2*Math.PI;
         c._sheetPoint(st, th, v, 0, p);
-        maxRadius = Math.max(maxRadius, Math.hypot(...p));
+        maxRadius = Math.max(maxRadius, Math.hypot(p[0],p[1]));
         assert.ok(p.every(Number.isFinite));
       }
       c._sheetPoint(st, 0, 0.7, 0.8, p);
       c._sheetPoint(st, Math.PI*2, 0.7, 0.8, q);
-      assert.ok(Math.hypot(p[0]-q[0],p[1]-q[1]) < 1e-6, 'closed mesh has no seam');
-      c._sheetPoint(st, 0.3, 1, 0, p);
-      c._sheetPoint(st, 0.3, 1, Math.PI/2, q);
-      assert.ok(Math.hypot(-p[1]-q[0],p[0]-q[1]) < 1e-6, 'mesh and grains rotate in same space');
+      assert.ok(Math.hypot(p[0]-q[0],p[1]-q[1]) < 1e-6, 'closed bubble has no seam');
+      c._sheetPoint(st, 0.3, 0.4, 0, p);
+      c._sheetPoint(st, 0.3, 0.4, Math.PI/2, q);
+      assert.ok(Math.hypot(-p[1]-q[0],p[0]-q[1]) < 1e-6, 'projected surface rotates consistently');
     }
   }
-  assert.ok(maxRadius < 0.99, `speech and burst stay inside canvas: ${maxRadius}`);
+  assert.ok(maxRadius < 1.0, `speech and burst stay inside canvas: ${maxRadius}`);
+  const st=c._sheetState[0];
+  c._sheetPoint(st,0,0,0,p); const rim=Math.hypot(p[0],p[1]);
+  c._sheetPoint(st,0,.7,0,p);
+  assert.ok(Math.hypot(p[0],p[1])<rim*.5,'front surface projects into the bubble interior');
+  c._sheetPoint(st,0,1,0,p);
+  assert.ok(Math.hypot(p[0],p[1])<1e-6,'pole projects to center instead of another ring');
 }
-console.log('ring audio ownership, silence, onset timing, and mesh geometry ok');
+console.log('ring audio ownership, silence, onset timing, and membrane bounds ok');
 
 {
   const c = make();

@@ -18,6 +18,7 @@ console.info(`hubbubb-ring-card ${BUILD}`);
 // live DOM value instead of the last rendered one.
 import { live } from "lit/directives/live.js";
 import { downsampler, rmsEnvelope } from "./envelope.js";
+import { createMembrane, membranePoint, SHELL_RADII } from "./im3-membrane.js";
 import { nowNext, parseEvent } from "./hubbubb-calendar.js";
 import { groupProposals } from "./review-groups.js";
 import { promptKey, splitPaths } from "./paths.js";
@@ -31,7 +32,7 @@ import {
   widestGap,
 } from "./pack.js";
 
-const CARD_VERSION = "4.18.0";
+const CARD_VERSION = "4.19.0";
 
 const SATELLITE_DOMAIN = "assist_satellite";
 
@@ -287,16 +288,8 @@ const RIBBONS = [
   { r: 0.875, amp: 0.09, thick: 0.008, rev: 1, share: 0.28, glow: 1.4 },
 ];
 
-/* Two separate, thin shells, measured against the reference's globe:
-   outer radius ~3.1x the core, inner ~2.7x. Their motion shares a broad
-   pressure wave, so speech folds them without closing the dark air gap. */
-const SHEETS = [
-  { r: 0.90, w: 0.027, share: 0.58, dir: 1 },
-  { r: 0.79, w: 0.019, share: 0.42, dir: -1 },
-];
-const SHEET_BINS = 360;
-const LOBE_KS = [3, 4, 5, 7, 9, 12];
-const TWIST_MS = [2, 3, 5, 7];
+/* Two hollow, translucent surfaces around the original wireframe core. */
+const SHEETS = SHELL_RADII.map((r, i) => ({r, share: i === 0 ? .58 : .42, dir: i === 0 ? 1 : -1}));
 /* The film's introduction, in seconds, choreographed to its lines: the ring
    bursts in, the name assembles, each feature's icon shows in the ring and
    drops into the bar, a clock, preferences importing, then "fully
@@ -836,6 +829,8 @@ class HubbubbRingCard extends LitElement {
     document.removeEventListener?.("visibilitychange", this._onVisibility);
     window.removeEventListener?.("pagehide", this._onHide);
     this._stop();
+    this._membrane?.dispose();
+    this._membrane = undefined;
     this._stopPolling();
     this._stopLocalVoice();
     clearInterval(this._sessTimer);
@@ -2859,71 +2854,27 @@ class HubbubbRingCard extends LitElement {
     });
   }
 
-  /* All layers sample in the sheet's local coordinates, then rotate once.
-     Previously the grains sampled after rotation while the film sampled
-     before it; the two surfaces drifted apart as the animation ran. */
   _sheetPoint(st, angle, v, rotation, out) {
-    const u = ((angle / (2 * Math.PI)) % 1 + 1) % 1 * SHEET_BINS;
-    const b = Math.floor(u), n = (b + 1) % SHEET_BINS, f = u - b;
-    const mix = (a) => a[b] + (a[n] - a[b]) * f;
-    const r = mix(st.rc) + v * mix(st.cw);
-    const shear = v * mix(st.skew);
-    const th = angle + rotation;
-    out[0] = r * Math.cos(th) - shear * Math.sin(th);
-    out[1] = r * Math.sin(th) + shear * Math.cos(th);
+    membranePoint(angle, v * Math.PI / 2, st.time, st.voice, st.index, out);
+    const x=out[0], y=out[1];
+    out[0]=x*Math.cos(rotation)-y*Math.sin(rotation);
+    out[1]=x*Math.sin(rotation)+y*Math.cos(rotation);
     return out;
   }
 
   _sheetTables(dt, cur, burst) {
-    if (!this._sheetState) {
-      const rand = seeded(0x1a3e);
-      this._sheetRand = rand;
-      this._sheetState = SHEETS.map(() => ({
-        phase: Array.from({ length: 10 }, () => rand() * Math.PI * 2),
-        target: Array.from({ length: 10 }, () => rand() * Math.PI * 2),
-        rc: new Float32Array(SHEET_BINS),
-        cw: new Float32Array(SHEET_BINS),
-        skew: new Float32Array(SHEET_BINS),
-      }));
-      this._crumple = 0;
-    }
-    const sp = this._speech;
-    const voice = (sp?.env || 0) * cur.speech;
+    const voice = (this._speech?.env || 0) * cur.speech;
     const want = Math.max(burst, Math.min(1, voice * 1.35));
-    const tau = want > this._crumple ? 0.012 : 0.045;
-    this._crumple += (want - this._crumple) * (1 - Math.exp(-dt / tau));
-    // Only a real syllable onset chooses a new fold. Between onsets the same
-    // fabric travels continuously; no unrelated timer invents extra words.
-    if (sp && sp.count !== this._sheetSyllable && voice > 0.05) {
-      this._sheetSyllable = sp.count;
-      for (const st of this._sheetState)
-        st.target = st.phase.map((v) => v + (this._sheetRand() - 0.5) * 2.6);
-    }
+    const current = this._crumple || 0;
+    const tau = want > current ? 0.012 : 0.045;
+    this._crumple = current + (want - current) * (1 - Math.exp(-dt / tau));
+    // Continuous advection: pauses relax the skin, without resetting its
+    // texture or rotating a fixed arrangement of vertices around the globe.
     this._flowT = (this._flowT || 0) + dt * (0.12 + this._crumple * 0.9);
-    const k = Math.min(1.2, this._crumple);
-    const ft = this._flowT;
-    for (let si = 0; si < SHEETS.length; si++) {
-      const sh = SHEETS[si], st = this._sheetState[si];
-      const follow = 1 - Math.exp(-dt / 0.055);
-      for (let i = 0; i < st.phase.length; i++)
-        st.phase[i] += (st.target[i] - st.phase[i]) * follow;
-      for (let b = 0; b < SHEET_BINS; b++) {
-        const th = b / SHEET_BINS * Math.PI * 2;
-        let lobe = 0, twist = 0;
-        const pressure = this._sheetState[0].phase;
-        for (let i = 0; i < LOBE_KS.length; i++)
-          lobe += Math.sin(LOBE_KS[i] * th + pressure[i] + ft * (0.4 + i * 0.08)) / (2.4 + i * 1.1);
-        for (let i = 0; i < TWIST_MS.length; i++)
-          twist += Math.sin(TWIST_MS[i] * th + st.phase[i + 6] - sh.dir * ft * 0.7) / (1.5 + i);
-        const fold = twist * (0.3 + k * 2.7);
-        const flutter = Math.sin(th * 23 + st.phase[0] + ft) * Math.sin(th * 11 - ft);
-        st.rc[b] = sh.r + (0.003 + k * 0.038) * Math.tanh(lobe)
-          + k * 0.004 * flutter;
-        // Keep a little thickness when edge-on: smoke folds into a wisp,
-        // rather than every grain collapsing onto a hard wire.
-        st.cw[b] = sh.w * (0.25 + 0.75 * Math.abs(Math.cos(fold)));
-        st.skew[b] = sh.w * Math.sin(fold) * 0.18;
-      }
+    if (!this._sheetState) this._sheetState = SHEETS.map((s,index) => ({index}));
+    for (const st of this._sheetState) {
+      st.time = this._flowT;
+      st.voice = this._crumple;
     }
     return this._sheetState;
   }
@@ -4537,8 +4488,18 @@ class HubbubbRingCard extends LitElement {
         ctx.scale(boot.scale, boot.scale);
         ctx.translate(-cx, -cy);
       }
-      this._drawSheetFilm(ctx, cx, cy, half, cur, sheets, R, G, B);
-      this._drawSheetDots(ctx, cx, cy, half, cur, sheets, R, G, B);
+      if (this._membrane === undefined) this._membrane = createMembrane();
+      const resolution = Math.min(720, Math.round(half * 4 * Math.max(.65, this._perf?.q ?? 1)));
+      if (this._membrane?.draw(resolution, this._flowT, this._crumple, cur.bright / 1.6, [R/255, G/255, B/255])) {
+        ctx.globalCompositeOperation = "lighter";
+        ctx.drawImage(this._membrane.canvas, cx-half, cy-half, half*2, half*2);
+        ctx.globalCompositeOperation = "source-over";
+      } else {
+        this._membrane?.dispose();
+        this._membrane = null;
+        this._drawSheetFilm(ctx, cx, cy, half, cur, sheets, R, G, B);
+        this._drawSheetDots(ctx, cx, cy, half, cur, sheets, R, G, B);
+      }
       ctx.globalAlpha = boot.ring;
       this._drawIm3Rings(ctx, cx, cy, half, R, G, B, dt);
       const SR = half * 0.29 * (1 + env * 0.04);
@@ -4587,7 +4548,9 @@ class HubbubbRingCard extends LitElement {
       MR[nm] = Math.max(0.22, p.sz * szMul * 0.68);
       const life = Math.sin(Math.PI * ((t / p.life + p.ph / (2 * Math.PI)) % 1));
       const density = 0.8 + 0.2 * Math.sin(th * 7 + t * 0.3 + p.si);
-      const a = p.br * aMul * 1.05 * (0.2 + 0.8 * life * life) * density;
+      const edge = Math.pow(1 - Math.abs(Math.sin(v * Math.PI / 2)), 3);
+      const a = p.br * aMul * .7 * (0.2 + 0.8 * life * life) * density * edge;
+      if (a < .025) continue;
       MB[nm++] = Math.min(MOTE_ALPHAS - 1, (clamp(a, 0, 1) * MOTE_ALPHAS) | 0);
     }
     const base = ctx.globalAlpha;
@@ -4610,64 +4573,38 @@ class HubbubbRingCard extends LitElement {
     ctx.globalAlpha = base;
   }
 
-  /* Broken, soft wisps at uneven depths. No concentric rows or diagonal
-     stitches, and no rigid rotation: density flows along each deforming shell. */
+  /* Canvas fallback: projected front/back surface strips give the skin
+     depth even without GPU support. Never draw the connecting grid lines. */
   _drawSheetFilm(ctx, cx, cy, half, cur, sheets, R, G, B) {
-    const base = ctx.globalAlpha;
-    const bright = cur.bright / 1.6;
-    const point = this._sheetScratch || (this._sheetScratch = [0, 0]);
-    ctx.globalCompositeOperation = "lighter";
-    ctx.strokeStyle = `rgb(${R},${G},${B})`;
-    ctx.lineCap = "round";
-    for (let si = 0; si < SHEETS.length; si++) {
-      const st = sheets[si];
-      // Feathered volume under the dust. Nested low-opacity strokes soften
-      // the whole shell rather than blurring individual bright specks.
-      for (let segment = 0; segment < 72; segment++) {
-        const start = segment / 72 * Math.PI * 2;
-        const bin = segment * 5;
-        ctx.beginPath();
-        for (let j = 0; j <= 5; j++) {
-          this._sheetPoint(st, start + j / 360 * Math.PI * 2, 0, 0, point);
-          const x = cx + point[0] * half, y = cy + point[1] * half;
-          if (j === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    const base=ctx.globalAlpha, point=[0,0,0];
+    ctx.globalCompositeOperation="lighter";
+    ctx.strokeStyle=`rgb(${R},${G},${B})`;
+    for (const st of sheets) {
+      let previous=null;
+      for (let layer=0;layer<54;layer++) {
+        const v=(layer/53-.5)*1.9;
+        const edge=Math.pow(1-Math.abs(Math.sin(v*Math.PI/2)),2);
+        const curve=[];
+        for (let j=0;j<=180;j++) {
+          const th=j/180*Math.PI*2;
+          this._sheetPoint(st,th,v,0,point);
+          curve.push([cx+point[0]*half,cy+point[1]*half]);
         }
-        const density = 0.7 + 0.3 * Math.sin(start * 4 - this._flowT + si);
-        const width = 2 * Math.abs(st.cw[bin]) * half;
-        for (let layer = 0; layer < 5; layer++) {
-          ctx.lineWidth = Math.max(0.5, width * (1.15 - layer * 0.19));
-          ctx.globalAlpha = base * bright * density * 0.018;
-          ctx.stroke();
-        }
-      }
-      for (let wisp = 0; wisp < 4; wisp++) {
-        const phase = wisp * 2.399 + si * 1.7;
-        for (let segment = 0; segment < 72; segment++) {
-          const start = segment / 72 * Math.PI * 2;
-          const density = Math.max(0, Math.sin(start * 3 + phase + this._flowT * 0.3)
-            * Math.sin(start * 7 - phase - this._flowT * 0.5));
-          if (density < 0.08) continue;
+        if (previous) {
           ctx.beginPath();
-          for (let j = 0; j <= 5; j++) {
-            const th = start + j / 5 / 72 * Math.PI * 2;
-            const v = Math.sin(phase + th * 2 + 0.35 * Math.sin(th * 5 - this._flowT)) * 0.85;
-            this._sheetPoint(st, th, v, 0, point);
-            const x = cx + point[0] * half, y = cy + point[1] * half;
-            if (j === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-          }
-          // Wide, faint haze behind a finer strand, with no solid shell edge.
-          ctx.lineWidth = Math.max(1.5, half * 0.014);
-          ctx.globalAlpha = base * bright * density * 0.065;
-          ctx.stroke();
-          ctx.lineWidth = Math.max(0.4, half * 0.003);
-          ctx.globalAlpha = base * bright * density * 0.16;
-          ctx.stroke();
+          ctx.moveTo(...curve[0]);
+          for (const p of curve) ctx.lineTo(...p);
+          for (let j=previous.length-1;j>=0;j--) ctx.lineTo(...previous[j]);
+          ctx.closePath();
+          ctx.fillStyle=`rgb(${R},${G},${B})`;
+          ctx.globalAlpha=base*cur.bright/1.6*(.005+edge*.065);
+          ctx.fill();
         }
+        previous=curve;
       }
     }
-    ctx.lineCap = "butt";
-    ctx.globalCompositeOperation = "source-over";
-    ctx.globalAlpha = base;
+    ctx.globalCompositeOperation="source-over";
+    ctx.globalAlpha=base;
   }
 
   /* Context segments sit close to the globe, leaving the broad dark area
