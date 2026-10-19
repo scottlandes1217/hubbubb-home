@@ -260,9 +260,11 @@ class HubbubbCalendar extends LitElement {
             </button>`
           )}
         </div>
-        <button class="nav" aria-label="Previous" @click=${() => this._go(this._view, step(this._view, this._anchor, -1))}>‹</button>
-        <button class="nav ${hasToday ? "dim" : ""}" @click=${() => this._go(this._view, dayStart(new Date()))}>Today</button>
-        <button class="nav" aria-label="Next" @click=${() => this._go(this._view, step(this._view, this._anchor, 1))}>›</button>
+        <span class="navs">
+          <button class="nav" aria-label="Previous" @click=${() => this._go(this._view, step(this._view, this._anchor, -1))}>‹</button>
+          <button class="nav ${hasToday ? "dim" : ""}" @click=${() => this._go(this._view, dayStart(new Date()))}>Today</button>
+          <button class="nav" aria-label="Next" @click=${() => this._go(this._view, step(this._view, this._anchor, 1))}>›</button>
+        </span>
         <span class="title">${this._title()}</span>
         ${this._err ? html`<span class="err">${this._err}</span>` : nothing}
       </div>
@@ -446,6 +448,8 @@ class HubbubbCalendar extends LitElement {
       box-shadow: inset 0 0 10px rgba(255, 255, 255, 0.05);
     }
     .nav { border: 1px solid var(--line); border-radius: 18px; }
+    /* back / today / forward never split across lines */
+    .navs { display: flex; gap: 6px; flex: none; }
     .nav.dim { opacity: 0.45; }
     .title { margin-left: 6px; font-weight: 600; letter-spacing: 0.04em; color: var(--acc); }
     .err { color: var(--red); font-size: 12px; }
@@ -617,6 +621,16 @@ class HubbubbCalendar extends LitElement {
     }
     @media (max-width: 600px) {
       .clock .time { font-size: 30px; }
+      /* phone: views on the left, back / today / forward on the right, the
+         title on its own line under them */
+      .tools { justify-content: space-between; gap: 8px; padding: 0 10px 8px; }
+      .seg { margin-right: 0; }
+      .seg button, .nav { padding: 6px 11px; min-height: 40px; }
+      .nav[aria-label] { min-width: 40px; font-size: 18px; }
+      .title { flex-basis: 100%; margin-left: 2px; }
+      .top { gap: 12px; padding: 4px 10px 10px; }
+      .glance { min-width: 0; }
+      .chips { padding: 0 10px 8px; }
       .cell { min-height: 64px; padding: 2px; }
       .pill i { display: none; }
     }

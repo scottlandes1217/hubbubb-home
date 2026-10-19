@@ -18,7 +18,8 @@ console.info(`hubbubb-ring-card ${BUILD}`);
 // live DOM value instead of the last rendered one.
 import { live } from "lit/directives/live.js";
 import { downsampler, rmsEnvelope } from "./envelope.js";
-import "./hubbubb-calendar.js";
+import { nowNext, parseEvent } from "./hubbubb-calendar.js";
+import { groupProposals } from "./review-groups.js";
 import { promptKey, splitPaths } from "./paths.js";
 import {
   clearCore,
@@ -297,11 +298,22 @@ const RIBBONS = [
 // that is its mesh look, and twisting it draws the threads into the creases
 // the film's two bands with a dark gap between, and a hairline inside them
 const SHEETS = [
-  { r: 0.905, w: 0.06, share: 0.5, dir: 1, rows: 9 },
+  { r: 0.915, w: 0.045, share: 0.5, dir: 1, rows: 9 },
   { r: 0.83, w: 0.022, share: 0.35, dir: -1, rows: 5 },
   { r: 0.795, w: 0.004, share: 0.15, dir: 1, rows: 2 },
 ];
 const SHEET_BINS = 360;
+/* jarvis-im3's core: the film's globe is a disc of round dots packed like a
+   honeycomb, not a wireframe. A Fibonacci sphere projects to that lattice,
+   and turning it keeps the dots drifting the way the film's do. */
+const HONEY = (() => {
+  const n = 280, out = [];
+  for (let i = 0; i < n; i++) {
+    const y = 1 - (2 * (i + 0.5)) / n, r = Math.sqrt(1 - y * y), a = i * 2.39996323;
+    out.push([r * Math.cos(a), y, r * Math.sin(a)]);
+  }
+  return out;
+})();
 /* The film talks syllable by syllable: each one snaps the ring into a fresh
    crumple - a new random set of lobes and twists - and it relaxes back to a
    clean circle in the gaps between words. Frame by frame at 24fps the film
@@ -439,6 +451,8 @@ class HubbubbRingCard extends LitElement {
     _mp: { state: true },
     _build: { state: true },
     _sessions: { state: true },
+    _meetLabel: { state: true },
+    _confirmList: { state: true },
     _projects: { state: true },
     _sel: { state: true },
     _msgs: { state: true },
@@ -536,8 +550,12 @@ class HubbubbRingCard extends LitElement {
     // Slow background poll: the ring's plates mirror live sessions even
     // outside build mode. Silently stays ambient if the endpoint is absent.
     if (!this._sessTimer) {
-      this._sessTimer = setInterval(() => this._pollSessions(), 12000);
+      this._sessTimer = setInterval(() => {
+        this._pollSessions();
+        this._nextMeeting();
+      }, 12000);
       this._pollSessions();
+      this._nextMeeting();
     }
   }
 
@@ -590,6 +608,32 @@ class HubbubbRingCard extends LitElement {
     } catch {
       /* no listener reachable: the ambient animation keeps the ring alive */
     }
+  }
+
+  /* The Calendar button's badge: time to the next meeting that starts later
+     today, nothing when the day is done. Events are fetched every five
+     minutes (the calendar pop-up's hidden calendars stay hidden); the label
+     is recomputed on every session poll. */
+  async _nextMeeting() {
+    if (this._config.dock === false || this._config.build_page || !this._hass) return;
+    const now = new Date();
+    if (!this._meetAt || now - this._meetAt > 300000) {
+      this._meetAt = now;
+      let hidden = [];
+      try { hidden = JSON.parse(localStorage.getItem("hubbubb-calendar-hidden")) || []; } catch (_) {}
+      const end = new Date(now);
+      end.setHours(24, 0, 0, 0);
+      const q = `start=${encodeURIComponent(now.toISOString())}&end=${encodeURIComponent(end.toISOString())}`;
+      const ids = Object.keys(this._hass.states).filter((id) => id.startsWith("calendar.") && !hidden.includes(id));
+      const res = await Promise.allSettled(
+        ids.map((id) => this._hass.callApi("GET", `calendars/${id}?${q}`).then((rows) => rows.map((e) => parseEvent(e, { id }))))
+      );
+      this._meetNext = nowNext(res.flatMap((r) => (r.status === "fulfilled" ? r.value : [])), now).next?.start || null;
+    }
+    const ms = this._meetNext && this._meetNext.toDateString() === now.toDateString() ? this._meetNext - now : -1;
+    const m = Math.max(1, Math.round(ms / 60000));
+    const label = ms <= 0 ? "" : m < 60 ? `${m}m` : `${Math.floor(m / 60)}h${m % 60 ? ` ${m % 60}m` : ""}`;
+    if (label !== this._meetLabel) this._meetLabel = label;
   }
 
   _resolveMediaPlayer(hass) {
@@ -2838,7 +2882,6 @@ class HubbubbRingCard extends LitElement {
       const row = Math.floor(rand() * rows);
       let v = rows > 1 ? -1 + (2 * row) / (rows - 1) : 0;
       v += (rand() - 0.5) * 0.025;
-      if (rand() < 0.02) v *= 1.1 + rand() * 0.4; // a little fuzz off the rims
       p[i] = {
         si,
         th: (Math.floor(rand() * SHEET_COLS) / SHEET_COLS) * Math.PI * 2,
@@ -2919,8 +2962,9 @@ class HubbubbRingCard extends LitElement {
       this._reseed = 0.22 + rand() * 0.12;
     }
     const k = Math.min(1.2, this._crumple);
-    const lobeA = 0.003 + k * 0.045;
-    const twistA = 0.12 + k * 1.5;
+    // never a perfect circle: the film's bands are softly lumpy even at rest
+    const lobeA = 0.007 + k * 0.045;
+    const twistA = 0.4 + k * 1.5;
     const ft = this._flowT;
     const breathe = 0.005 * Math.sin(this._t * 0.35);
     const ts = this._t * 0.15; // the faintest drift at rest, so it is never frozen
@@ -3611,11 +3655,16 @@ class HubbubbRingCard extends LitElement {
 
   _targets() {
     const state = this._effectiveState();
-    const color =
-      state === "offline"
-        ? this._config.offline_color
-        : this._config[COLOR_KEY[state]];
-    return { energy: ENERGY[state], rgb: parseColor(color) };
+    return { energy: ENERGY[state], rgb: parseColor(this._stateColor(state)) };
+  }
+
+  /* During the start-up the intro's own lines are loading and playing, which
+     reads as processing - orange flashes in the middle of a teal sequence.
+     The whole start-up stays in the idle colour instead. */
+  _stateColor(state) {
+    if (state === "offline") return this._config.offline_color;
+    if (this._booting) return this._config.idle_color;
+    return this._config[COLOR_KEY[state]];
   }
 
   /* ---------------- hubbubb: a ring, and bubbles around it ----------------
@@ -4507,18 +4556,57 @@ class HubbubbRingCard extends LitElement {
       this._drawIm3Rings(ctx, cx, cy, half, R, G, B, dt);
       const SR = half * 0.29 * (1 + env * 0.04);
       const glow = clamp(cur.bright * (1 + env * 0.35), 0.3, 1.9) * boot.globe;
-      const lt = (c) => Math.round(c + (255 - c) * 0.35);
-      this._drawGlobe(ctx, cx, cy, SR, half, glow * 0.5,
-        `rgba(${lt(R)},${lt(G)},${lt(B)},${0.15 * glow})`, `rgba(${R},${G},${B},${0.045 * glow})`);
+      this._drawHoneyGlobe(ctx, cx, cy, SR, half, glow, R, G, B);
       ctx.globalAlpha = boot.ring * boot.globe;
-      ctx.strokeStyle = `rgba(${R},${G},${B},0.55)`;
-      ctx.lineWidth = Math.max(0.8, half * 0.006);
+      // the rim: a soft halo under a crisp line
+      ctx.strokeStyle = `rgb(${R},${G},${B})`;
+      ctx.globalAlpha = boot.ring * boot.globe * 0.12;
+      ctx.lineWidth = Math.max(2, half * 0.02);
       ctx.beginPath();
       ctx.arc(cx, cy, SR * 1.03, 0, 6.283185);
+      ctx.stroke();
+      ctx.globalAlpha = boot.ring * boot.globe * 0.7;
+      ctx.lineWidth = Math.max(0.8, half * 0.006);
       ctx.stroke();
       ctx.restore();
     }
     if (boot.phase) this._drawIm3Boot(ctx, cx, cy, half, boot, R, G, B, t);
+  }
+
+  /* The film's core: a faint blue glow filled with honeycomb dots, brightest
+     face-on and fading to nothing at the limb, turning slowly. */
+  _drawHoneyGlobe(ctx, cx, cy, SR, half, glow, R, G, B) {
+    const base = ctx.globalAlpha;
+    // a touch bluer and lighter than the rings, as in the film
+    const r = Math.round(R * 0.55 + 40), g = Math.round(G * 0.9 + 20), b = Math.min(255, Math.round(B * 1.1 + 40));
+    const fill = ctx.createRadialGradient(cx, cy, 0, cx, cy, SR);
+    fill.addColorStop(0, `rgba(${r},${g},${b},${0.13 * glow})`);
+    fill.addColorStop(1, `rgba(${r},${g},${b},${0.03 * glow})`);
+    ctx.fillStyle = fill;
+    ctx.beginPath();
+    ctx.arc(cx, cy, SR, 0, 6.283185);
+    ctx.fill();
+    const cs = Math.cos(this._spin * 0.6), sn = Math.sin(this._spin * 0.6);
+    const ct = Math.cos(0.35), st = Math.sin(0.35);
+    const dot = SR * 0.034;
+    ctx.fillStyle = `rgb(${r},${g},${b})`;
+    ctx.globalCompositeOperation = "lighter";
+    for (let bk = 1; bk <= 4; bk++) {
+      ctx.beginPath();
+      for (const [x, y, z] of HONEY) {
+        const x1 = x * cs + z * sn, z1 = -x * sn + z * cs;
+        const y2 = y * ct - z1 * st, z2 = y * st + z1 * ct;
+        if (z2 <= 0.12) continue;
+        if (Math.min(4, 1 + ((z2 * 4) | 0)) !== bk) continue;
+        const px = cx + x1 * SR * 0.97, py = cy - y2 * SR * 0.97, pr = dot * (0.55 + 0.45 * z2);
+        ctx.moveTo(px + pr, py);
+        ctx.arc(px, py, pr, 0, 6.283185);
+      }
+      ctx.globalAlpha = base * clamp(glow * 0.085 * bk, 0, 1);
+      ctx.fill();
+    }
+    ctx.globalCompositeOperation = "source-over";
+    ctx.globalAlpha = base;
   }
 
   /* The dots, additive: where a sheet turns edge-on they pile into a crease
@@ -4556,7 +4644,7 @@ class HubbubbRingCard extends LitElement {
       // rims and the thin inner ring read as lines; the film between is mist
       const av = Math.abs(p.v);
       const edge = av > 0.9 && av < 1.1 ? 1.6 : 1;
-      const a = p.br * aMul * edge * (p.si === 2 ? 0.4 : 0.42) * (0.75 + 0.25 * Math.sin(t * p.tw * 0.7 + p.ph));
+      const a = p.br * aMul * edge * (p.si === 2 ? 0.22 : 0.17) * (0.75 + 0.25 * Math.sin(t * p.tw * 0.7 + p.ph));
       MB[nm++] = Math.min(MOTE_ALPHAS - 1, (clamp(a, 0, 1) * MOTE_ALPHAS) | 0);
     }
     const base = ctx.globalAlpha;
@@ -4613,7 +4701,7 @@ class HubbubbRingCard extends LitElement {
         for (let k = 0; k < N; k++) {
           const b = k, b2 = (k + 1) % N;
           const face = Math.abs(st.cw[b]) / sh.w; // 1 face-on, 0 edge-on
-          let a = 0.03 + 0.11 / (face + 0.18);
+          let a = 0.16 + 0.11 / (face + 0.18);
           if (a > 0.9) a = 0.9;
           if (Math.min(NB - 1, ((a / 0.9) * NB) | 0) !== bk) continue;
           const r1 = (st.rc[b] - st.cw[b]) * half, r2 = (st.rc[b] + st.cw[b]) * half;
@@ -4626,22 +4714,30 @@ class HubbubbRingCard extends LitElement {
           any = true;
         }
         if (!any) continue;
-        ctx.globalAlpha = base * bright * (bk + 0.5) * (0.9 / NB) * (si === 2 ? 0.5 : 0.55);
+        ctx.globalAlpha = base * bright * (bk + 0.5) * (0.9 / NB) * (si === 2 ? 0.5 : 0.75);
         ctx.fill();
       }
       // threads: every row, the rims brightest
+      // the rims glow first (a wide faint stroke), then get a crisp line -
+      // the film's edges are lit glass, not dotted
       const rows = sh.rows;
-      ctx.lineWidth = Math.max(0.5, half * 0.0028);
+      const thin = Math.max(0.5, half * 0.0028);
       for (let ri = 0; ri < rows; ri++) {
         const v = rows > 1 ? -1 + (2 * ri) / (rows - 1) : 0;
         const rim = ri === 0 || ri === rows - 1;
-        ctx.globalAlpha = base * bright * (rim ? 0.32 : 0.06) * (si === 2 ? 1.2 : 1);
         ctx.beginPath();
         for (let k = 0; k <= N; k++) {
           const b = k % N;
           const r = (st.rc[b] + v * st.cw[b]) * half;
           k ? ctx.lineTo(cx + r * C[k], cy + r * S[k]) : ctx.moveTo(cx + r * C[k], cy + r * S[k]);
         }
+        if (rim) {
+          ctx.lineWidth = Math.max(2, half * 0.016);
+          ctx.globalAlpha = base * bright * 0.12;
+          ctx.stroke();
+        }
+        ctx.lineWidth = thin;
+        ctx.globalAlpha = base * bright * (rim ? 0.45 : 0.025) * (si === 2 ? 1.2 : 1);
         ctx.stroke();
       }
     }
@@ -5275,7 +5371,7 @@ class HubbubbRingCard extends LitElement {
     if (Array.isArray(want) && want.length) return want;
     const skip = new Set(this._config.todo_exclude || []);
     return Object.keys(hass?.states || {})
-      .filter((id) => id.startsWith("todo.") && !skip.has(id))
+      .filter((id) => id.startsWith("todo.") && !skip.has(id) && !hass.entities?.[id]?.hidden)
       .sort();
   }
 
@@ -5327,6 +5423,33 @@ class HubbubbRingCard extends LitElement {
       })
     );
     this._todos = lists;
+  }
+
+  /* Remove a list: a Local To-do list is deleted outright (its config entry);
+     a list that belongs to another service (iCloud, CalDAV) cannot be deleted
+     from here, so it is hidden - Settings -> Entities brings it back. Two taps,
+     like ending a session. */
+  async _todoRemove(list) {
+    if (this._confirmList !== list.id) {
+      this._confirmList = list.id;
+      clearTimeout(this._confirmListT);
+      this._confirmListT = setTimeout(() => (this._confirmList = null), 4000);
+      return;
+    }
+    this._confirmList = null;
+    try {
+      const ent = await this._hass.callWS({ type: "config/entity_registry/get", entity_id: list.id });
+      if (ent.platform === "local_todo" && ent.config_entry_id) {
+        await this._hass.callApi("DELETE", `config/config_entries/entry/${ent.config_entry_id}`);
+        this._toast(`${list.name} deleted.`);
+      } else {
+        await this._hass.callWS({ type: "config/entity_registry/update", entity_id: list.id, hidden_by: "user" });
+        this._toast(`${list.name} hidden.`);
+      }
+      this._todos = this._todos.filter((l) => l.id !== list.id);
+    } catch (err) {
+      this._toast(`Couldn't remove ${list.name}: ${this._errText(err)}`);
+    }
   }
 
   async _todoAdd(e, list) {
@@ -5409,6 +5532,11 @@ class HubbubbRingCard extends LitElement {
           <div class="phead">
             <span class="ptitle">${l.name}</span>
             ${l.off || l.err ? nothing : html`<span class="tcount">${l.items.length}</span>`}
+            <button
+              class="hbtn danger ${this._confirmList === l.id ? "armed" : ""}"
+              title="Remove this list"
+              @click=${() => this._todoRemove(l)}
+            >${this._confirmList === l.id ? "Confirm?" : "Remove"}</button>
           </div>
           ${l.off
             ? html`<div class="dim">Unavailable</div>`
@@ -5436,26 +5564,38 @@ class HubbubbRingCard extends LitElement {
     // during the start-up a slot stays empty until its icon has dropped in
     const pend = (i) => (this._landed && !this._landed.has(i) ? "pending" : "");
     const open = this._todos?.reduce((n, l) => n + (l.items?.length || 0), 0) || 0;
+    const sess = this._sessions || [];
+    const waiting = sess.filter((s) => s.done).length;
+    const review = groupProposals(this._hass?.states?.[this._config.review_entity]?.attributes?.proposals).pending.length;
+    const meet = this._meetLabel;
+    // the count rides on the icon's corner; keyed so a new value pops in
+    const badge = (i, v, cls = "") => (v && !pend(i) ? keyed(v, html`<b class="badge ${cls}">${v}</b>`) : nothing);
     return html`<nav class="dock">
-      <button class=${pend(0)} title="Calendar" @click=${() => this._openCalendar()}>
+      <button class=${pend(0)} title=${meet ? `Calendar - next meeting in ${meet}` : "Calendar"} aria-label="Calendar" @click=${() => this._openCalendar()}>
         ${ico(svg`<rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/><path d="M7.5 13h2M11 13h2M14.5 13h2M7.5 16.5h2M11 16.5h2"/>`)}
-        <span>Calendar</span>
+        ${badge(0, meet)}
       </button>
-      <button class=${pend(1)} title="To-do lists" @click=${() => this._openTodos()}>
+      <button class=${pend(1)} title="To-do lists" aria-label="To-do lists" @click=${() => this._openTodos()}>
         ${ico(svg`<path d="M10 6.5h10.5M10 12h10.5M10 17.5h10.5"/><path d="M3.5 6.5l1.6 1.6 2.9-3.2M3.5 12l1.6 1.6 2.9-3.2"/><rect x="3.8" y="16" width="3.2" height="3.2" rx="0.6"/>`)}
-        ${open && !pend(1) ? keyed(open, html`<b class="badge">${open}</b>`) : nothing}
-        <span>To-do</span>
+        ${badge(1, open)}
       </button>
-      <button class="power ${this._booting ? "on" : ""} ${pend(2)}" title="Start-up and introduction" @click=${this._intro}>
+      <button class="power ${this._booting ? "on" : ""} ${pend(2)}" title="Start-up and introduction" aria-label="Start-up and introduction" @click=${this._intro}>
         ${ico(svg`<path d="M12 3.5v7"/><path d="M7.2 6.6a7 7 0 1 0 9.6 0"/>`)}
       </button>
-      <button class=${pend(3)} title="Jarvis Review" @click=${() => this._openReview()}>
+      <button class=${pend(3)} title=${review ? `Nightly review - ${review} waiting` : "Nightly review"} aria-label="Nightly review" @click=${() => this._openReview()}>
         ${ico(svg`<path d="M11 20.5H6.5a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2H14l4 4v3"/><path d="M14 3.5v4h4"/><circle cx="15.5" cy="15.5" r="3"/><path d="M17.7 17.7l2.6 2.6"/><path d="M7.5 8.5h3M7.5 12h4"/>`)}
-        <span>Review</span>
+        ${badge(3, review)}
       </button>
-      <button class=${pend(4)} title="Build mode" data-ai="toggle-build-mode" @click=${() => this._setBuild(true)}>
+      <button
+        class=${pend(4)}
+        title=${sess.length ? `Build mode - ${sess.length} running${waiting ? `, ${waiting} need${waiting > 1 ? "" : "s"} you` : ""}` : "Build mode"}
+        aria-label="Build mode"
+        data-ai="toggle-build-mode"
+        @click=${() => this._setBuild(true)}
+      >
         ${ico(svg`<path d="M12 2.6c-4 0-7 2.5-7 6.5v4.3c0 2.1.8 4 2.2 5.4L9.6 21h4.8l2.4-2.2c1.4-1.4 2.2-3.3 2.2-5.4V9.1c0-4-3-6.5-7-6.5z"/><path d="M7.3 11.1l3.4 1M16.7 11.1l-3.4 1"/><path d="M12 2.8v4.4M9.8 17.2h4.4M7.4 14.2l2.3 1.6M16.6 14.2l-2.3 1.6"/>`)}
-        <span>Build</span>
+        ${badge(4, sess.length)}
+        ${badge(4, waiting, "alert")}
       </button>
     </nav>`;
   }
@@ -5829,10 +5969,7 @@ class HubbubbRingCard extends LitElement {
     }
 
     const state = this._effectiveState();
-    const color =
-      state === "offline"
-        ? this._config.offline_color
-        : this._config[COLOR_KEY[state]];
+    const color = this._stateColor(state);
     const build = !!this._build;
     // null = no such helper, so the bell stays out of the way entirely.
     const announce = this._announce ?? null;
@@ -6129,102 +6266,117 @@ class HubbubbRingCard extends LitElement {
     }
 
     /* ---------------- dock ---------------- */
-    /* The film's tab bar, dressed as a build-mode panel: same glass, border,
-       inset glow and tracked capitals, with the power button standing proud
-       of the bar in the middle. */
+    /* The film's tab bar: a thin dark strip split into cells by faint
+       dividers, each glyph inside a hairline circle, no labels, and the power
+       button in a double ring under a raised tab in the middle. */
     .dock {
       position: relative;
       display: grid;
-      grid-template-columns: repeat(2, 1fr) 76px repeat(2, 1fr);
+      grid-template-columns: repeat(2, 1fr) 84px repeat(2, 1fr);
       align-items: center;
       box-sizing: border-box;
-      width: min(100% - 24px, 520px);
-      margin: 26px auto 10px;
-      padding: 6px 8px;
+      width: min(100% - 24px, 560px);
+      margin: 30px auto 10px;
+      padding: 4px 0;
       background: var(
         --jr-panel-bg,
-        linear-gradient(160deg, rgba(var(--jr-glass-a), 0.92), rgba(var(--jr-glass-b), 0.96))
+        linear-gradient(180deg, rgba(var(--jr-glass-a), 0.92), rgba(var(--jr-glass-b), 0.96))
       );
-      border: 1px solid var(--jr-panel-border, rgba(var(--jr-line), 0.35));
-      border-radius: 10px;
-      box-shadow: inset 0 0 28px rgba(var(--jr-glow), 0.08);
-      font-family: "Avenir Next", "Segoe UI", Roboto, sans-serif;
+      border: 1px solid var(--jr-panel-border, rgba(var(--jr-line), 0.3));
+      border-radius: 4px;
+      box-shadow: inset 0 0 22px rgba(var(--jr-glow), 0.07);
       line-height: 1;
+    }
+    /* the raised tab the power button sits under */
+    .dock::before {
+      content: "";
+      position: absolute;
+      left: 50%;
+      top: -9px;
+      width: 132px;
+      height: 9px;
+      transform: translateX(-50%);
+      border: 1px solid var(--jr-panel-border, rgba(var(--jr-line), 0.3));
+      border-bottom: none;
+      border-radius: 8px 8px 0 0;
+      background: rgba(var(--jr-glass-a), 0.92);
     }
     .dock button {
       position: relative;
       display: flex;
-      flex-direction: column;
+      justify-content: center;
       align-items: center;
-      gap: 5px;
       min-width: 0;
-      padding: 7px 2px 6px;
-      border: 1px solid transparent;
-      border-radius: 6px;
+      height: 52px;
+      padding: 0;
+      border: none;
       background: none;
-      color: var(--jr-panel-text, var(--jr-ink-2, #bfe3f5));
-      opacity: 0.78;
+      color: var(--jr-color);
+      opacity: 0.8;
       cursor: pointer;
-      font-family: inherit;
-      transition: opacity 0.2s, background 0.2s, border-color 0.2s, box-shadow 0.2s;
+      transition: opacity 0.2s, filter 0.2s;
       -webkit-tap-highlight-color: transparent;
     }
-    .dock button span {
-      font-size: 9.5px;
-      font-weight: 600;
-      letter-spacing: 0.16em;
-      text-transform: uppercase;
-      white-space: nowrap;
-    }
-    @media (max-width: 420px) {
-      .dock {
-        grid-template-columns: repeat(2, 1fr) 68px repeat(2, 1fr);
-        padding: 6px 4px;
-      }
-      .dock button span {
-        font-size: 8.5px;
-        letter-spacing: 0.08em;
-      }
+    /* faint dividers between the side cells */
+    .dock button:nth-child(1)::after,
+    .dock button:nth-child(4)::after {
+      content: "";
+      position: absolute;
+      right: 0;
+      top: 8px;
+      bottom: 8px;
+      width: 1px;
+      background: rgba(var(--jr-line), 0.18);
     }
     .dock button svg {
       position: static; /* the ring's svg rule pins svgs absolutely */
-      width: 22px;
-      height: 22px;
+      box-sizing: border-box;
+      width: 40px;
+      height: 40px;
+      padding: 8px;
       display: block;
-      color: var(--jr-color);
+      border: 1px solid rgba(var(--jr-line), 0.4);
+      border-radius: 50%;
+      filter: drop-shadow(0 0 3px rgba(var(--jr-glow), 0.45));
     }
     .dock button:hover,
     .dock button:focus-visible {
       opacity: 1;
-      background: rgba(var(--jr-glow), 0.12);
-      border-color: rgba(var(--jr-line), 0.4);
-      box-shadow: 0 0 10px rgba(var(--jr-glow), 0.25);
       outline: none;
+    }
+    .dock button:hover svg,
+    .dock button:focus-visible svg {
+      border-color: var(--jr-color);
+      box-shadow: 0 0 10px rgba(var(--jr-glow), 0.35), inset 0 0 8px rgba(var(--jr-glow), 0.2);
     }
     .dock button:active {
       transform: scale(0.96);
     }
     .dock button.power {
       justify-self: center;
-      width: 64px;
-      height: 64px;
-      margin-top: -34px;
-      padding: 15px;
+      width: 66px;
+      height: 66px;
+      margin-top: -26px;
       border-radius: 50%;
-      border: 1px solid var(--jr-panel-border, rgba(var(--jr-line), 0.45));
+      border: 1px solid var(--jr-color);
       background: radial-gradient(circle at 50% 40%, rgba(16, 40, 48, 0.98), rgba(3, 8, 11, 0.98));
-      box-shadow: 0 0 0 4px rgba(3, 8, 11, 0.9), 0 0 16px rgba(var(--jr-glow), 0.25), inset 0 0 14px rgba(var(--jr-glow), 0.15);
+      box-shadow: 0 0 0 4px rgba(3, 8, 11, 0.95), 0 0 0 5px rgba(var(--jr-line), 0.4),
+        0 0 16px rgba(var(--jr-glow), 0.3), inset 0 0 14px rgba(var(--jr-glow), 0.18);
       opacity: 1;
     }
     .dock button.power svg {
       width: 100%;
       height: 100%;
+      padding: 16px;
+      border: none;
     }
     .dock button.power:hover,
     .dock button.power.on {
-      border-color: var(--jr-color);
-      box-shadow: 0 0 0 4px rgba(3, 8, 11, 0.9), 0 0 22px var(--jr-color), inset 0 0 16px rgba(var(--jr-glow), 0.25);
-      background: radial-gradient(circle at 50% 40%, rgba(16, 40, 48, 0.98), rgba(3, 8, 11, 0.98));
+      box-shadow: 0 0 0 4px rgba(3, 8, 11, 0.95), 0 0 0 5px var(--jr-color),
+        0 0 22px var(--jr-color), inset 0 0 16px rgba(var(--jr-glow), 0.25);
+    }
+    .dock button.power:hover svg {
+      box-shadow: none;
     }
 
     /* start-up: empty slots until each icon drops in */
@@ -6241,8 +6393,9 @@ class HubbubbRingCard extends LitElement {
     .badge {
       animation: jrBadge 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
       position: absolute;
-      top: 3px;
-      left: calc(50% + 5px);
+      top: 2px;
+      left: calc(50% + 9px);
+      white-space: nowrap;
       min-width: 14px;
       height: 14px;
       box-sizing: border-box;
@@ -6254,6 +6407,17 @@ class HubbubbRingCard extends LitElement {
       font-weight: 700;
       line-height: 14px;
       text-align: center;
+    }
+    /* needs you: the other corner, in red, and it breathes */
+    .badge.alert {
+      left: auto;
+      right: calc(50% + 9px);
+      background: #ff5a64;
+      color: #fff;
+      animation: jrBadge 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both, jrAlert 1.6s ease-in-out 0.5s infinite;
+    }
+    @keyframes jrAlert {
+      50% { box-shadow: 0 0 10px #ff5a64; }
     }
     @keyframes jrBadge {
       0% { transform: scale(0); opacity: 0; }
@@ -6410,6 +6574,43 @@ class HubbubbRingCard extends LitElement {
     }
     .sheet.calendar .sheet-box {
       width: min(1200px, 100%);
+    }
+    /* Phones: calendar, to-do lists and review fill the screen edge to edge,
+       pinned to the visible viewport like build mode's panel, instead of a
+       box floating in a margin. */
+    @media (max-width: 620px) {
+      .sheet.review,
+      .sheet.calendar,
+      .sheet.todos {
+        position: fixed;
+        z-index: 20;
+        left: env(safe-area-inset-left, 0px);
+        right: env(safe-area-inset-right, 0px);
+        top: calc(var(--jr-vvt, 0px) + env(safe-area-inset-top, 0px));
+        bottom: auto;
+        height: calc(var(--jr-vvh, 100dvh) - env(safe-area-inset-top, 0px));
+        padding: 0;
+        background: #061014;
+      }
+      .sheet.review .sheet-box,
+      .sheet.calendar .sheet-box,
+      .sheet.todos .sheet-box {
+        width: 100%;
+        height: 100%;
+        max-height: none;
+        border: none;
+        border-radius: 18px 18px var(--jr-botr, 56px) var(--jr-botr, 56px);
+        padding-bottom: env(safe-area-inset-bottom, 0px);
+        box-sizing: border-box;
+      }
+      .sheet.todos .sheet-list {
+        flex: 1;
+        min-height: 0;
+      }
+      .sheet .todos,
+      .sheet .tnew {
+        width: calc(100% - 16px);
+      }
     }
     hubbubb-calendar {
       flex: 1;
