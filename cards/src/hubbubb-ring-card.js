@@ -28,7 +28,7 @@ import {
   widestGap,
 } from "./pack.js";
 
-const CARD_VERSION = "4.11.1";
+const CARD_VERSION = "4.12.0";
 
 const SATELLITE_DOMAIN = "assist_satellite";
 
@@ -69,7 +69,8 @@ const DEFAULTS = {
   build_projects: [], // chip allowlist for "+ New"; empty = all known projects
   /* Which ring to draw. "hubbubb" is the default look - a plain ring with
      bubbles going round it. "jarvis-v1" is the original: block segments, a
-     wireframe core and a mote field. */
+     wireframe core and a mote field. "jarvis-im3" is the Iron Man 3
+     second-screen JARVIS: folding sheets of dots round a small globe. */
   animation: "hubbubb",
   assistant_name: "Assistant", // what your AI is called, used in every message
   /* Build panel: how tall, and whether it lifts off the dashboard.
@@ -91,6 +92,10 @@ const DEFAULTS = {
   dock: true,
   calendar_path: "/calendar",
   intro_message: "",
+  /* To-do lists under the dock on the main screen. Empty = every todo.* list
+     Home Assistant has. */
+  todos: true,
+  todo_entities: [],
   /* Gates the "agent finished" announcement on the puck, and with it the
      media pause/mute the announcement sets off. Left empty because the id
      carries whatever you named the assistant - getStubConfig finds it, and
@@ -277,6 +282,39 @@ const RIBBONS = [
   { r: 0.875, amp: 0.09, thick: 0.008, rev: 1, share: 0.28, glow: 1.4 },
 ];
 
+/* jarvis-im3: the Iron Man 3 second-screen JARVIS. Each band is a ribbon of
+   fine dots with a twist that varies round the ring: where the ribbon turns
+   edge-on its dots crowd into a bright crease, where it faces you they spread
+   into mist. At rest the twist is near zero - two clean bands with bright
+   edges. Speech drives the twist and a few broad lobes, each sheet on its own
+   phases, so the sheets fold, separate and cross the way the film's do. The
+   brightness is density (additive dots), not a per-dot alpha rule. */
+// rows: the film is threads of dots running round the band, not a cloud -
+// that is its mesh look, and twisting it draws the threads into the creases
+const SHEETS = [
+  { r: 0.91, w: 0.06, share: 0.42, dir: 1, rows: 11 },
+  { r: 0.872, w: 0.045, share: 0.36, dir: -1, rows: 9 },
+  { r: 0.8, w: 0.012, share: 0.22, dir: 1, rows: 3 },
+];
+const SHEET_BINS = 256;
+const LOBES = [
+  { k: 2, a: 0.5 },
+  { k: 3, a: 0.35 },
+  { k: 4, a: 0.22 },
+  { k: 5, a: 0.14 },
+  // the crumple: short lobes that make the talking ring go polygonal
+  { k: 7, a: 0.1 },
+  { k: 9, a: 0.07 },
+];
+const TWISTS = [
+  { m: 1, a: 0.6 },
+  { m: 2, a: 0.45 },
+  { m: 3, a: 0.3 },
+];
+// The film's start-up, in seconds: fold to a dot, the reactor powers up, the
+// ring bursts back in, the name assembles from particles and lets go.
+const IM3_BOOT = { dot: 0.5, reactor: 1.1, burst: 3.5, word: 4.7, hold: 5.7, gone: 6.3, end: 6.9 };
+
 /* Travelling peaks: a handful of localized bulges that drift around the
    band and breathe. Gentle at idle; when the voice talks they surge taller
    and brighter, which is the reference-GIF look — a circle with flowing
@@ -371,6 +409,7 @@ class HubbubbRingCard extends LitElement {
 
   static properties = {
     _config: { state: true },
+    _todos: { state: true },
     _state: { state: true },
     _mp: { state: true },
     _build: { state: true },
@@ -441,6 +480,7 @@ class HubbubbRingCard extends LitElement {
        lands after an optimistic tap, and how a toggle from anywhere else
        (the more-info dialog, an automation) reaches the ring. */
     this._listenForSpeech(hass);
+    this._watchTodos(hass);
     const speaker = hass?.states?.[this._config.announce_entity];
     const announce = speaker ? speaker.state === "on" : null;
     if (announce !== this._announce) this._announce = announce;
@@ -2621,6 +2661,7 @@ class HubbubbRingCard extends LitElement {
      Ribbons are dealt by golden-ratio stride, not in blocks, so any prefix
      carries every ribbon in its proper share. */
   _buildField() {
+    if (this._config?.animation === "jarvis-im3") return this._buildSheetField();
     const configured = Number(this._config?.particles) || 0;
     const auto = clamp(Math.round((this._w || 240) * 32), 9000, 20000);
     const base = configured > 0 ? clamp(configured, 0, 8000) : auto;
@@ -2663,6 +2704,84 @@ class HubbubbRingCard extends LitElement {
       };
     }
     this._particles = p;
+  }
+
+  /* jarvis-im3's dots: each one lives at an angle round its sheet and a place
+     across the sheet's width (v, -1..1, a little denser toward the edges so
+     the bands keep crisp rims). Dealt by golden-ratio stride like the v1
+     field, so the adaptive-quality prefix keeps every sheet's share. */
+  _buildSheetField() {
+    const configured = Number(this._config?.particles) || 0;
+    const auto = clamp(Math.round((this._w || 240) * 55), 12000, 26000);
+    const count = Math.max(400, configured > 0 ? clamp(configured, 0, 26000) : auto);
+    const rand = seeded(0x1a3e);
+    const p = new Array(count);
+    for (let i = 0; i < count; i++) {
+      const u = (i * 0.6180339887) % 1;
+      let si = 0;
+      for (let acc = SHEETS[0].share; si < SHEETS.length - 1 && u >= acc; )
+        acc += SHEETS[++si].share;
+      const rows = SHEETS[si].rows;
+      const row = Math.floor(rand() * rows);
+      let v = rows > 1 ? -1 + (2 * row) / (rows - 1) : 0;
+      v += (rand() - 0.5) * 0.025;
+      if (rand() < 0.01) v *= 1.3 + rand() * 0.6; // loose spray off the rims
+      p[i] = {
+        si,
+        th: rand() * Math.PI * 2,
+        v,
+        n: rand() - 0.5,
+        dr: (rand() - 0.5) * 0.04,
+        tw: 0.4 + rand() * 1.8,
+        ph: rand() * Math.PI * 2,
+        sz: 0.45 + rand() * 0.4,
+        br: rand() < 0.05 ? 1 : 0.4 + rand() * 0.5,
+      };
+    }
+    this._particles = p;
+  }
+
+  /* Per frame, per sheet: the centre-line radius and the signed half-width
+     (w * cos twist) round the ring, sampled into bins so a dot costs one
+     lookup. `env` is the voice; `burst` the start-up's turbulence. */
+  _sheetTables(dt, env, burst) {
+    if (!this._sheetState) {
+      const rand = seeded(0x77e1);
+      this._sheetState = SHEETS.map(() => ({
+        lp: LOBES.map(() => rand() * 6.283),
+        lw: LOBES.map(() => (0.35 + rand() * 0.8) * (rand() < 0.5 ? -1 : 1)),
+        tp: TWISTS.map(() => rand() * 6.283),
+        tw: TWISTS.map(() => (0.3 + rand() * 0.9) * (rand() < 0.5 ? -1 : 1)),
+        rc: new Float32Array(SHEET_BINS),
+        cw: new Float32Array(SHEET_BINS),
+      }));
+    }
+    // the voice envelope peaks near 0.5; the film wants it near full
+    const drive = Math.min(1.4, env * 1.8 + burst);
+    // the shapes morph faster while he talks: slow drift at rest
+    const rate = dt * (0.12 + drive * 1.9);
+    const lobeA = 0.006 + drive * 0.075;
+    const twistA = 0.25 + drive * 1.8;
+    const breathe = 0.006 * Math.sin(this._t * 0.35);
+    for (let si = 0; si < SHEETS.length; si++) {
+      const sh = SHEETS[si];
+      const st = this._sheetState[si];
+      for (let i = 0; i < LOBES.length; i++) st.lp[i] += st.lw[i] * rate;
+      for (let i = 0; i < TWISTS.length; i++) st.tp[i] += st.tw[i] * rate;
+      // the thin inner ring stays truer than the outer film
+      const la = lobeA * (si === 2 ? 0.55 : 1);
+      const ta = twistA * (si === 2 ? 0.4 : 1);
+      for (let b = 0; b < SHEET_BINS; b++) {
+        const th = (b / SHEET_BINS) * 6.283185;
+        let lobe = 0;
+        for (let i = 0; i < LOBES.length; i++) lobe += LOBES[i].a * Math.sin(LOBES[i].k * th + st.lp[i]);
+        let tw = 0;
+        for (let i = 0; i < TWISTS.length; i++) tw += TWISTS[i].a * Math.sin(TWISTS[i].m * th + st.tp[i]);
+        st.rc[b] = sh.r + breathe + drive * 0.012 + la * lobe;
+        st.cw[b] = sh.w * (1 + drive * 0.35) * Math.cos(tw * ta);
+      }
+    }
+    return this._sheetState;
   }
 
   /* ---------------- real speech envelope ----------------
@@ -3863,7 +3982,8 @@ class HubbubbRingCard extends LitElement {
   _draw(dt) {
     const ctx = this._ctx;
     if (!ctx) return;
-    if (this._config.animation !== "jarvis-v1") return this._drawBubbles(dt);
+    const im3 = this._config.animation === "jarvis-im3";
+    if (!im3 && this._config.animation !== "jarvis-v1") return this._drawBubbles(dt);
     if (!this._particles) return;
     const W = this._w, H = this._h;
     const cx = W / 2, cy = H / 2;
@@ -3922,6 +4042,7 @@ class HubbubbRingCard extends LitElement {
     const lp = this._waveT;
 
     ctx.clearRect(0, 0, W, H);
+    if (im3) return this._drawIm3(dt, ctx, cx, cy, half, cur, env, R, G, B);
     const bs = this._bootScale(dt);
     if (bs !== 1) {
       ctx.save();
@@ -4147,6 +4268,14 @@ class HubbubbRingCard extends LitElement {
 
     /* ---- geodesic core, rotated in 3D, clipped to a true circle ---- */
     const SR = half * 0.38 * (1 + env * 0.05); // the core swells on the voice too
+    const glow = clamp(cur.bright * (1 + env * 0.45), 0.3, 1.9);
+    this._drawGlobe(ctx, cx, cy, SR, half, glow,
+      `rgba(220,246,255,${0.4 * glow})`, `rgba(${R},${G},${B},${0.13 * glow})`);
+    if (bs !== 1) ctx.restore();
+  }
+
+  _drawGlobe(ctx, cx, cy, SR, half, glow, frontStyle, backStyle) {
+    const t = this._t;
     const cosS = Math.cos(this._spin), sinS = Math.sin(this._spin);
     const cosT = Math.cos(0.35), sinT = Math.sin(0.35);
     const verts = SPHERE.verts;
@@ -4169,7 +4298,6 @@ class HubbubbRingCard extends LitElement {
     ctx.clip();
 
     const edges = SPHERE.edges;
-    const glow = clamp(cur.bright * (1 + env * 0.45), 0.3, 1.9);
     for (let pass = 0; pass < 2; pass++) {
       const front = pass === 1;
       ctx.beginPath();
@@ -4179,9 +4307,7 @@ class HubbubbRingCard extends LitElement {
         ctx.moveTo(proj[i], proj[i + 1]);
         ctx.lineTo(proj[j], proj[j + 1]);
       }
-      ctx.strokeStyle = front
-        ? `rgba(220,246,255,${0.4 * glow})`
-        : `rgba(${R},${G},${B},${0.13 * glow})`;
+      ctx.strokeStyle = front ? frontStyle : backStyle;
       ctx.lineWidth = Math.max(0.35, half * (front ? 0.0032 : 0.0024));
       ctx.stroke();
     }
@@ -4199,7 +4325,371 @@ class HubbubbRingCard extends LitElement {
     }
     ctx.globalAlpha = 1;
     ctx.restore();
-    if (bs !== 1) ctx.restore();
+  }
+
+  /* ---------------- jarvis-im3 ---------------- */
+  _drawIm3(dt, ctx, cx, cy, half, cur, env, R, G, B) {
+    const t = this._t;
+    const boot = this._im3Boot(dt);
+    const sheets = this._sheetTables(dt, env, boot.burst);
+    if (boot.ring > 0) {
+      ctx.save();
+      ctx.globalAlpha = boot.ring;
+      if (boot.scale !== 1) {
+        ctx.translate(cx, cy);
+        ctx.scale(boot.scale, boot.scale);
+        ctx.translate(-cx, -cy);
+      }
+      this._drawSheetDots(ctx, cx, cy, half, cur, sheets, R, G, B);
+      ctx.globalAlpha = boot.ring;
+      this._drawIm3Rings(ctx, cx, cy, half, R, G, B, dt);
+      const SR = half * 0.3 * (1 + env * 0.04);
+      const glow = clamp(cur.bright * (1 + env * 0.35), 0.3, 1.9);
+      const lt = (c) => Math.round(c + (255 - c) * 0.35);
+      this._drawGlobe(ctx, cx, cy, SR, half, glow * 0.5,
+        `rgba(${lt(R)},${lt(G)},${lt(B)},${0.15 * glow})`, `rgba(${R},${G},${B},${0.045 * glow})`);
+      ctx.globalAlpha = boot.ring;
+      ctx.strokeStyle = `rgba(${R},${G},${B},0.55)`;
+      ctx.lineWidth = Math.max(0.8, half * 0.006);
+      ctx.beginPath();
+      ctx.arc(cx, cy, SR * 1.03, 0, 6.283185);
+      ctx.stroke();
+      ctx.restore();
+    }
+    if (boot.phase) this._drawIm3Boot(ctx, cx, cy, half, boot, R, G, B, t);
+  }
+
+  /* The dots, additive: where a sheet turns edge-on they pile into a crease
+     and the pile glows. Batched by alpha bucket, as in the v1 field. */
+  _drawSheetDots(ctx, cx, cy, half, cur, sheets, R, G, B) {
+    const all = this._particles;
+    if (!all) return;
+    const nDraw = Math.min(all.length, Math.max(400, Math.round(all.length * (this._perf?.q ?? 1))));
+    if (!this._mx || this._mx.length < all.length) {
+      this._mx = new Float32Array(all.length);
+      this._my = new Float32Array(all.length);
+      this._mr = new Float32Array(all.length);
+      this._mb = new Uint8Array(all.length);
+    }
+    const MX = this._mx, MY = this._my, MR = this._mr, MB = this._mb;
+    const t = this._t;
+    const rot = this._spin * 0.35;
+    const q = this._perf?.q ?? 1;
+    const szMul = (Number(this._config.particle_size) || 1) * clamp(half / 200, 0.7, 1.8) * (1 + (1 - q) * 0.4);
+    const aMul = (cur.bright / 1.6) * (1 + (1 - q) * 0.7);
+    let nm = 0;
+    for (let i = 0; i < nDraw; i++) {
+      const p = all[i];
+      const sh = SHEETS[p.si];
+      const st = sheets[p.si];
+      let th = p.th + rot * sh.dir + p.dr * t;
+      let u = (th * 0.15915494) % 1;
+      if (u < 0) u += 1;
+      const b = (u * SHEET_BINS) | 0;
+      const rf = st.rc[b] + p.v * st.cw[b] + p.n * 0.004 + 0.002 * Math.sin(t * p.tw + p.ph);
+      const r = rf * half;
+      MX[nm] = cx + r * Math.cos(th);
+      MY[nm] = cy + r * Math.sin(th);
+      MR[nm] = p.sz * szMul * 0.8;
+      // rims and the thin inner ring read as lines; the film between is mist
+      const av = Math.abs(p.v);
+      const edge = av > 0.9 && av < 1.1 ? 1.6 : 1;
+      const a = p.br * aMul * edge * (p.si === 2 ? 0.9 : 0.62) * (0.75 + 0.25 * Math.sin(t * p.tw * 0.7 + p.ph));
+      MB[nm++] = Math.min(MOTE_ALPHAS - 1, (clamp(a, 0, 1) * MOTE_ALPHAS) | 0);
+    }
+    const base = ctx.globalAlpha;
+    ctx.globalCompositeOperation = "lighter";
+    ctx.fillStyle = `rgb(${R},${G},${B})`;
+    /* The film's body: a faint glassy fill between each sheet's rims, so the
+       dots sit on a surface rather than in empty air. */
+    ctx.globalAlpha = base * 0.07;
+    for (let si = 0; si < 2; si++) {
+      const st = sheets[si];
+      const dir = SHEETS[si].dir;
+      ctx.beginPath();
+      for (let k = 0; k <= SHEET_BINS; k++) {
+        const b = k % SHEET_BINS;
+        const th = (b / SHEET_BINS) * 6.283185 + rot * dir;
+        const r = (st.rc[b] + Math.abs(st.cw[b])) * half;
+        k ? ctx.lineTo(cx + r * Math.cos(th), cy + r * Math.sin(th)) : ctx.moveTo(cx + r * Math.cos(th), cy + r * Math.sin(th));
+      }
+      for (let k = SHEET_BINS; k >= 0; k--) {
+        const b = k % SHEET_BINS;
+        const th = (b / SHEET_BINS) * 6.283185 + rot * dir;
+        const r = (st.rc[b] - Math.abs(st.cw[b])) * half;
+        ctx.lineTo(cx + r * Math.cos(th), cy + r * Math.sin(th));
+      }
+      ctx.fill("evenodd");
+    }
+    for (let bk = 0; bk < MOTE_ALPHAS; bk++) {
+      ctx.beginPath();
+      let any = false;
+      for (let i = 0; i < nm; i++) {
+        if (MB[i] !== bk) continue;
+        ctx.moveTo(MX[i] + MR[i], MY[i]);
+        ctx.arc(MX[i], MY[i], MR[i], 0, 6.283185);
+        any = true;
+      }
+      if (!any) continue;
+      ctx.globalAlpha = base * ((bk + 0.5) / MOTE_ALPHAS);
+      ctx.fill();
+    }
+    ctx.globalCompositeOperation = "source-over";
+    ctx.globalAlpha = base;
+  }
+
+  /* The faint machinery between globe and film: two hairline rings, a cog
+     ring turning slowly, and the Claude sessions as arcs on it - each one's
+     span its share, its bright part how full its context is. */
+  _drawIm3Rings(ctx, cx, cy, half, R, G, B, dt) {
+    const base = ctx.globalAlpha;
+    const col = `rgb(${R},${G},${B})`;
+    ctx.strokeStyle = col;
+    ctx.lineWidth = Math.max(0.6, half * 0.003);
+    for (const [r, a] of [[0.4, 0.16], [0.47, 0.08], [0.66, 0.1]]) {
+      ctx.globalAlpha = base * a;
+      ctx.beginPath();
+      ctx.arc(cx, cy, half * r, 0, 6.283185);
+      ctx.stroke();
+    }
+    // cog: short raised teeth every 15 degrees, turning against the globe
+    const cog = half * 0.56;
+    const rot = -this._spin * 0.5;
+    ctx.globalAlpha = base * 0.06;
+    ctx.lineWidth = Math.max(1, half * 0.008);
+    ctx.beginPath();
+    for (let i = 0; i < 24; i++) {
+      const a0 = rot + i * 0.2618;
+      ctx.moveTo(cx + cog * Math.cos(a0), cy + cog * Math.sin(a0));
+      ctx.arc(cx, cy, cog, a0, a0 + 0.13);
+    }
+    ctx.stroke();
+    this._segTick(dt);
+    const S = this._segMap;
+    if (!S || !S.size) {
+      ctx.globalAlpha = base;
+      return;
+    }
+    let sum = 0;
+    for (const g of S.values()) sum += g.size;
+    if (sum <= 0) {
+      ctx.globalAlpha = base;
+      return;
+    }
+    const rs = half * 0.6;
+    let a = this._segRot;
+    ctx.lineCap = "round";
+    for (const g of S.values()) {
+      const slot = (g.size / sum) * 6.283185;
+      const gap = Math.min(0.06, slot * 0.3);
+      const a0 = a + gap / 2;
+      const a1 = a + slot - gap / 2;
+      a += slot;
+      if (a1 - a0 < 0.004) continue;
+      const c = `rgb(${Math.round(g.rgb[0])},${Math.round(g.rgb[1])},${Math.round(g.rgb[2])})`;
+      ctx.strokeStyle = c;
+      ctx.lineWidth = Math.max(1, half * 0.006);
+      ctx.globalAlpha = base * 0.18;
+      ctx.beginPath();
+      ctx.arc(cx, cy, rs, a0, a1);
+      ctx.stroke();
+      const fill = clamp(g.frac ?? 1, 0, 1);
+      ctx.lineWidth = Math.max(1.4, half * 0.011);
+      ctx.globalAlpha = base * (g.busy ? 0.75 : 0.45);
+      ctx.beginPath();
+      ctx.arc(cx, cy, rs, a0, a0 + (a1 - a0) * Math.max(0.04, fill));
+      ctx.stroke();
+    }
+    ctx.lineCap = "butt";
+    ctx.strokeStyle = col;
+    ctx.globalAlpha = base;
+  }
+
+  /* Where the start-up is, as numbers the frame draws from. Outside a
+     start-up: full ring, no overlay. */
+  _im3Boot(dt) {
+    const b = this._boot;
+    const T = IM3_BOOT;
+    if (!b) return { ring: 1, scale: 1, burst: 0, phase: null };
+    const t = (b.t += dt);
+    const ease = (x) => 1 - (1 - x) * (1 - x) * (1 - x);
+    if (t < T.dot) {
+      const u = t / T.dot;
+      return { ring: 1 - u * 0.4, scale: 1 - 0.98 * u * u, burst: 0, phase: null };
+    }
+    if (t < T.reactor) return { ring: 0, scale: 0.02, burst: 0, phase: "dot", t };
+    if (t < T.burst) return { ring: 0, scale: 0.02, burst: 0, phase: "reactor", u: (t - T.reactor) / (T.burst - T.reactor), t };
+    if (t < T.end) {
+      const u = clamp((t - T.burst) / (T.word - T.burst), 0, 1);
+      const s = u < 1 ? 0.3 + 0.7 * (1 + 2.70158 * (u - 1) ** 3 + 1.70158 * (u - 1) ** 2) : 1;
+      // turbulence on arrival, settling as the name forms
+      const burst = 1.2 * (1 - ease(clamp((t - T.burst) / (T.hold - T.burst), 0, 1)));
+      const fadeIn = clamp((t - T.burst) / 0.3, 0, 1);
+      return { ring: fadeIn, scale: s, burst, phase: t >= T.word ? "word" : "burst", t };
+    }
+    this._boot = null;
+    return { ring: 1, scale: 1, burst: 0, phase: null };
+  }
+
+  _drawIm3Boot(ctx, cx, cy, half, boot, R, G, B, t) {
+    const T = IM3_BOOT;
+    const col = (a) => `rgba(${R},${G},${B},${a})`;
+    const hi = (a) => `rgba(${Math.round(R + (255 - R) * 0.5)},${Math.round(G + (255 - G) * 0.5)},${Math.round(B + (255 - B) * 0.5)},${a})`;
+    ctx.save();
+    if (boot.phase === "dot") {
+      const f = 0.55 + 0.45 * Math.abs(Math.sin((boot.t - T.dot) * 18));
+      ctx.fillStyle = hi(f);
+      ctx.beginPath();
+      ctx.arc(cx, cy, Math.max(1.6, half * 0.012), 0, 6.283185);
+      ctx.fill();
+      ctx.fillStyle = col(0.5 * f);
+      ctx.fillRect(cx - half * 0.07, cy + half * 0.55, half * 0.14, Math.max(1, half * 0.006));
+    } else if (boot.phase === "reactor") {
+      this._drawReactor(ctx, cx, cy, half, boot.u, col, hi);
+    } else if (boot.phase === "burst" && boot.t < T.burst + 0.35) {
+      // the reactor lets go as the ring arrives
+      ctx.globalAlpha = 1 - (boot.t - T.burst) / 0.35;
+      this._drawReactor(ctx, cx, cy, half, 1, col, hi);
+    } else if (boot.phase === "word") {
+      this._drawWordmark(ctx, cx, cy, half, boot.t - T.word, R, G, B);
+    }
+    ctx.restore();
+  }
+
+  /* The suit's chest piece, without the suit: a segmented ring that lights
+     round as the power climbs, a bright core, and the readout under it. */
+  _drawReactor(ctx, cx, cy, half, u, col, hi) {
+    const pct = Math.min(1, u / 0.88);
+    const lit = 1 - (1 - pct) ** 2;
+    const rr = half * 0.2;
+    const base = ctx.globalAlpha;
+    const N = 40;
+    ctx.lineWidth = Math.max(2, half * 0.05);
+    for (let i = 0; i < N; i++) {
+      const a0 = -1.5708 + (i / N) * 6.283185;
+      const on = i / N < lit;
+      ctx.strokeStyle = on ? hi(0.95) : col(0.12);
+      ctx.beginPath();
+      ctx.arc(cx, cy, rr, a0 + 0.02, a0 + 6.283185 / N - 0.03);
+      ctx.stroke();
+    }
+    ctx.lineWidth = Math.max(1, half * 0.006);
+    ctx.strokeStyle = col(0.7);
+    for (const k of [0.72, 1.32]) {
+      ctx.beginPath();
+      ctx.arc(cx, cy, rr * k, 0, 6.283185);
+      ctx.stroke();
+    }
+    const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, rr * 0.7);
+    g.addColorStop(0, hi(0.25 + 0.75 * lit));
+    g.addColorStop(1, col(0));
+    ctx.fillStyle = g;
+    ctx.beginPath();
+    ctx.arc(cx, cy, rr * 0.7, 0, 6.283185);
+    ctx.fill();
+    // inverted triangle in the core
+    ctx.strokeStyle = hi(0.5 + 0.5 * lit);
+    ctx.lineWidth = Math.max(1, half * 0.009);
+    ctx.beginPath();
+    for (let i = 0; i < 3; i++) {
+      const a = 1.5708 + (i * 6.283185) / 3;
+      const x = cx + rr * 0.42 * Math.cos(a), y = cy + rr * 0.42 * Math.sin(a);
+      i ? ctx.lineTo(x, y) : ctx.moveTo(x, y);
+    }
+    ctx.closePath();
+    ctx.stroke();
+    // POWER LEVEL ....... 42.3%
+    const bw = half * 1.25, bh = half * 0.13;
+    const bx = cx - bw / 2, by = cy + half * 0.5;
+    ctx.globalAlpha = base;
+    ctx.strokeStyle = col(0.55);
+    ctx.lineWidth = 1;
+    ctx.strokeRect(bx, by, bw, bh);
+    ctx.fillStyle = col(0.1);
+    ctx.fillRect(bx, by, bw * lit, bh);
+    const fs = Math.max(9, bh * 0.52);
+    ctx.font = `600 ${fs}px "Avenir Next", "Segoe UI", Roboto, sans-serif`;
+    ctx.textBaseline = "middle";
+    ctx.fillStyle = hi(0.95);
+    ctx.textAlign = "left";
+    ctx.fillText("POWER LEVEL", bx + bh * 0.4, by + bh / 2);
+    ctx.textAlign = "right";
+    ctx.fillText(`${(lit * 100).toFixed(1)}%`, bx + bw - bh * 0.4, by + bh / 2);
+    const lx0 = bx + bh * 0.4 + ctx.measureText("POWER LEVEL").width + fs * 0.5;
+    const lx1 = bx + bw - bh * 0.4 - ctx.measureText("100.0%").width - fs * 0.5;
+    ctx.fillStyle = col(0.6);
+    for (let x = lx0; x < lx1; x += fs * 0.45) ctx.fillRect(x, by + bh * 0.62, 1.2, 1.2);
+    ctx.textAlign = "start";
+  }
+
+  /* The name, built from particles. Targets come from the name drawn once
+     into an offscreen canvas; each particle flies in from the film, the
+     letters filling left to right, holds, then scatters and fades. */
+  _drawWordmark(ctx, cx, cy, half, wt, R, G, B) {
+    const T = IM3_BOOT;
+    const name = (this._name || "JARVIS").toUpperCase();
+    if (!this._wm || this._wm.half !== half || this._wm.name !== name) {
+      const fs = Math.round(half * 0.3);
+      const c = document.createElement("canvas");
+      c.width = Math.round(half * 1.9);
+      c.height = Math.round(fs * 1.5);
+      const x = c.getContext("2d");
+      x.fillStyle = "#fff";
+      x.font = `italic 900 ${fs}px "Arial Black", "Helvetica Neue", Arial, sans-serif`;
+      x.textAlign = "center";
+      x.textBaseline = "middle";
+      x.setTransform(1, 0, -0.18, 1, fs * 0.13, 0); // the film's forward lean
+      let w = x.measureText(name).width;
+      if (w > c.width * 0.92) {
+        x.font = `italic 900 ${Math.round((fs * c.width * 0.92) / w)}px "Arial Black", "Helvetica Neue", Arial, sans-serif`;
+      }
+      x.fillText(name, c.width / 2, c.height / 2);
+      const d = x.getImageData(0, 0, c.width, c.height).data;
+      const step = Math.max(2, Math.round(half / 75));
+      const pts = [];
+      for (let yy = 0; yy < c.height; yy += step)
+        for (let xx = 0; xx < c.width; xx += step)
+          if (d[(yy * c.width + xx) * 4 + 3] > 140) pts.push(xx - c.width / 2, yy - c.height / 2);
+      const rand = seeded(0x3a7);
+      const n = pts.length / 2;
+      const from = new Float32Array(n * 2), seed = new Float32Array(n);
+      for (let i = 0; i < n; i++) {
+        const a = rand() * 6.283185, r = half * (0.82 + rand() * 0.14);
+        from[i * 2] = r * Math.cos(a);
+        from[i * 2 + 1] = r * Math.sin(a);
+        seed[i] = rand();
+      }
+      this._wm = { half, name, pts: Float32Array.from(pts), from, seed, w: c.width };
+    }
+    const { pts, from, seed, w } = this._wm;
+    const n = seed.length;
+    const fly = T.hold - T.word, gone = T.gone - T.word, end = T.end - T.word;
+    const hiR = Math.round(R + (255 - R) * 0.45), hiG = Math.round(G + (255 - G) * 0.45), hiB = Math.round(B + (255 - B) * 0.45);
+    ctx.globalCompositeOperation = "lighter";
+    ctx.fillStyle = `rgb(${hiR},${hiG},${hiB})`;
+    const dot = Math.max(1, half / 130);
+    for (let i = 0; i < n; i++) {
+      const tx = pts[i * 2], ty = pts[i * 2 + 1];
+      // left letters land first
+      const delay = ((tx / w) + 0.5) * fly * 0.55 + seed[i] * 0.12;
+      let k = clamp((wt - delay) / (fly * 0.42), 0, 1);
+      k = 1 - (1 - k) ** 3;
+      let x = from[i * 2] + (tx - from[i * 2]) * k;
+      let y = from[i * 2 + 1] + (ty - from[i * 2 + 1]) * k;
+      let a = 0.15 + 0.7 * k;
+      if (k > 0.98 && wt < gone && Math.random() < 0.015) x += (Math.random() - 0.5) * half * 0.08; // glitch
+      if (wt > gone) {
+        const g = clamp((wt - gone) / (end - gone), 0, 1);
+        x += (x / (Math.abs(x) + 1)) * g * half * 0.25 * (0.4 + seed[i]);
+        y += (seed[i] - 0.5) * g * half * 0.2;
+        a *= 1 - g;
+      }
+      if (a < 0.02) continue;
+      ctx.globalAlpha = a;
+      ctx.fillRect(cx + x - dot / 2, cy + y - dot / 2, dot, dot);
+    }
+    ctx.globalCompositeOperation = "source-over";
+    ctx.globalAlpha = 1;
   }
 
   /* Start-up: the whole ring collapses to a point, flickers there, then
@@ -4225,14 +4715,17 @@ class HubbubbRingCard extends LitElement {
     this._boot = { t: 0 };
     this._booting = true;
     clearTimeout(this._bootTimer);
-    this._bootTimer = setTimeout(() => (this._booting = false), 6500);
+    const im3 = this._config.animation === "jarvis-im3";
+    this._bootTimer = setTimeout(() => (this._booting = false), im3 ? IM3_BOOT.end * 1000 : 6500);
     const name = this._name;
+    // the film's own introduction, word for word
     const message =
       this._config.intro_message ||
-      `Allow me to introduce myself. I am ${name}, the virtual intelligence ` +
-        `that runs this house, here to help with whatever you need, at any ` +
-        `hour of the day. Your preferences are loaded. All systems are online.`;
-    // spoken after the collapse, so the voice arrives with the bloom
+      `Allow me to introduce myself. I am ${name}, a virtual artificial ` +
+        `intelligence, and I'm here to assist you with a variety of tasks as ` +
+        `best I can, 24 hours a day, 7 days a week. Importing all preferences ` +
+        `from home interface. Systems are now fully operational.`;
+    // spoken as the ring comes back, so the voice arrives with the bloom
     setTimeout(() => {
       Promise.resolve(
         this._hass?.callService("assist_satellite", "announce", {
@@ -4241,7 +4734,7 @@ class HubbubbRingCard extends LitElement {
           preannounce: false,
         })
       ).catch(() => this._toast(`${name} could not speak the introduction.`));
-    }, 900);
+    }, im3 ? IM3_BOOT.burst * 1000 : 900);
   }
 
   async _openSheet(kind) {
@@ -4301,24 +4794,102 @@ class HubbubbRingCard extends LitElement {
     </div>`;
   }
 
+  /* ---------------- to-do lists ---------------- */
+  _todoIds(hass) {
+    const want = this._config.todo_entities;
+    if (Array.isArray(want) && want.length) return want;
+    return Object.keys(hass?.states || {}).filter((id) => id.startsWith("todo.")).sort();
+  }
+
+  /* A list's state is its open-item count, so a change there is the cue to
+     fetch its items again - from voice, the phone, anywhere. */
+  _watchTodos(hass) {
+    if (this._config.todos === false || this._config.build_page) return;
+    const ids = this._todoIds(hass);
+    const sig = ids.map((id) => `${id}=${hass.states[id]?.state}`).join("|");
+    if (sig === this._todoSig) return;
+    this._todoSig = sig;
+    this._loadTodos(ids);
+  }
+
+  async _loadTodos(ids) {
+    const lists = await Promise.all(
+      ids.map(async (id) => {
+        const st = this._hass.states[id];
+        const name = st?.attributes?.friendly_name || id;
+        if (!st || st.state === "unavailable") return { id, name, items: [], off: true };
+        try {
+          const r = await this._hass.callWS({ type: "todo/item/list", entity_id: id });
+          return { id, name, items: (r?.items || []).filter((i) => i.status !== "completed") };
+        } catch (e) {
+          return { id, name, items: [], err: this._errText(e) };
+        }
+      })
+    );
+    this._todos = lists;
+  }
+
+  async _todoDone(list, item) {
+    // off the screen at once; the count change reloads the truth after
+    this._todos = this._todos.map((l) =>
+      l.id === list.id ? { ...l, items: l.items.filter((i) => i.uid !== item.uid) } : l
+    );
+    try {
+      await this._hass.callService("todo", "update_item", { item: item.uid, status: "completed" }, { entity_id: list.id });
+    } catch (e) {
+      this._toast(`Could not tick off ${item.summary}.`);
+      this._todoSig = null;
+      this._watchTodos(this._hass);
+    }
+  }
+
+  _renderTodos(build) {
+    if (build || this._config.todos === false || this._config.build_page || !this._todos?.length) return nothing;
+    return html`<section class="todos">
+      ${this._todos.map(
+        (l) => html`<div class="todo">
+          <div class="phead">
+            <span class="ptitle">${l.name}</span>
+            ${l.off || l.err ? nothing : html`<span class="tcount">${l.items.length}</span>`}
+          </div>
+          ${l.off
+            ? html`<div class="dim">Unavailable</div>`
+            : l.err
+            ? html`<div class="perr">${l.err}</div>`
+            : !l.items.length
+            ? html`<div class="dim">Nothing on the list.</div>`
+            : l.items.map(
+                (it) => html`<button class="titem" title="Tick off" @click=${() => this._todoDone(l, it)}>
+                  <span class="tbox"></span><span class="ttext">${it.summary}</span>
+                </button>`
+              )}
+        </div>`
+      )}
+    </section>`;
+  }
+
   _renderDock(build) {
     if (build || this._config.dock === false || this._config.build_page) return nothing;
     const ico = (d) => html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
     return html`<nav class="dock">
       <button title="Calendar" @click=${() => this._navigate(this._config.calendar_path)}>
         ${ico(svg`<rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/><path d="M7.5 13h2M11 13h2M14.5 13h2M7.5 16.5h2M11 16.5h2"/>`)}
+        <span>Calendar</span>
       </button>
       <button title="Memories" @click=${() => this._openSheet("memories")}>
         ${ico(svg`<path d="M9 4.5a3 3 0 0 0-3 3 3 3 0 0 0-2 5 3 3 0 0 0 2 4.5 3 3 0 0 0 6 .5V6.5a2.5 2.5 0 0 0-3-2z"/><path d="M15 4.5a3 3 0 0 1 3 3 3 3 0 0 1 2 5 3 3 0 0 1-2 4.5 3 3 0 0 1-6 .5"/><path d="M12 9h-1.5M12 13H9.5M12 9h1.5M12 13h2.5"/>`)}
+        <span>Memory</span>
       </button>
       <button class="power ${this._booting ? "on" : ""}" title="Start-up and introduction" @click=${this._intro}>
         ${ico(svg`<path d="M12 3.5v7"/><path d="M7.2 6.6a7 7 0 1 0 9.6 0"/>`)}
       </button>
       <button title="Skills" @click=${() => this._openSheet("skills")}>
         ${ico(svg`<path d="M13 2.5 5 13.5h6l-1 8 8-11h-6z"/>`)}
+        <span>Skills</span>
       </button>
       <button title="Build mode" data-ai="toggle-build-mode" @click=${() => this._setBuild(true)}>
         ${ico(svg`<path d="M12 2.6c-4 0-7 2.5-7 6.5v4.3c0 2.1.8 4 2.2 5.4L9.6 21h4.8l2.4-2.2c1.4-1.4 2.2-3.3 2.2-5.4V9.1c0-4-3-6.5-7-6.5z"/><path d="M7.3 11.1l3.4 1M16.7 11.1l-3.4 1"/><path d="M12 2.8v4.4M9.8 17.2h4.4M7.4 14.2l2.3 1.6M16.6 14.2l-2.3 1.6"/>`)}
+        <span>Build</span>
       </button>
     </nav>`;
   }
@@ -4709,7 +5280,7 @@ class HubbubbRingCard extends LitElement {
 
     return html`
       <ha-card
-        class="bg-${this._config.background}${this._config.honeycomb === false ? "" : " comb"}${state === "offline" ? " dim" : ""}"
+        class="bg-${this._config.background}${this._config.honeycomb === false ? "" : " comb"}${state === "offline" ? " dim" : ""}${this._config.animation === "jarvis-im3" ? " im3" : ""}"
         style=${this._config.honeycomb === false ? "" : `--jr-comb:${hexTileUrl(color)}`}
       >
         <div
@@ -4778,7 +5349,7 @@ class HubbubbRingCard extends LitElement {
             : nothing}
           <div class="ring ${this._config.animation === "jarvis-v1" ? "" : "bubbles"} ${this._booting ? "booting" : ""}" data-ai="activate-assistant" @click=${this._ringTap}>
             <canvas></canvas>
-            ${this._booting
+            ${this._booting && this._config.animation !== "jarvis-im3"
               ? html`<div class="wordmark" aria-hidden="true">${this._name.toUpperCase()}<small>All systems online</small></div>`
               : nothing}
             <svg viewBox="0 0 200 200" aria-hidden="true">
@@ -4825,6 +5396,7 @@ class HubbubbRingCard extends LitElement {
             </svg>
           </div>
           ${this._renderDock(build)}
+          ${this._renderTodos(build)}
           ${this._sheet ? this._renderSheet() : nothing}
         </div>
       </ha-card>
@@ -4862,6 +5434,20 @@ class HubbubbRingCard extends LitElement {
     }
     ha-card.comb.dim::before {
       opacity: 0.02;
+    }
+    /* jarvis-im3: the film's backdrop - a soft column of light behind the
+       ring, near-black either side, and the honeycomb only in faint patches. */
+    ha-card.bg-dark.im3 {
+      background:
+        radial-gradient(ellipse 30% 58% at 50% 42%, rgba(16, 92, 88, 0.5), rgba(6, 44, 42, 0.22) 55%, transparent 100%),
+        linear-gradient(90deg, #000 0%, #01100f 32%, #021a19 50%, #01100f 68%, #000 100%);
+    }
+    ha-card.im3.comb::before {
+      opacity: 0.09;
+      -webkit-mask-image: radial-gradient(circle at 12% 78%, #000 0, transparent 24%),
+        radial-gradient(circle at 88% 22%, #000 0, transparent 16%);
+      mask-image: radial-gradient(circle at 12% 78%, #000 0, transparent 24%),
+        radial-gradient(circle at 88% 22%, #000 0, transparent 16%);
     }
     ha-card {
       position: relative;
@@ -4968,58 +5554,157 @@ class HubbubbRingCard extends LitElement {
     }
 
     /* ---------------- dock ---------------- */
+    /* The film's tab bar, dressed as a build-mode panel: same glass, border,
+       inset glow and tracked capitals, with the power button standing proud
+       of the bar in the middle. */
     .dock {
       position: relative;
-      display: flex;
-      justify-content: center;
+      display: grid;
+      grid-template-columns: repeat(2, 1fr) 76px repeat(2, 1fr);
       align-items: center;
-      gap: clamp(10px, 4vw, 28px);
-      width: 100%;
-      padding: 10px 0 12px;
-      line-height: 0;
-    }
-    /* the thin rail the buttons sit on */
-    .dock::before {
-      content: "";
-      position: absolute;
-      left: 8%;
-      right: 8%;
-      top: 50%;
-      height: 1px;
-      background: linear-gradient(90deg, transparent, var(--jr-color), transparent);
-      opacity: 0.25;
+      box-sizing: border-box;
+      width: min(100% - 24px, 520px);
+      margin: 26px auto 10px;
+      padding: 6px 8px;
+      background: var(
+        --jr-panel-bg,
+        linear-gradient(160deg, rgba(10, 24, 32, 0.92), rgba(4, 10, 14, 0.96))
+      );
+      border: 1px solid var(--jr-panel-border, rgba(53, 154, 210, 0.35));
+      border-radius: 10px;
+      box-shadow: inset 0 0 28px rgba(46, 157, 245, 0.08);
+      font-family: "Avenir Next", "Segoe UI", Roboto, sans-serif;
+      line-height: 1;
     }
     .dock button {
-      position: relative;
-      width: 42px;
-      height: 42px;
-      padding: 9px;
-      border-radius: 50%;
-      border: 1px solid var(--jr-color);
-      background: rgba(3, 7, 9, 0.85);
-      color: var(--jr-color);
-      opacity: 0.6;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 5px;
+      min-width: 0;
+      padding: 7px 2px 6px;
+      border: 1px solid transparent;
+      border-radius: 6px;
+      background: none;
+      color: var(--jr-panel-text, #bfe3f5);
+      opacity: 0.78;
       cursor: pointer;
-      transition: opacity 0.2s, box-shadow 0.2s, transform 0.12s;
+      font-family: inherit;
+      transition: opacity 0.2s, background 0.2s, border-color 0.2s, box-shadow 0.2s;
       -webkit-tap-highlight-color: transparent;
     }
+    .dock button span {
+      font-size: 9.5px;
+      font-weight: 600;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+    }
+    .dock button svg {
+      position: static; /* the ring's svg rule pins svgs absolutely */
+      width: 22px;
+      height: 22px;
+      display: block;
+      color: var(--jr-color);
+    }
     .dock button:hover,
-    .dock button.on {
+    .dock button:focus-visible {
       opacity: 1;
-      box-shadow: 0 0 10px var(--jr-color);
+      background: rgba(46, 157, 245, 0.12);
+      border-color: rgba(53, 154, 210, 0.4);
+      box-shadow: 0 0 10px rgba(46, 157, 245, 0.25);
+      outline: none;
     }
     .dock button:active {
-      transform: scale(0.94);
+      transform: scale(0.96);
     }
     .dock button.power {
-      width: 54px;
-      height: 54px;
-      padding: 12px;
+      justify-self: center;
+      width: 64px;
+      height: 64px;
+      margin-top: -34px;
+      padding: 15px;
+      border-radius: 50%;
+      border: 1px solid var(--jr-panel-border, rgba(53, 154, 210, 0.45));
+      background: radial-gradient(circle at 50% 40%, rgba(16, 40, 48, 0.98), rgba(3, 8, 11, 0.98));
+      box-shadow: 0 0 0 4px rgba(3, 8, 11, 0.9), 0 0 16px rgba(46, 157, 245, 0.25), inset 0 0 14px rgba(46, 157, 245, 0.15);
+      opacity: 1;
     }
-    .dock svg {
+    .dock button.power svg {
       width: 100%;
       height: 100%;
-      display: block;
+    }
+    .dock button.power:hover,
+    .dock button.power.on {
+      border-color: var(--jr-color);
+      box-shadow: 0 0 0 4px rgba(3, 8, 11, 0.9), 0 0 22px var(--jr-color), inset 0 0 16px rgba(46, 157, 245, 0.25);
+      background: radial-gradient(circle at 50% 40%, rgba(16, 40, 48, 0.98), rgba(3, 8, 11, 0.98));
+    }
+
+    /* ---------------- to-do lists ---------------- */
+    .todos {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+      gap: 10px;
+      box-sizing: border-box;
+      width: min(100% - 24px, 520px);
+      margin: 0 auto 14px;
+    }
+    .todo {
+      background: var(
+        --jr-panel-bg,
+        linear-gradient(160deg, rgba(10, 24, 32, 0.92), rgba(4, 10, 14, 0.96))
+      );
+      border: 1px solid var(--jr-panel-border, rgba(53, 154, 210, 0.35));
+      border-radius: 10px;
+      box-shadow: inset 0 0 28px rgba(46, 157, 245, 0.08);
+      padding: 10px 12px;
+      color: var(--jr-panel-text, #cfe9f7);
+      font-family: "Avenir Next", "Segoe UI", Roboto, sans-serif;
+      line-height: 1.4;
+      text-align: left;
+      min-width: 0;
+    }
+    .todo .dim {
+      font-size: 12.5px;
+    }
+    .tcount {
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      color: var(--jr-color);
+      opacity: 0.8;
+    }
+    .titem {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      width: 100%;
+      padding: 5px 4px;
+      border: none;
+      border-radius: 4px;
+      background: none;
+      color: inherit;
+      font: inherit;
+      font-size: 13px;
+      text-align: left;
+      cursor: pointer;
+    }
+    .titem:hover {
+      background: rgba(46, 157, 245, 0.1);
+    }
+    .tbox {
+      flex: none;
+      width: 11px;
+      height: 11px;
+      border: 1px solid var(--jr-color);
+      border-radius: 2px;
+      opacity: 0.8;
+    }
+    .titem:hover .tbox {
+      box-shadow: 0 0 6px var(--jr-color);
+    }
+    .ttext {
+      min-width: 0;
+      overflow-wrap: anywhere;
     }
 
     /* ---------------- memories / skills sheet ---------------- */
@@ -6610,6 +7295,7 @@ const EDITOR_SCHEMA = [
         options: [
           { value: "hubbubb", label: "Hubbubb - ring and bubbles" },
           { value: "jarvis-v1", label: "Jarvis v1 - segments and motes" },
+          { value: "jarvis-im3", label: "Jarvis IM3 - folding film, as in the film" },
         ],
       },
     },
@@ -6633,6 +7319,8 @@ const EDITOR_SCHEMA = [
     },
   },
   { name: "honeycomb", selector: { boolean: {} } },
+  { name: "todos", selector: { boolean: {} } },
+  { name: "todo_entities", selector: { entity: { domain: "todo", multiple: true } } },
   { name: "tap_message", selector: { text: {} } },
   {
     /* The integration owns switches; a hand-rolled setup may well use
@@ -6736,6 +7424,8 @@ const EDITOR_LABELS = {
   size: "Ring size (px)",
   background: "Card background",
   honeycomb: "Honeycomb background",
+  todos: "To-do lists on the main screen",
+  todo_entities: "Which to-do lists (empty = all)",
   follow_media_player: "Animate while the device is playing audio",
   audio_offset: "Audio sync offset (seconds)",
   media_player: "Speaker entity (blank = same device)",
