@@ -1,4 +1,5 @@
 import { LitElement, css, html, nothing, svg } from "lit";
+import { keyed } from "lit/directives/keyed.js";
 
 /* The integration serves this file from a path carrying its version, so the
    build identifies itself. Worth the three lines: a dashboard left open keeps
@@ -28,7 +29,7 @@ import {
   widestGap,
 } from "./pack.js";
 
-const CARD_VERSION = "4.13.5";
+const CARD_VERSION = "4.14.0";
 
 const SATELLITE_DOMAIN = "assist_satellite";
 
@@ -91,7 +92,8 @@ const DEFAULTS = {
      and build mode. `intro_message` empty = the built-in introduction. */
   dock: true,
   calendar_path: "/calendar",
-  review_path: "/jarvis-review", // the Review button in the dock
+  review_path: "/jarvis-review", // fallback when the review card is missing
+  review_entity: "sensor.jarvis_review", // the Review button's pop-up
   intro_message: "",
   /* To-do lists under the dock on the main screen. Empty = every todo.* list
      Home Assistant has. */
@@ -319,7 +321,7 @@ const IM3_BOOT = {
   icons: 5.3, iconStep: 0.75,
   clock: 9.3, clockEnd: 12.0,
   imp: 12.2, impEnd: 15.0,
-  down: 18.4, dot: 18.8, reactor: 19.2, back: 21.6, end: 22.4,
+  down: 18.4, dot: 18.8, reactor: 19.2, back: 21.6, end: 25.0,
 };
 // spoken one at a time on their beats, so the pauses fall where the film's do
 const IM3_LINES = [
@@ -329,9 +331,11 @@ const IM3_LINES = [
   [9.3, "24 hours a day, 7 days a week."],
   [12.2, "Importing all preferences from home interface."],
   [16.0, "Systems are now fully operational."],
+  // once the ring is back from the power-up
+  [22.0, "Welcome. Let me know how I can assist."],
 ];
-// silence owed before each line however late the one before ran; the last
-// line gets a real beat of quiet, as in the film
+// silence owed before each line however late the one before ran; "fully
+// operational" gets a real beat of quiet, as in the film
 const IM3_GAP = 0.35;
 const IM3_LAST_GAP = 1.2;
 
@@ -502,6 +506,7 @@ class HubbubbRingCard extends LitElement {
        (the more-info dialog, an automation) reaches the ring. */
     this._listenForSpeech(hass);
     this._watchTodos(hass);
+    if (this._reviewEl && this._sheet?.kind === "review") this._reviewEl.hass = hass;
     const speaker = hass?.states?.[this._config.announce_entity];
     const announce = speaker ? speaker.state === "on" : null;
     if (announce !== this._announce) this._announce = announce;
@@ -5002,7 +5007,7 @@ class HubbubbRingCard extends LitElement {
       let ended = 0;
       for (let i = 0; i < lines.length; i++) {
         const [at, text] = lines[i];
-        const gap = i === lines.length - 1 && i > 0 ? IM3_LAST_GAP : IM3_GAP;
+        const gap = /^Systems are now/.test(text) ? IM3_LAST_GAP : IM3_GAP;
         const wait = Math.max(at * 1000, ended + gap * 1000) - (performance.now() - t0);
         if (wait > 0) await new Promise((r) => setTimeout(r, wait));
         if (this._introRun !== run) return;
@@ -5145,13 +5150,15 @@ class HubbubbRingCard extends LitElement {
     const items = (sh.items || []).filter(
       (it) => !q || `${it.text || ""} ${it.name || ""} ${it.description || ""}`.toLowerCase().includes(q)
     );
-    return html`<div class="sheet" @click=${(e) => e.target === e.currentTarget && (this._sheet = null)}>
+    return html`<div class="sheet ${sh.kind}" @click=${(e) => e.target === e.currentTarget && (this._sheet = null)}>
       <div class="sheet-box">
         <div class="sheet-head">
-          <span>${sh.kind === "memories" ? "Memories" : sh.kind === "todos" ? "To-do lists" : `What ${this._name} can do`}</span>
+          <span>${sh.kind === "memories" ? "Memories" : sh.kind === "todos" ? "To-do lists" : sh.kind === "review" ? "Nightly review" : `What ${this._name} can do`}</span>
           <button class="sheet-x" title="Close" @click=${() => (this._sheet = null)}>×</button>
         </div>
-        ${sh.kind === "todos"
+        ${sh.kind === "review"
+          ? html`<div class="sheet-list review-host">${this._reviewEl}</div>`
+          : sh.kind === "todos"
           ? html`<div class="sheet-list">${this._renderTodos()}</div>`
           : html`        <input
           type="search"
@@ -5229,6 +5236,19 @@ class HubbubbRingCard extends LitElement {
     }
   }
 
+  /* The review in a pop-up over the ring - the same card the Jarvis Review
+     page shows, so closing it lands back on the animation. Navigates to
+     that page instead if the review card is not loaded. */
+  _openReview() {
+    if (!customElements.get("hubbubb-review-card")) return this._navigate(this._config.review_path);
+    if (!this._reviewEl) {
+      this._reviewEl = document.createElement("hubbubb-review-card");
+      this._reviewEl.setConfig({ type: "custom:hubbubb-review-card", entity: this._config.review_entity });
+    }
+    this._reviewEl.hass = this._hass;
+    this._sheet = { kind: "review", items: [], q: "" };
+  }
+
   _openTodos() {
     this._todoSig = null;
     this._watchTodos(this._hass);
@@ -5274,13 +5294,13 @@ class HubbubbRingCard extends LitElement {
       </button>
       <button class=${pend(1)} title="To-do lists" @click=${() => this._openTodos()}>
         ${ico(svg`<path d="M10 6.5h10.5M10 12h10.5M10 17.5h10.5"/><path d="M3.5 6.5l1.6 1.6 2.9-3.2M3.5 12l1.6 1.6 2.9-3.2"/><rect x="3.8" y="16" width="3.2" height="3.2" rx="0.6"/>`)}
-        ${open ? html`<b class="badge">${open}</b>` : nothing}
+        ${open && !pend(1) ? keyed(open, html`<b class="badge">${open}</b>`) : nothing}
         <span>To-do</span>
       </button>
       <button class="power ${this._booting ? "on" : ""} ${pend(2)}" title="Start-up and introduction" @click=${this._intro}>
         ${ico(svg`<path d="M12 3.5v7"/><path d="M7.2 6.6a7 7 0 1 0 9.6 0"/>`)}
       </button>
-      <button class=${pend(3)} title="Jarvis Review" @click=${() => this._navigate(this._config.review_path)}>
+      <button class=${pend(3)} title="Jarvis Review" @click=${() => this._openReview()}>
         ${ico(svg`<path d="M11 20.5H6.5a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2H14l4 4v3"/><path d="M14 3.5v4h4"/><circle cx="15.5" cy="15.5" r="3"/><path d="M17.7 17.7l2.6 2.6"/><path d="M7.5 8.5h3M7.5 12h4"/>`)}
         <span>Review</span>
       </button>
@@ -6076,6 +6096,7 @@ class HubbubbRingCard extends LitElement {
     /* the open-item count rides on the icon's corner, so it never widens
        the label - the label is what has to fit on a phone */
     .badge {
+      animation: jrBadge 0.5s cubic-bezier(0.34, 1.56, 0.64, 1) both;
       position: absolute;
       top: 3px;
       left: calc(50% + 5px);
@@ -6090,6 +6111,11 @@ class HubbubbRingCard extends LitElement {
       font-weight: 700;
       line-height: 14px;
       text-align: center;
+    }
+    @keyframes jrBadge {
+      0% { transform: scale(0); opacity: 0; }
+      60% { opacity: 1; box-shadow: 0 0 12px var(--jr-color); }
+      100% { transform: scale(1); box-shadow: 0 0 0 transparent; }
     }
     .flyicon {
       position: absolute;
@@ -6185,6 +6211,24 @@ class HubbubbRingCard extends LitElement {
       justify-content: center;
       background: rgba(0, 0, 0, 0.55);
       line-height: 1.4;
+    }
+    /* the review is long: a full-screen pop-up, closed back to the ring */
+    .sheet.review {
+      position: fixed;
+      z-index: 9;
+      padding: 16px;
+      box-sizing: border-box;
+      background: rgba(0, 0, 0, 0.72);
+    }
+    .sheet.review .sheet-box {
+      width: min(920px, 100%);
+      height: 100%;
+      max-height: none;
+    }
+    .review-host {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
     }
     .sheet-box {
       display: flex;
