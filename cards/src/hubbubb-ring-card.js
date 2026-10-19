@@ -1,4 +1,4 @@
-import { LitElement, css, html, nothing } from "lit";
+import { LitElement, css, html, nothing, svg } from "lit";
 
 /* The integration serves this file from a path carrying its version, so the
    build identifies itself. Worth the three lines: a dashboard left open keeps
@@ -86,6 +86,11 @@ const DEFAULTS = {
   terminal_text: "",
   honeycomb: true,
   tap_message: "Yes?", // what the assistant says when the ring is tapped
+  /* The bar under the ring: calendar, memories, the start-up intro, skills
+     and build mode. `intro_message` empty = the built-in introduction. */
+  dock: true,
+  calendar_path: "/calendar",
+  intro_message: "",
   /* Gates the "agent finished" announcement on the puck, and with it the
      media pause/mute the announcement sets off. Left empty because the id
      carries whatever you named the assistant - getStubConfig finds it, and
@@ -399,6 +404,8 @@ class HubbubbRingCard extends LitElement {
     _announce: { state: true },
     _messages: { state: true },
     _dictating: { state: true },
+    _booting: { state: true },
+    _sheet: { state: true },
   };
 
   /* hass is deliberately NOT a reactive property: we take the whole state
@@ -2589,35 +2596,42 @@ class HubbubbRingCard extends LitElement {
     if (!c || !this._ctx) return;
     const w = c.clientWidth || Number(this._config?.size) || 240;
     const h = c.clientHeight || w;
-    // below ~0.75 quality the halved backing store is a bigger win than
-    // the sharpness it costs — weak GPUs are usually fill-rate bound
-    const dprCap = (this._perf?.q ?? 1) < 0.75 ? 1 : 2;
+    /* Below ~0.75 quality the halved backing store is a bigger win than the
+       sharpness it costs — weak GPUs are usually fill-rate bound. One way
+       only: resizing the canvas reallocates it, and a device hovering at the
+       threshold used to flip back and forth, stalling on every flip. */
+    if ((this._perf?.q ?? 1) < 0.75) this._lowDpr = true;
+    const dprCap = this._lowDpr ? 1 : 2;
     const dpr = clamp(window.devicePixelRatio || 1, 1, dprCap);
     if (this._w === w && this._h === h && this._dpr === dpr && this._particles)
       return;
+    const rebuild = !this._particles || this._w !== w;
     this._w = w;
     this._h = h;
     this._dpr = dpr;
     c.width = Math.round(w * dpr);
     c.height = Math.round(h * dpr);
     this._ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    this._buildField();
+    if (rebuild) this._buildField();
   }
 
+  /* Built once per size, at full density. Adaptive quality draws a prefix of
+     it rather than rebuilding: a rebuild at a new count re-dealt every mote
+     to a new place, so each quality step was a visible jump in the field.
+     Ribbons are dealt by golden-ratio stride, not in blocks, so any prefix
+     carries every ribbon in its proper share. */
   _buildField() {
     const configured = Number(this._config?.particles) || 0;
     const auto = clamp(Math.round((this._w || 240) * 32), 9000, 20000);
     const base = configured > 0 ? clamp(configured, 0, 8000) : auto;
-    const count = Math.max(400, Math.round(base * (this._perf?.q ?? 1)));
+    const count = Math.max(400, base);
     const rand = seeded(0x5eed);
     const p = new Array(count);
-    let ri = 0;
-    let quota = Math.round(count * RIBBONS[0].share);
     for (let i = 0; i < count; i++) {
-      if (quota-- <= 0 && ri < RIBBONS.length - 1) {
-        ri++;
-        quota = Math.round(count * RIBBONS[ri].share);
-      }
+      const u = (i * 0.6180339887) % 1;
+      let ri = 0;
+      for (let acc = RIBBONS[0].share; ri < RIBBONS.length - 1 && u >= acc; )
+        acc += RIBBONS[++ri].share;
       // triangular distribution: dense along the ribbon, sparse spray outside
       const off = (rand() + rand() - 1) * (rand() < 0.04 ? 4 : 1);
       // triangular latitude: dense equatorial band, thinning wisps that
@@ -3007,7 +3021,18 @@ class HubbubbRingCard extends LitElement {
         };
         S.set(sess.id, g);
       }
-      g.weight = Math.max(0.8, Math.log10((sess.bytes || 0) + 1e4) - 3.2);
+      /* Context fill, when the listener reports it, sets both how far round
+         the ring a plate reaches and how thick it is - a session near its
+         limit is a fat band, a fresh one a sliver. Older listeners send only
+         transcript bytes: keep the old arc sizing and a full-height plate. */
+      const frac = sess.context_max
+        ? clamp(sess.context / sess.context_max, 0, 1)
+        : null;
+      g.weight = frac != null
+        ? 0.6 + frac * 3
+        : Math.max(0.8, Math.log10((sess.bytes || 0) + 1e4) - 3.2);
+      g.fracT = frac ?? 1;
+      if (g.frac === undefined) g.frac = 0;
       g.busy = !!sess.busy;
       g.done = !!sess.done;
       g.gone = false;
@@ -3015,6 +3040,7 @@ class HubbubbRingCard extends LitElement {
     for (const [id, g] of S) {
       if (!seen.has(id)) g.gone = true;
       g.size += ((g.gone ? 0 : g.weight) - g.size) * ease;
+      g.frac += ((g.gone ? 0 : g.fracT ?? 1) - g.frac) * ease;
       if (g.gone && g.size < 0.03) {
         S.delete(id);
         continue;
@@ -3092,7 +3118,12 @@ class HubbubbRingCard extends LitElement {
       const w = a1 - a0;
       if (w < 0.004) continue;
       ctx.fillStyle = `rgb(${Math.round(g.rgb[0])},${Math.round(g.rgb[1])},${Math.round(g.rgb[2])})`;
-      this._wash(ctx, cx, cy, rIn, rOut, a0, a1, (g.busy ? 0.22 : 0.1) + (g.done ? 0.07 : 0));
+      // the empty track to full height is the headroom left in that context
+      ctx.globalAlpha = 0.035;
+      seg(a0, a1, rIn, rOut);
+      ctx.fill();
+      const rTop = rIn + (rOut - rIn) * (0.18 + 0.82 * clamp(g.frac ?? 1, 0, 1));
+      this._wash(ctx, cx, cy, rIn, rTop, a0, a1, (g.busy ? 0.22 : 0.1) + (g.done ? 0.07 : 0));
       if (g.busy) {
         // a comet circulating through the plate: work you can see moving
         const len = Math.max(0.1, w * 0.35);
@@ -3103,7 +3134,7 @@ class HubbubbRingCard extends LitElement {
           const t0 = Math.max(a0, t1 - len / steps);
           if (t1 <= a0) break;
           ctx.globalAlpha = 0.3 * Math.pow(1 - k / steps, 1.6);
-          seg(t0, t1, rIn, rOut);
+          seg(t0, t1, rIn, rTop);
           ctx.fill();
         }
       }
@@ -3290,8 +3321,7 @@ class HubbubbRingCard extends LitElement {
     if (q === P.q) return;
     P.q = q;
     P.hold = 40;
-    this._particles = null; // rebuild the field at the new density
-    this._measure();
+    this._measure(); // only the backing store can change; the field stays
   }
 
   _stop() {
@@ -3883,8 +3913,22 @@ class HubbubbRingCard extends LitElement {
     const ct = this._churnT;
     const ptab = this._pulseTable(cur.speech);
     const ktab = this._peakTable(dt, cur, env);
+    /* Talking warps the whole shell, not just its skin: three broad lobes (2,
+       3 and 5 around) roll round the silhouette and swell with the voice, so
+       the bubble goes lumpy while he speaks and settles back to a circle when
+       he stops. The waves above are all fine ripples, which is why talking
+       used to read as the same ring, only busier. */
+    const lobeA = 0.003 + env * 0.065;
+    const lp = this._waveT;
 
     ctx.clearRect(0, 0, W, H);
+    const bs = this._bootScale(dt);
+    if (bs !== 1) {
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.scale(bs, bs);
+      ctx.translate(-cx, -cy);
+    }
 
     const t = this._t;
     const wt = this._waveT;
@@ -3909,8 +3953,20 @@ class HubbubbRingCard extends LitElement {
        collects every mote at that brightness and is filled once, so the
        whole field costs MOTE_ALPHAS fills instead of one per mote — cheaper
        than the fillRect-per-mote it replaces. */
-    const bins = this._bins || (this._bins = []);
-    for (let i = 0; i < MOTE_ALPHAS; i++) bins[i] = new Path2D();
+    /* Each mote's disc goes into preallocated arrays tagged with its alpha
+       bucket, and each bucket is then filled as one path. Building eight
+       fresh Path2D objects of ~12k arcs every frame made garbage at 60fps,
+       and the collector catching up was the ring freezing for a beat. */
+    const all = this._particles;
+    const nDraw = Math.min(all.length, Math.max(400, Math.round(all.length * (this._perf?.q ?? 1))));
+    if (!this._mx || this._mx.length < all.length) {
+      this._mx = new Float32Array(all.length);
+      this._my = new Float32Array(all.length);
+      this._mr = new Float32Array(all.length);
+      this._mb = new Uint8Array(all.length);
+    }
+    const MX = this._mx, MY = this._my, MR = this._mr, MB = this._mb;
+    let nm = 0;
     /* Quality compensation: a thinned field keeps its apparent mass by
        drawing fewer-but-heavier motes; halos (scaled drawImage, the most
        expensive blit) drop out entirely on struggling hardware. */
@@ -3923,7 +3979,8 @@ class HubbubbRingCard extends LitElement {
       clamp(half / 220, 0.75, 1.8) *
       (1 + (1 - q) * 0.35);
 
-    for (const p of this._particles) {
+    for (let pi = 0; pi < nDraw; pi++) {
+      const p = all[pi];
       const rb = RIBBONS[p.ri];
 
       // longitude: shell revolve + personal drift + curling two-octave wander
@@ -3990,6 +4047,11 @@ class HubbubbRingCard extends LitElement {
       if (abin < 0) abin += 1;
       const pkv = ktab[(abin * PEAK_BINS) | 0];
       rf += pkv * (0.35 + 0.65 * edgeLift);
+      rf +=
+        lobeA * (rb.rev < 0 ? 0.75 : 1) *
+        (0.5 * Math.sin(2 * sa + lp * 0.9) +
+          0.35 * Math.sin(3 * sa - lp * 1.3 + 1.7) +
+          0.2 * Math.sin(5 * sa + lp * 2.1 + 0.4));
 
       // life envelope: 0 at birth and death, 1 mid-life, drifting outward
       let u = (t + p.lt) % p.lf;
@@ -4059,14 +4121,23 @@ class HubbubbRingCard extends LitElement {
       // a disc covers ~78% of the square it replaces, so nudge the radius up
       // to keep the field's apparent mass
       const r2 = sz * 0.56;
-      const mx = cx + rx, my = cy + ry;
-      const path = bins[Math.min(MOTE_ALPHAS - 1, (ga * MOTE_ALPHAS) | 0)];
-      path.moveTo(mx + r2, my);
-      path.arc(mx, my, r2, 0, 6.283185);
+      MX[nm] = cx + rx;
+      MY[nm] = cy + ry;
+      MR[nm] = r2;
+      MB[nm++] = Math.min(MOTE_ALPHAS - 1, (ga * MOTE_ALPHAS) | 0);
     }
-    for (let i = 0; i < MOTE_ALPHAS; i++) {
-      ctx.globalAlpha = (i + 0.5) / MOTE_ALPHAS;
-      ctx.fill(bins[i]);
+    for (let b = 0; b < MOTE_ALPHAS; b++) {
+      ctx.beginPath();
+      let any = false;
+      for (let i = 0; i < nm; i++) {
+        if (MB[i] !== b) continue;
+        ctx.moveTo(MX[i] + MR[i], MY[i]);
+        ctx.arc(MX[i], MY[i], MR[i], 0, 6.283185);
+        any = true;
+      }
+      if (!any) continue;
+      ctx.globalAlpha = (b + 0.5) / MOTE_ALPHAS;
+      ctx.fill();
     }
     ctx.globalAlpha = 1;
 
@@ -4075,7 +4146,7 @@ class HubbubbRingCard extends LitElement {
     this._drawSegs(ctx, cx, cy, half, R, G, B);
 
     /* ---- geodesic core, rotated in 3D, clipped to a true circle ---- */
-    const SR = half * 0.38;
+    const SR = half * 0.38 * (1 + env * 0.05); // the core swells on the voice too
     const cosS = Math.cos(this._spin), sinS = Math.sin(this._spin);
     const cosT = Math.cos(0.35), sinT = Math.sin(0.35);
     const verts = SPHERE.verts;
@@ -4128,6 +4199,128 @@ class HubbubbRingCard extends LitElement {
     }
     ctx.globalAlpha = 1;
     ctx.restore();
+    if (bs !== 1) ctx.restore();
+  }
+
+  /* Start-up: the whole ring collapses to a point, flickers there, then
+     blooms back out past full size and settles - drawn as one transform
+     over everything, so every layer moves together. The SVG behind the
+     canvas runs the same curve in CSS (.ring.booting). */
+  _bootScale(dt) {
+    const b = this._boot;
+    if (!b) return 1;
+    const t = (b.t += dt);
+    if (t < 0.6) return 1 - 0.98 * (t / 0.6) ** 2;
+    if (t < 1.1) return 0.02 + 0.012 * Math.abs(Math.sin((t - 0.6) * 22));
+    if (t < 2.6) {
+      const u = (t - 1.1) / 1.5 - 1;
+      return 0.02 + 0.98 * (1 + 2.70158 * u * u * u + 1.70158 * u * u); // ease-out-back
+    }
+    this._boot = null;
+    return 1;
+  }
+
+  _intro() {
+    if (this._booting) return;
+    this._boot = { t: 0 };
+    this._booting = true;
+    clearTimeout(this._bootTimer);
+    this._bootTimer = setTimeout(() => (this._booting = false), 6500);
+    const name = this._name;
+    const message =
+      this._config.intro_message ||
+      `Allow me to introduce myself. I am ${name}, the virtual intelligence ` +
+        `that runs this house, here to help with whatever you need, at any ` +
+        `hour of the day. Your preferences are loaded. All systems are online.`;
+    // spoken after the collapse, so the voice arrives with the bloom
+    setTimeout(() => {
+      Promise.resolve(
+        this._hass?.callService("assist_satellite", "announce", {
+          entity_id: this._config.entity,
+          message,
+          preannounce: false,
+        })
+      ).catch(() => this._toast(`${name} could not speak the introduction.`));
+    }, 900);
+  }
+
+  async _openSheet(kind) {
+    this._sheet = { kind, items: null, q: "" };
+    try {
+      const res = await this._hass.callWS({
+        type: "call_service",
+        domain: "hubbubb_home",
+        service: kind === "memories" ? "memory_list" : "skills",
+        service_data: {},
+        return_response: true,
+      });
+      if (this._sheet?.kind !== kind) return;
+      this._sheet = { ...this._sheet, items: res?.response?.[kind] || [] };
+    } catch (e) {
+      if (this._sheet?.kind === kind)
+        this._sheet = { ...this._sheet, items: [], err: this._errText(e) };
+    }
+  }
+
+  _renderSheet() {
+    const sh = this._sheet;
+    const q = sh.q.trim().toLowerCase();
+    const pretty = (n) => n.replace(/_/g, " ").replace(/^\w/, (c) => c.toUpperCase());
+    const items = (sh.items || []).filter(
+      (it) => !q || `${it.text || ""} ${it.name || ""} ${it.description || ""}`.toLowerCase().includes(q)
+    );
+    return html`<div class="sheet" @click=${(e) => e.target === e.currentTarget && (this._sheet = null)}>
+      <div class="sheet-box">
+        <div class="sheet-head">
+          <span>${sh.kind === "memories" ? "Memories" : `What ${this._name} can do`}</span>
+          <button class="sheet-x" title="Close" @click=${() => (this._sheet = null)}>×</button>
+        </div>
+        <input
+          type="search"
+          placeholder="Filter"
+          .value=${sh.q}
+          @input=${(e) => (this._sheet = { ...this._sheet, q: e.target.value })}
+        />
+        <div class="sheet-list">
+          ${sh.items == null
+            ? html`<div class="dim pad">Loading…</div>`
+            : sh.err
+            ? html`<div class="perr">${sh.err}</div>`
+            : !items.length
+            ? html`<div class="dim pad">Nothing here.</div>`
+            : items.map((it) =>
+                sh.kind === "memories"
+                  ? html`<div class="sheet-row">${it.text}${it.person ? html`<em>${it.person}</em>` : nothing}</div>`
+                  : html`<div class="sheet-row"><b>${pretty(it.name)}</b>${it.description.split(". ")[0].replace(/\.?$/, ".")}</div>`
+              )}
+        </div>
+        ${sh.kind === "skills"
+          ? html`<div class="dim pad small">Plus everything Home Assistant exposes to ${this._name}: lights, media, climate, scenes and scripts.</div>`
+          : nothing}
+      </div>
+    </div>`;
+  }
+
+  _renderDock(build) {
+    if (build || this._config.dock === false || this._config.build_page) return nothing;
+    const ico = (d) => html`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">${d}</svg>`;
+    return html`<nav class="dock">
+      <button title="Calendar" @click=${() => this._navigate(this._config.calendar_path)}>
+        ${ico(svg`<rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/><path d="M7.5 13h2M11 13h2M14.5 13h2M7.5 16.5h2M11 16.5h2"/>`)}
+      </button>
+      <button title="Memories" @click=${() => this._openSheet("memories")}>
+        ${ico(svg`<path d="M9 4.5a3 3 0 0 0-3 3 3 3 0 0 0-2 5 3 3 0 0 0 2 4.5 3 3 0 0 0 6 .5V6.5a2.5 2.5 0 0 0-3-2z"/><path d="M15 4.5a3 3 0 0 1 3 3 3 3 0 0 1 2 5 3 3 0 0 1-2 4.5 3 3 0 0 1-6 .5"/><path d="M12 9h-1.5M12 13H9.5M12 9h1.5M12 13h2.5"/>`)}
+      </button>
+      <button class="power ${this._booting ? "on" : ""}" title="Start-up and introduction" @click=${this._intro}>
+        ${ico(svg`<path d="M12 3.5v7"/><path d="M7.2 6.6a7 7 0 1 0 9.6 0"/>`)}
+      </button>
+      <button title="Skills" @click=${() => this._openSheet("skills")}>
+        ${ico(svg`<path d="M13 2.5 5 13.5h6l-1 8 8-11h-6z"/>`)}
+      </button>
+      <button title="Build mode" data-ai="toggle-build-mode" @click=${() => this._setBuild(true)}>
+        ${ico(svg`<path d="M12 2.6c-4 0-7 2.5-7 6.5v4.3c0 2.1.8 4 2.2 5.4L9.6 21h4.8l2.4-2.2c1.4-1.4 2.2-3.3 2.2-5.4V9.1c0-4-3-6.5-7-6.5z"/><path d="M7.3 11.1l3.4 1M16.7 11.1l-3.4 1"/><path d="M12 2.8v4.4M9.8 17.2h4.4M7.4 14.2l2.3 1.6M16.6 14.2l-2.3 1.6"/>`)}
+      </button>
+    </nav>`;
   }
 
   /* ------------------------------- view ------------------------------- */
@@ -4523,14 +4716,16 @@ class HubbubbRingCard extends LitElement {
           class="wrap state-${state} ${build && !this._config.build_dashboard ? "build" : ""} ${this._config.build_page ? "page" : ""} ${build && this._config.panel_fullscreen && !this._config.build_dashboard ? "over" : ""}"
           style=${this._cardVars(color)}
         >
-          <button
+          ${this._config.dock === false || build || this._config.build_page
+            ? html`<button
             class="mode ${build ? "on" : ""}"
             data-ai="toggle-build-mode"
             title="Build mode"
             @click=${() => this._setBuild(!build)}
           >
             <svg viewBox="0 0 24 24"><path d="M12 2l8.66 5v10L12 22l-8.66-5V7L12 2z" fill="none" stroke="currentColor" stroke-width="1.5"/><path d="M8.5 12h7M12 8.5v7" stroke="currentColor" stroke-width="1.5"/></svg>
-          </button>
+          </button>`
+            : nothing}
           ${announce === null
             ? nothing
             : html`<button
@@ -4581,8 +4776,11 @@ class HubbubbRingCard extends LitElement {
                 ${this._view ? html`<div class="viewer">${this._renderViewer()}</div>` : nothing}
               </div>`
             : nothing}
-          <div class="ring ${this._config.animation === "jarvis-v1" ? "" : "bubbles"}" data-ai="activate-assistant" @click=${this._ringTap}>
+          <div class="ring ${this._config.animation === "jarvis-v1" ? "" : "bubbles"} ${this._booting ? "booting" : ""}" data-ai="activate-assistant" @click=${this._ringTap}>
             <canvas></canvas>
+            ${this._booting
+              ? html`<div class="wordmark" aria-hidden="true">${this._name.toUpperCase()}<small>All systems online</small></div>`
+              : nothing}
             <svg viewBox="0 0 200 200" aria-hidden="true">
               <defs>
                 <radialGradient id="jrCore">
@@ -4626,6 +4824,8 @@ class HubbubbRingCard extends LitElement {
               </g>
             </svg>
           </div>
+          ${this._renderDock(build)}
+          ${this._sheet ? this._renderSheet() : nothing}
         </div>
       </ha-card>
     `;
@@ -4705,6 +4905,196 @@ class HubbubbRingCard extends LitElement {
     }
     .ring:active {
       filter: brightness(1.25);
+    }
+
+    /* ---------------- start-up ---------------- */
+    /* Same curve as _bootScale, so the SVG honeycomb and rims fold into the
+       point and bloom back out with the canvas. */
+    .ring.booting svg {
+      animation: jrBoot 2.6s linear both;
+      transform-origin: 50% 50%;
+    }
+    @keyframes jrBoot {
+      0% { transform: scale(1); }
+      23% { transform: scale(0.02); opacity: 0.4; }
+      42% { transform: scale(0.03); opacity: 1; }
+      78% { transform: scale(1.08); }
+      100% { transform: scale(1); }
+    }
+    .ring.booting canvas {
+      animation: jrFlash 2.6s ease-out both;
+    }
+    @keyframes jrFlash {
+      0%, 40% { filter: none; }
+      55% { filter: brightness(2.2); }
+      100% { filter: none; }
+    }
+    .wordmark {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      pointer-events: none;
+      color: var(--jr-color);
+      font: italic 800 calc(var(--jr-size, 240px) * 0.12) / 1 "Eurostile", "Orbitron", "Arial Black", system-ui, sans-serif;
+      letter-spacing: 0.06em;
+      text-shadow: 0 0 12px var(--jr-color), 0 0 2px #fff;
+      animation: jrWord 6.5s linear both;
+    }
+    /* pushed clear of the globe, onto the dim plate band, to stay legible */
+    .wordmark small {
+      position: absolute;
+      top: 73%;
+      font: 600 calc(var(--jr-size, 240px) * 0.03) / 1 system-ui, sans-serif;
+      letter-spacing: 0.3em;
+      text-transform: uppercase;
+      text-shadow: 0 0 6px var(--jr-color);
+      opacity: 0;
+      animation: jrFade 6.5s linear both;
+    }
+    /* letters sweep in left to right on the bloom, hold, then dissolve */
+    @keyframes jrWord {
+      0%, 22% { clip-path: inset(0 100% 0 0); opacity: 1; }
+      40% { clip-path: inset(0 0 0 0); opacity: 1; }
+      84% { clip-path: inset(0 0 0 0); opacity: 1; filter: blur(0); }
+      100% { clip-path: inset(0 0 0 0); opacity: 0; filter: blur(4px); }
+    }
+    @keyframes jrFade {
+      0%, 48% { opacity: 0; }
+      56%, 84% { opacity: 0.85; }
+      100% { opacity: 0; }
+    }
+
+    /* ---------------- dock ---------------- */
+    .dock {
+      position: relative;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: clamp(10px, 4vw, 28px);
+      width: 100%;
+      padding: 10px 0 12px;
+      line-height: 0;
+    }
+    /* the thin rail the buttons sit on */
+    .dock::before {
+      content: "";
+      position: absolute;
+      left: 8%;
+      right: 8%;
+      top: 50%;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--jr-color), transparent);
+      opacity: 0.25;
+    }
+    .dock button {
+      position: relative;
+      width: 42px;
+      height: 42px;
+      padding: 9px;
+      border-radius: 50%;
+      border: 1px solid var(--jr-color);
+      background: rgba(3, 7, 9, 0.85);
+      color: var(--jr-color);
+      opacity: 0.6;
+      cursor: pointer;
+      transition: opacity 0.2s, box-shadow 0.2s, transform 0.12s;
+      -webkit-tap-highlight-color: transparent;
+    }
+    .dock button:hover,
+    .dock button.on {
+      opacity: 1;
+      box-shadow: 0 0 10px var(--jr-color);
+    }
+    .dock button:active {
+      transform: scale(0.94);
+    }
+    .dock button.power {
+      width: 54px;
+      height: 54px;
+      padding: 12px;
+    }
+    .dock svg {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    /* ---------------- memories / skills sheet ---------------- */
+    .sheet {
+      position: absolute;
+      inset: 0;
+      z-index: 5;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0, 0, 0, 0.55);
+      line-height: 1.4;
+    }
+    .sheet-box {
+      display: flex;
+      flex-direction: column;
+      width: min(440px, calc(100% - 32px));
+      max-height: calc(100% - 32px);
+      background: #061014;
+      border: 1px solid var(--jr-color);
+      border-radius: 12px;
+      box-shadow: 0 0 24px rgba(0, 0, 0, 0.6);
+      color: #d6eef2;
+      overflow: hidden;
+    }
+    .sheet-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 14px 6px;
+      font-weight: 600;
+      letter-spacing: 0.04em;
+      color: var(--jr-color);
+    }
+    .sheet-x {
+      background: none;
+      border: none;
+      color: inherit;
+      font-size: 22px;
+      line-height: 1;
+      cursor: pointer;
+      padding: 4px 6px;
+    }
+    .sheet input {
+      margin: 4px 14px 8px;
+      padding: 7px 10px;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 255, 255, 0.15);
+      background: rgba(255, 255, 255, 0.05);
+      color: inherit;
+      font: inherit;
+    }
+    .sheet-list {
+      overflow-y: auto;
+      padding: 0 14px 10px;
+      font-size: 14px;
+    }
+    .sheet-row {
+      padding: 8px 0;
+      border-top: 1px solid rgba(255, 255, 255, 0.07);
+    }
+    .sheet-row b {
+      display: block;
+      color: var(--jr-color);
+      font-weight: 600;
+    }
+    .sheet-row em {
+      margin-left: 8px;
+      font-size: 11px;
+      font-style: normal;
+      opacity: 0.6;
+    }
+    .sheet .small {
+      font-size: 12px;
+      padding: 8px 14px 12px;
     }
 
     /* ---------------- build mode ---------------- */

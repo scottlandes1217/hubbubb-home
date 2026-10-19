@@ -558,6 +558,8 @@ SERVICE_SCHEMAS: dict[str, vol.Schema] = {
     ),
     "recipe_delete": vol.Schema({vol.Required("id"): vol.Coerce(int)}),
     "recipe_list": vol.Schema({}),
+    "memory_list": vol.Schema({}),
+    "skills": vol.Schema({}),
     "recipe_find": vol.Schema(
         {
             vol.Required("query"): str,
@@ -629,6 +631,38 @@ def _async_register_services(hass: HomeAssistant, runtime: Runtime) -> None:
 
     async def recipe_list(call: ServiceCall) -> ServiceResponse:
         return {"recipes": await runtime.recipes.async_all()}
+
+    async def memory_list(call: ServiceCall) -> ServiceResponse:
+        """Household facts plus the caller's own, for the ring's Memories sheet.
+
+        Person-scoped memories are the guest gate's whole point, so another
+        person's never reach a screen just because it is logged in.
+        """
+        user = (
+            await hass.auth.async_get_user(call.context.user_id)
+            if call.context.user_id
+            else None
+        )
+        # speakers are enrolled by first name; HA users carry the full one
+        full = (user.name or "").strip().lower() if user else ""
+        me = {full, full.split()[0]} if full else set()
+        return {
+            "memories": [
+                {"text": text, "person": person}
+                for text, person in await runtime.memory.async_all()
+                if not person or person.strip().lower() in me
+            ]
+        }
+
+    async def skills(call: ServiceCall) -> ServiceResponse:
+        from .llm_api import agent_tools
+
+        return {
+            "skills": [
+                {"name": t.name, "description": t.description or ""}
+                for t in agent_tools(runtime)
+            ]
+        }
 
     async def recipe_find(call: ServiceCall) -> ServiceResponse:
         hits = await runtime.recipes.async_search(call.data["query"], call.data["limit"])
@@ -732,6 +766,8 @@ def _async_register_services(hass: HomeAssistant, runtime: Runtime) -> None:
         "recipe_delete": recipe_delete,
         "recipe_list": recipe_list,
         "recipe_find": recipe_find,
+        "memory_list": memory_list,
+        "skills": skills,
         "timer_start": timer_start,
         "timer_cancel": timer_cancel,
         "timer_add": timer_add,

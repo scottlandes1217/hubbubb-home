@@ -42,6 +42,8 @@ recipe_delete:
       required: true
       selector: { number: { min: 1, mode: box } }
 recipe_list: {}
+memory_list: {}
+skills: {}
 recipe_find:
   fields:
     query:
