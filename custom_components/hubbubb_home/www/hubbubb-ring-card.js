@@ -480,7 +480,6 @@ var wi=Object.defineProperty,xi=Object.defineProperties;var yi=Object.getOwnProp
       <div class="phead">
         <button class="hbtn back" data-ai="toggle-build-mode" title="Back" @click=${()=>this._setBuild(!1)}>‹</button>
         <span class="ptitle">${this._name} Agents</span>
-        <button class="hbtn" data-ai="view-mac-screen" title="See the Mac's screen" @click=${()=>this._openScreen()}>Screen</button>
         <button
           class="hbtn"
           data-ai="create-session"
@@ -550,6 +549,7 @@ var wi=Object.defineProperty,xi=Object.defineProperties;var yi=Object.getOwnProp
           ${t!=null&&t.busy?m`<span class="livedot"></span> working ${this._fmtElapsed(t.elapsed)}`:k}
           <span class="caret">${this._details?"\u25B4":"\u25BE"}</span>
         </button>
+        <button class="hbtn" data-ai="view-mac-screen" title="See the Mac's screen" @click=${()=>this._openScreen()}>Screen</button>
         <button
           class="hbtn danger ${this._confirmKill===this._sel?"armed":""}"
           data-ai="end-session"

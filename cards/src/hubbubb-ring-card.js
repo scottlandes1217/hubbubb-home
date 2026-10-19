@@ -5493,7 +5493,6 @@ class HubbubbRingCard extends LitElement {
       <div class="phead">
         <button class="hbtn back" data-ai="toggle-build-mode" title="Back" @click=${() => this._setBuild(false)}>‹</button>
         <span class="ptitle">${this._name} Agents</span>
-        <button class="hbtn" data-ai="view-mac-screen" title="See the Mac's screen" @click=${() => this._openScreen()}>Screen</button>
         <button
           class="hbtn"
           data-ai="create-session"
@@ -5619,6 +5618,7 @@ class HubbubbRingCard extends LitElement {
             : nothing}
           <span class="caret">${this._details ? "▴" : "▾"}</span>
         </button>
+        <button class="hbtn" data-ai="view-mac-screen" title="See the Mac's screen" @click=${() => this._openScreen()}>Screen</button>
         <button
           class="hbtn danger ${this._confirmKill === this._sel ? "armed" : ""}"
           data-ai="end-session"
