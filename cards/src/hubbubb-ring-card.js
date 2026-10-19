@@ -18,6 +18,7 @@ console.info(`hubbubb-ring-card ${BUILD}`);
 // live DOM value instead of the last rendered one.
 import { live } from "lit/directives/live.js";
 import { downsampler, rmsEnvelope } from "./envelope.js";
+import "./hubbubb-calendar.js";
 import { promptKey, splitPaths } from "./paths.js";
 import {
   clearCore,
@@ -91,7 +92,6 @@ const DEFAULTS = {
   /* The bar under the ring: calendar, memories, the start-up intro, skills
      and build mode. `intro_message` empty = the built-in introduction. */
   dock: true,
-  calendar_path: "/calendar",
   review_path: "/jarvis-review", // fallback when the review card is missing
   review_entity: "sensor.jarvis_review", // the Review button's pop-up
   intro_message: "",
@@ -5157,11 +5157,13 @@ class HubbubbRingCard extends LitElement {
     return html`<div class="sheet ${sh.kind}" @click=${(e) => e.target === e.currentTarget && (this._sheet = null)}>
       <div class="sheet-box">
         <div class="sheet-head">
-          <span>${sh.kind === "memories" ? "Memories" : sh.kind === "todos" ? "To-do lists" : sh.kind === "review" ? "Nightly review" : `What ${this._name} can do`}</span>
+          <span>${sh.kind === "memories" ? "Memories" : sh.kind === "todos" ? "To-do lists" : sh.kind === "calendar" ? "Calendar" : sh.kind === "review" ? "Nightly review" : `What ${this._name} can do`}</span>
           <button class="sheet-x" title="Close" @click=${() => (this._sheet = null)}>×</button>
         </div>
         ${sh.kind === "review"
           ? html`<div class="sheet-list review-host">${this._reviewBox}</div>`
+          : sh.kind === "calendar"
+          ? html`<hubbubb-calendar .hass=${this._hass}></hubbubb-calendar>`
           : sh.kind === "todos"
           ? html`<div class="sheet-list">${this._renderTodos()}</div>`
           : html`        <input
@@ -5287,6 +5289,11 @@ class HubbubbRingCard extends LitElement {
   /* The review in a pop-up over the ring - the same card the Jarvis Review
      page shows, so closing it lands back on the animation. Navigates to
      that page instead if the review card is not loaded. */
+  /* Every calendar.* entity over the ring, full screen like the review. */
+  _openCalendar() {
+    this._sheet = { kind: "calendar", items: [], q: "" };
+  }
+
   _openReview() {
     if (!customElements.get("hubbubb-review-card")) return this._navigate(this._config.review_path);
     if (!this._reviewEl) {
@@ -5354,7 +5361,7 @@ class HubbubbRingCard extends LitElement {
     const pend = (i) => (this._landed && !this._landed.has(i) ? "pending" : "");
     const open = this._todos?.reduce((n, l) => n + (l.items?.length || 0), 0) || 0;
     return html`<nav class="dock">
-      <button class=${pend(0)} title="Calendar" @click=${() => this._navigate(this._config.calendar_path)}>
+      <button class=${pend(0)} title="Calendar" @click=${() => this._openCalendar()}>
         ${ico(svg`<rect x="3.5" y="5" width="17" height="15" rx="2"/><path d="M3.5 9.5h17M8 3v4M16 3v4"/><path d="M7.5 13h2M11 13h2M14.5 13h2M7.5 16.5h2M11 16.5h2"/>`)}
         <span>Calendar</span>
       </button>
@@ -6308,7 +6315,8 @@ class HubbubbRingCard extends LitElement {
       line-height: 1.4;
     }
     /* the review is long: a full-screen pop-up, closed back to the ring */
-    .sheet.review {
+    .sheet.review,
+    .sheet.calendar {
       position: fixed;
       z-index: 9;
       /* below the phone's status bar and notch and HA's own header, so the
@@ -6317,10 +6325,18 @@ class HubbubbRingCard extends LitElement {
       box-sizing: border-box;
       background: rgba(0, 0, 0, 0.72);
     }
-    .sheet.review .sheet-box {
+    .sheet.review .sheet-box,
+    .sheet.calendar .sheet-box {
       width: min(920px, 100%);
       height: 100%;
       max-height: none;
+    }
+    .sheet.calendar .sheet-box {
+      width: min(1200px, 100%);
+    }
+    hubbubb-calendar {
+      flex: 1;
+      min-height: 0;
     }
     .review-host {
       flex: 1;
