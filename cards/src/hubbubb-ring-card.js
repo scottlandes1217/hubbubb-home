@@ -29,7 +29,7 @@ import {
   widestGap,
 } from "./pack.js";
 
-const CARD_VERSION = "4.15.0";
+const CARD_VERSION = "4.16.0";
 
 const SATELLITE_DOMAIN = "assist_satellite";
 
@@ -99,6 +99,7 @@ const DEFAULTS = {
      Home Assistant has. */
   todos: true,
   todo_entities: [],
+  todo_exclude: [], // lists to leave out when showing all of them
   /* Gates the "agent finished" announcement on the puck, and with it the
      media pause/mute the announcement sets off. Left empty because the id
      carries whatever you named the assistant - getStubConfig finds it, and
@@ -5193,7 +5194,32 @@ class HubbubbRingCard extends LitElement {
   _todoIds(hass) {
     const want = this._config.todo_entities;
     if (Array.isArray(want) && want.length) return want;
-    return Object.keys(hass?.states || {}).filter((id) => id.startsWith("todo.")).sort();
+    const skip = new Set(this._config.todo_exclude || []);
+    return Object.keys(hass?.states || {})
+      .filter((id) => id.startsWith("todo.") && !skip.has(id))
+      .sort();
+  }
+
+  /* A new list is a Local To-do entry: the same config flow as Settings ->
+     Add integration -> Local To-do, which asks only for the name. The new
+     todo.* entity changes the lists' signature, so it appears on its own. */
+  async _todoCreate(e) {
+    e.preventDefault();
+    const input = e.target.querySelector("input");
+    const name = input.value.trim();
+    if (!name) return;
+    input.disabled = true;
+    try {
+      const flow = await this._hass.callApi("POST", "config/config_entries/flow", { handler: "local_todo" });
+      const res = await this._hass.callApi("POST", `config/config_entries/flow/${flow.flow_id}`, { todo_list_name: name });
+      if (res?.type !== "create_entry") throw new Error(res?.reason || res?.errors?.base || "not created");
+      input.value = "";
+      this._toast(`${name} list created.`);
+    } catch (err) {
+      this._toast(`Couldn't create ${name}: ${this._errText(err)}`);
+    } finally {
+      input.disabled = false;
+    }
   }
 
   /* A list's state is its open-item count, so a change there is the cue to
@@ -5284,7 +5310,15 @@ class HubbubbRingCard extends LitElement {
 
   _renderTodos() {
     if (!this._todos) return html`<div class="dim pad">Loading…</div>`;
-    if (!this._todos.length) return html`<div class="dim pad">No to-do lists in Home Assistant.</div>`;
+    const create = html`<form class="tadd tnew" @submit=${(e) => this._todoCreate(e)}>
+      <input type="text" placeholder="New list…" enterkeyhint="done" />
+      <button type="submit" title="Create list">+</button>
+    </form>`;
+    if (!this._todos.length) return html`<div class="dim pad">No to-do lists yet.</div>${create}`;
+    return html`${this._renderTodoLists()}${create}`;
+  }
+
+  _renderTodoLists() {
     return html`<section class="todos">
       ${this._todos.map(
         (l) => html`<div class="todo">
@@ -6228,6 +6262,11 @@ class HubbubbRingCard extends LitElement {
       display: flex;
       gap: 6px;
       margin-top: 8px;
+    }
+    .tnew {
+      width: min(100% - 24px, 520px);
+      margin: 4px auto 14px;
+      box-sizing: border-box;
     }
     .tadd input {
       flex: 1;
@@ -7899,6 +7938,7 @@ const EDITOR_SCHEMA = [
   { name: "honeycomb", selector: { boolean: {} } },
   { name: "todos", selector: { boolean: {} } },
   { name: "todo_entities", selector: { entity: { domain: "todo", multiple: true } } },
+  { name: "todo_exclude", selector: { entity: { domain: "todo", multiple: true } } },
   { name: "tap_message", selector: { text: {} } },
   {
     /* The integration owns switches; a hand-rolled setup may well use
@@ -8004,6 +8044,7 @@ const EDITOR_LABELS = {
   honeycomb: "Honeycomb background",
   todos: "To-do button in the dock",
   todo_entities: "Which to-do lists (empty = all)",
+  todo_exclude: "Lists to leave out",
   follow_media_player: "Animate while the device is playing audio",
   audio_offset: "Audio sync offset (seconds)",
   media_player: "Speaker entity (blank = same device)",
