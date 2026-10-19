@@ -214,3 +214,38 @@ console.log('two-shell spacing and session context display ok');
   } finally {globalThis.setTimeout=realSet;globalThis.clearTimeout=realClear;}
 }
 console.log('rim-only speech deformation and entrance lifecycle ok');
+
+{
+  const c=make();
+  const run=c._introRun={};
+  c._boot={t:12,waitForPreferences:true};
+  c._booting=true;
+  for(let i=0;i<1200;i++) c._im3Boot(1/60);
+  assert.ok(c._boot.t<12.2,'even a 20-second speech delay cannot finish preferences before narration');
+  assert.notEqual(c._im3Boot(0).phase,'import');
+  assert.equal(c._beginIntroPreferences({}),false,'stale playback cannot release current hold');
+  c._trackSpeech=()=>{};c._releaseSpeech=()=>{};
+  const el={play:async()=>{}};
+  const playback=c._playHere(el,'blob:test',run,()=>c._beginIntroPreferences(run));
+  assert.equal(c._boot.waitForPreferences,true,'play request alone does not release the animation');
+  el.onplaying();
+  assert.equal(c._boot.t,12.2);
+  assert.equal(c._im3Boot(0).phase,'import');
+  assert.equal(c._im3Boot(0).u,0,'spoken cue starts at zero progress');
+  c._im3Boot(.5);
+  assert.equal(c._beginIntroPreferences(run),false,'repeat playback events cannot restart the import');
+  el.onended();await playback;
+  c._stopIntroVisuals();
+  assert.equal(el.onplaying,null,'playback cue is cleaned up');
+}
+{
+  const c=make(),run=c._introRun={};
+  c._boot={t:12.199,waitForPreferences:true};
+  c._introPreferenceCue=()=>c._beginIntroPreferences(run);
+  c._audioSync({state:'idle'});
+  assert.equal(c._boot.waitForPreferences,true);
+  c._audioSync({state:'playing',attributes:{}});
+  assert.equal(c._boot.waitForPreferences,false,'satellite playback releases the same cue');
+  c._stopIntroVisuals();
+}
+console.log('preferences wait for actual local or satellite playback');

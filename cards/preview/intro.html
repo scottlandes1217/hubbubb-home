@@ -4,7 +4,7 @@
 <style>
 body{margin:0;background:#030b0d;color:#b8dbd9;font:15px system-ui}main{max-width:900px;margin:24px auto;padding:16px}nav{display:flex;gap:12px;margin:18px 0}button{padding:12px;background:#12363a;color:#b8dbd9;border:1px solid #36777a;border-radius:8px}#status{font-variant-numeric:tabular-nums;color:#79aca6}jarvis-intro-preview{border:1px solid #143c38;border-radius:12px;background:radial-gradient(ellipse at 50% 40%,#083d37,#020a0c 65%)}
 </style>
-<main><p>Jarvis · rim motion & button entrances</p><nav><button id="boot">Replay full entrance</button><button id="speech">Play speech</button><button id="idle">Idle</button></nav><div id="stage"></div><p id="status"></p><audio id="audio"></audio></main>
+<main><p>Jarvis · armor assembly & button entrances</p><nav><button id="boot">Replay full entrance</button><button id="speech">Play speech</button><button id="idle">Idle</button><button id="armor">Replay armor</button><button id="assembled">Inspect armor at 100%</button></nav><div id="stage"></div><p id="status"></p><audio id="audio"></audio></main>
 <script type="module">
 import '../../custom_components/hubbubb_home/www/hubbubb-ring-card.js';
 import {render} from '../../node_modules/lit-html/lit-html.js';
@@ -26,16 +26,19 @@ document.querySelector('#stage').append(c);
 c._ctx=root.querySelector('canvas').getContext('2d');c._ctx.scale(2,2);c._w=c._h=400;c._buildSheetField();
 const audio=document.querySelector('audio');
 window.jarvisPreview={cards:[c],audio};
+let frozenArmor=false;
 let last=performance.now();
 function frame(now){const dt=Math.min(.05,(now-last)/1000);last=now;c._t+=dt;c._spin+=dt*.1;c._speechTick(dt);
- c._ctx.clearRect(0,0,400,400);c._drawIm3(dt,c._ctx,200,200,200,{speech:audio.paused?0:1,bright:1.7},c._speech.env,95,232,220);
+ c._ctx.clearRect(0,0,400,400);c._drawIm3(frozenArmor?0:dt,c._ctx,200,200,200,{speech:audio.paused?0:1,bright:1.7},c._speech.env,95,232,220);
  render(c._renderDock(false),root.querySelector('#dock'),{host:c});
  document.querySelector('#status').textContent=`Intro ${(c._boot?.t||0).toFixed(2)} s · landed ${c._landed?.size??5}/5 · overlays ${c._introOverlays?.size||0} · ${c._membrane?'3D':'Canvas'}`;
  requestAnimationFrame(frame);
 }
 requestAnimationFrame(frame);
-document.querySelector('#boot').onclick=()=>c._startIntroVisuals();
+document.querySelector('#boot').onclick=()=>{frozenArmor=false;c._startIntroVisuals();};
+document.querySelector('#armor').onclick=()=>{c._stopIntroVisuals();frozenArmor=false;c._boot={t:19.2};};
+document.querySelector('#assembled').onclick=()=>{c._stopIntroVisuals();frozenArmor=true;c._boot={t:21.5};};
 document.querySelector('#speech').onclick=async()=>{audio.src='./speech.mp3';c._trackSpeech(audio,audio.src);audio.onended=()=>c._releaseSpeech(audio);await audio.play();};
-document.querySelector('#idle').onclick=()=>{audio.pause();c._releaseSpeech(audio);c._stopIntroVisuals();};
+document.querySelector('#idle').onclick=()=>{frozenArmor=false;audio.pause();c._releaseSpeech(audio);c._stopIntroVisuals();};
 window.addEventListener('error',e=>document.querySelector('#status').textContent=e.message);
 </script></html>

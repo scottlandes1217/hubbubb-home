@@ -1,4 +1,5 @@
 import { LitElement, css, html, nothing, svg } from "lit";
+import { drawArmorSequence, prepareArmor, HELMET_OUTLINE, HELMET_PLATES, HELMET_EYES } from "./im3-armor.js";
 import { keyed } from "lit/directives/keyed.js";
 
 /* The integration serves this file from a path carrying its version, so the
@@ -334,7 +335,7 @@ const IM3_LINES = [
   [2.6, "I am {name}, a virtual artificial intelligence,"],
   [5.3, "and I'm here to assist you with a variety of tasks as best I can,"],
   [9.3, "24 hours a day, 7 days a week."],
-  [12.2, "Importing all preferences from home interface."],
+  [12.2, "Importing home preferences."],
   [16.0, "Systems are now fully operational."],
   // once the ring is back from the power-up
   [22.0, "Let me know how I can assist."],
@@ -2927,6 +2928,7 @@ class HubbubbRingCard extends LitElement {
       this._remotePlaying = false;
       return;
     }
+    if (!this._remotePlaying) this._introPreferenceCue?.();
     this._remotePlaying = true;
     const a = st.attributes || {};
     const raw = String(a.media_content_id || "");
@@ -4696,7 +4698,9 @@ class HubbubbRingCard extends LitElement {
     const b = this._boot;
     const T = IM3_BOOT;
     if (!b) return { ring: 1, scale: 1, burst: 0, globe: 1, phase: null };
-    const t = (b.t += dt);
+    // Hold just before the import until its spoken cue is actually audible.
+    b.t = b.waitForPreferences ? Math.min(b.t + dt, T.imp - .001) : b.t + dt;
+    const t = b.t;
     const ease = (x) => 1 - (1 - x) ** 3;
     const arrive = (t0) => {
       const u = clamp((t - t0) / 0.28, 0, 1);
@@ -4754,7 +4758,7 @@ class HubbubbRingCard extends LitElement {
     } else if (boot.phase === "reactorOut") {
       // the reactor lets go as the ring arrives
       ctx.globalAlpha = 1 - (boot.t - T.back) / 0.35;
-      this._drawReactor(ctx, cx, cy, half, 1, col, hi);
+      this._drawReactor(ctx, cx, cy, half, 1, col, hi, (boot.t - T.back) / .35);
     } else if (boot.phase === "word") {
       this._drawWordmark(ctx, cx, cy, half, boot.t - T.word, R, G, B);
     } else if (boot.phase === "clock") {
@@ -4845,13 +4849,15 @@ class HubbubbRingCard extends LitElement {
     ctx.globalAlpha = 1;
   }
 
-  /* The suit's chest piece, without the suit: a segmented ring that lights
-     round as the power climbs, a bright core, and the readout under it. */
-  _drawReactor(ctx, cx, cy, half, u, col, hi) {
+  /* Reference armor frames carry the matching power meter in the same image. */
+  _drawReactor(ctx, cx, cy, half, u, col, hi, outro = null) {
+    if (drawArmorSequence(ctx, cx, cy, half, outro ?? u, outro !== null)) return;
     const pct = Math.min(1, u / 0.88);
-    const lit = 1 - (1 - pct) ** 2;
-    const rr = half * 0.2;
+    const lit = pct;
     const base = ctx.globalAlpha;
+    // Lightweight reactor fallback if the reference atlas cannot decode.
+    ctx.save();
+    const rr = half * .2;
     const N = 40;
     ctx.lineWidth = Math.max(2, half * 0.05);
     for (let i = 0; i < N; i++) {
@@ -4887,9 +4893,10 @@ class HubbubbRingCard extends LitElement {
     }
     ctx.closePath();
     ctx.stroke();
+    ctx.restore();
     // POWER LEVEL ....... 42.3%
     const bw = half * 1.25, bh = half * 0.13;
-    const bx = cx - bw / 2, by = cy + half * 0.5;
+    const bx = cx - bw / 2, by = cy + half * 0.79;
     ctx.globalAlpha = base;
     ctx.strokeStyle = col(0.55);
     ctx.lineWidth = 1;
@@ -5001,6 +5008,7 @@ class HubbubbRingCard extends LitElement {
   }
 
   _stopIntroVisuals() {
+    this._introPreferenceCue = null;
     this._introRun = null;
     clearTimeout(this._bootTimer);
     for (const timer of this._introIconTimers || []) clearTimeout(timer);
@@ -5022,6 +5030,7 @@ class HubbubbRingCard extends LitElement {
     const run = this._introRun = {};
     const im3 = this._config.animation === "jarvis-im3";
     if (im3) {
+      prepareArmor();
       this._landed = new Set();
       // the corner toggles first, outer one leading, then the dock left to right
       this._introIconTimers = ["speaker", "bell", 0, 1, 2, 3, 4].map((i, n) =>
@@ -5059,6 +5068,10 @@ class HubbubbRingCard extends LitElement {
       return;
     }
     const T = IM3_BOOT;
+    if (!this._config.intro_message) {
+      this._boot.waitForPreferences = true;
+      clearTimeout(this._bootTimer);
+    }
     /* One line at a time, each on its beat or as soon as the one before has
        finished playing (announce returns when the puck is done), so the
        pauses land where the film's do and a slow line never overlaps. */
@@ -5080,7 +5093,11 @@ class HubbubbRingCard extends LitElement {
       all.forEach((p) => p.catch(() => {})); // a failure is handled at its turn
       return all;
     });
-    const t0 = performance.now();
+    let t0 = performance.now();
+    const preferencesPlaying = () => {
+      if (!this._beginIntroPreferences(run)) return;
+      t0 = performance.now() - T.imp * 1000;
+    };
     (async () => {
       let fetched = await here; // started now, so the lines are ready by their beats
       let ended = 0;
@@ -5092,7 +5109,9 @@ class HubbubbRingCard extends LitElement {
         if (this._introRun !== run) return;
         if (fetched) {
           try {
-            await this._playHere(el, await fetched[i], run);
+            const blob = await fetched[i];
+            if (this._introRun !== run) { URL.revokeObjectURL(blob); return; }
+            await this._playHere(el, blob, run, at === T.imp ? preferencesPlaying : null);
             ended = performance.now() - t0;
             continue;
           } catch (e) {
@@ -5101,9 +5120,18 @@ class HubbubbRingCard extends LitElement {
           }
         }
         try {
+          if (at === T.imp) {
+            // The satellite's playing state includes its TTS/network delay.
+            this._introPreferenceCue = preferencesPlaying;
+            if (this._config.follow_media_player === false || !this._resolveMediaPlayer(this._hass)) preferencesPlaying();
+          }
           await say(text);
+          // Some devices do not publish a playback state; release the hold
+          // on completion rather than leaving the introduction stuck.
+          if (at === T.imp) preferencesPlaying();
           ended = performance.now() - t0;
         } catch (e) {
+          this._stopIntroVisuals();
           this._toast(`${name} could not speak the introduction.`);
           return;
         }
@@ -5136,16 +5164,35 @@ class HubbubbRingCard extends LitElement {
 
   /* One line out of this screen, with the ring's mouth on its waveform;
      resolves when it has finished playing. */
-  async _playHere(el, blob, run) {
+  _beginIntroPreferences(run) {
+    if (this._introRun !== run || !this._boot?.waitForPreferences) return false;
+    this._introPreferenceCue = null;
+    this._boot.waitForPreferences = false;
+    this._boot.t = IM3_BOOT.imp;
+    clearTimeout(this._bootTimer);
+    this._bootTimer = setTimeout(() => {
+      if (this._introRun !== run) return;
+      this._booting = false;
+      this._landed = null;
+    }, (IM3_BOOT.end - IM3_BOOT.imp) * 1000);
+    return true;
+  }
+
+  async _playHere(el, blob, run, onPlaying = null) {
     this._trackSpeech(el, blob);
     try {
       await new Promise((res, rej) => {
+        el.onplaying = () => {
+          if (this._introRun === run) onPlaying?.();
+          el.onplaying = null;
+        };
         el.onended = res;
         el.onerror = () => rej(new Error("playback"));
         el.src = blob;
         el.play().catch(rej);
       });
     } finally {
+      el.onplaying = null;
       URL.revokeObjectURL(blob);
       this._releaseSpeech(el);
     }
@@ -5510,7 +5557,11 @@ class HubbubbRingCard extends LitElement {
         data-ai="toggle-build-mode"
         @click=${() => this._setBuild(true)}
       >
-        ${ico(svg`<path d="M12 2.6c-4 0-7 2.5-7 6.5v4.3c0 2.1.8 4 2.2 5.4L9.6 21h4.8l2.4-2.2c1.4-1.4 2.2-3.3 2.2-5.4V9.1c0-4-3-6.5-7-6.5z"/><path d="M7.3 11.1l3.4 1M16.7 11.1l-3.4 1"/><path d="M12 2.8v4.4M9.8 17.2h4.4M7.4 14.2l2.3 1.6M16.6 14.2l-2.3 1.6"/>`)}
+        <svg class="armor-helmet" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width=".85" stroke-linejoin="round">
+          <path d=${HELMET_OUTLINE}/>
+          ${HELMET_PLATES.map(d => svg`<path d=${d}/>`)}
+          <path d=${HELMET_EYES} fill="currentColor" stroke="none"/>
+        </svg>
         ${badge(4, sess.length)}
         ${badge(4, waiting, "alert")}
       </button>
