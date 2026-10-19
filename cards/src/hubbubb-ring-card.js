@@ -29,7 +29,7 @@ import {
   widestGap,
 } from "./pack.js";
 
-const CARD_VERSION = "4.14.0";
+const CARD_VERSION = "4.14.2";
 
 const SATELLITE_DOMAIN = "assist_satellite";
 
@@ -332,7 +332,7 @@ const IM3_LINES = [
   [12.2, "Importing all preferences from home interface."],
   [16.0, "Systems are now fully operational."],
   // once the ring is back from the power-up
-  [22.0, "Welcome. Let me know how I can assist."],
+  [22.0, "Let me know how I can assist."],
 ];
 // silence owed before each line however late the one before ran; "fully
 // operational" gets a real beat of quiet, as in the film
@@ -5157,7 +5157,7 @@ class HubbubbRingCard extends LitElement {
           <button class="sheet-x" title="Close" @click=${() => (this._sheet = null)}>×</button>
         </div>
         ${sh.kind === "review"
-          ? html`<div class="sheet-list review-host">${this._reviewEl}</div>`
+          ? html`<div class="sheet-list review-host">${this._reviewBox}</div>`
           : sh.kind === "todos"
           ? html`<div class="sheet-list">${this._renderTodos()}</div>`
           : html`        <input
@@ -5244,6 +5244,12 @@ class HubbubbRingCard extends LitElement {
     if (!this._reviewEl) {
       this._reviewEl = document.createElement("hubbubb-review-card");
       this._reviewEl.setConfig({ type: "custom:hubbubb-review-card", entity: this._config.review_entity });
+      /* The review card renders into light DOM, so inside this card's shadow
+         root it would wear this card's styles - `ha-card { display: flex;
+         line-height: 0 }` crushed it into one row of overlapping text. A
+         shadow root of its own keeps it looking as it does on its page. */
+      this._reviewBox = document.createElement("div");
+      this._reviewBox.attachShadow({ mode: "open" }).appendChild(this._reviewEl);
     }
     this._reviewEl.hass = this._hass;
     this._sheet = { kind: "review", items: [], q: "" };
