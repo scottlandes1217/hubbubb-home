@@ -4,7 +4,7 @@
 <style>
 body{margin:0;background:#030b0d;color:#b8dbd9;font:15px system-ui}main{max-width:900px;margin:24px auto;padding:16px}nav{display:flex;flex-wrap:wrap;gap:12px;margin:18px 0}button{padding:12px;background:#12363a;color:#b8dbd9;border:1px solid #36777a;border-radius:8px}#status{font-variant-numeric:tabular-nums;color:#79aca6}jarvis-intro-preview{border:1px solid #143c38;border-radius:12px;background:radial-gradient(ellipse at 50% 40%,#083d37,#020a0c 65%)}
 </style>
-<main><p>Jarvis · armor assembly & button entrances</p><nav><button id="boot">Replay full entrance</button><button id="speech">Play speech</button><button id="idle">Idle</button><button id="preferences">Replay preferences → power</button><button id="armor">Replay armor</button><button id="assembled">Inspect armor at 100%</button></nav><div id="stage"></div><p id="status"></p><audio id="audio"></audio></main>
+<main><p>Jarvis · armor assembly & button entrances</p><nav><button id="boot">Replay full entrance</button><button id="speech">Play speech</button><button id="idle">Idle</button><button id="preferences">Replay preferences → power</button><button id="armor">Replay armor</button><button id="assembled">Inspect armor at 100%</button><button id="fade">Inspect return fade</button></nav><div id="stage"></div><p id="status"></p><audio id="audio"></audio></main>
 <script type="module">
 import '../../custom_components/hubbubb_home/www/hubbubb-ring-card.js';
 import {render} from '../../node_modules/lit-html/lit-html.js';
@@ -38,6 +38,7 @@ requestAnimationFrame(frame);
 document.querySelector('#boot').onclick=()=>{frozenArmor=false;c._startIntroVisuals();};
 document.querySelector('#preferences').onclick=()=>{c._stopIntroVisuals();frozenArmor=false;c._boot={t:12.2};};
 document.querySelector('#armor').onclick=()=>{c._stopIntroVisuals();frozenArmor=false;c._boot={t:15.0};};
+document.querySelector('#fade').onclick=()=>{c._stopIntroVisuals();frozenArmor=true;c._boot={t:18.2};};
 document.querySelector('#assembled').onclick=()=>{c._stopIntroVisuals();frozenArmor=true;c._boot={t:17.3};};
 document.querySelector('#speech').onclick=async()=>{audio.src='./speech.mp3';c._trackSpeech(audio,audio.src);audio.onended=()=>c._releaseSpeech(audio);await audio.play();};
 document.querySelector('#idle').onclick=()=>{frozenArmor=false;audio.pause();c._releaseSpeech(audio);c._stopIntroVisuals();};

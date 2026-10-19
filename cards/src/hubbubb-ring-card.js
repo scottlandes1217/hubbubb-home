@@ -301,7 +301,7 @@ const IM3_BOOT = {
   icons: 5.3, iconStep: 0.5,
   clock: 9.3, clockEnd: 12.0,
   imp: 12.2, impEnd: 15.0,
-  reactor: 15.0, back: 17.4, end: 20.8,
+  reactor: 15.0, back: 17.4, returnFade: 1.6, end: 20.8,
 };
 // The review card on its own page wears HA's theme; in the ring card's
 // pop-up it should match the build panels around it.
@@ -4758,8 +4758,12 @@ class HubbubbRingCard extends LitElement {
     }
     if (t < T.back) return { ring: 0, scale: 1, burst: 0, globe: 1, phase: "reactor", u: (t - T.reactor) / (T.back - T.reactor), t };
     if (t < T.end) {
-      const a = arrive(T.back);
-      return { ...a, burst: a.burst * 0.6, globe: 1, phase: t < T.back + 0.35 ? "reactorOut" : null, t };
+      const u = clamp((t - T.back) / T.returnFade, 0, 1);
+      const fade = u * u * (3 - 2 * u);
+      // Crossfade both layers together; a near-full-size ring eases in
+      // without the opening sequence's fast scale-up or burst.
+      return { ring: fade, scale: .92 + .08 * fade, burst: 0, globe: 1,
+        phase: u < 1 ? "reactorOut" : null, u, fade, t };
     }
     this._boot = null;
     return { ring: 1, scale: 1, burst: 0, globe: 1, phase: null };
@@ -4773,9 +4777,9 @@ class HubbubbRingCard extends LitElement {
     if (boot.phase === "reactor") {
       this._drawReactor(ctx, cx, cy, half, boot.u, col, hi);
     } else if (boot.phase === "reactorOut") {
-      // the reactor lets go as the ring arrives
-      ctx.globalAlpha = 1 - (boot.t - T.back) / 0.35;
-      this._drawReactor(ctx, cx, cy, half, 1, col, hi, (boot.t - T.back) / .35);
+      // The suit and returning ring share one eased, 1.6-second dissolve.
+      ctx.globalAlpha *= 1 - boot.fade;
+      this._drawReactor(ctx, cx, cy, half, 1, col, hi, boot.u);
     } else if (boot.phase === "word") {
       this._drawWordmark(ctx, cx, cy, half, boot.t - T.word, R, G, B);
     } else if (boot.phase === "clock") {
