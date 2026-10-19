@@ -97,6 +97,7 @@ const DEFAULTS = {
   dock: true,
   review_path: "/jarvis-review", // fallback when the review card is missing
   review_entity: "sensor.jarvis_review", // the Review button's pop-up
+  review_apply_automation: "automation.jarvis_apply_accepted_nightly_findings",
   intro_message: "",
   /* To-do lists under the dock on the main screen. Empty = every todo.* list
      Home Assistant has. */
@@ -5515,7 +5516,8 @@ class HubbubbRingCard extends LitElement {
     if (!customElements.get("hubbubb-review-card")) return this._navigate(this._config.review_path);
     if (!this._reviewEl) {
       this._reviewEl = document.createElement("hubbubb-review-card");
-      this._reviewEl.setConfig({ type: "custom:hubbubb-review-card", entity: this._config.review_entity });
+      this._reviewEl.setConfig({ type: "custom:hubbubb-review-card", entity: this._config.review_entity,
+        apply_automation: this._config.review_apply_automation });
       /* The review card renders into light DOM, so inside this card's shadow
          root it would wear this card's styles - `ha-card { display: flex;
          line-height: 0 }` crushed it into one row of overlapping text. A

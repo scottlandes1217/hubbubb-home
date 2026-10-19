@@ -3,11 +3,12 @@
  * Reads sensor.<assistant>_review: every defect and suggestion the overnight
  * review has raised, each with a status. Accept and Reject write back through
  * hubbubb_home.review_decide, the same call the Repairs panel makes, so the
- * two front ends never disagree. Accepted items wait for "apply the nightly
- * findings"; the session that applies them marks them done.
+ * two front ends never disagree. Apply Findings triggers the same automation
+ * as accepting an item; the session that applies them marks them done.
  *
  *   type: custom:hubbubb-review-card
  *   entity: sensor.jarvis_review
+ *   apply_automation: automation.jarvis_apply_accepted_nightly_findings
  */
 import { groupProposals, markup } from "./review-groups.js";
 
@@ -19,7 +20,7 @@ class HubbubbReviewCard extends HTMLElement {
     if (!config || !config.entity) {
       throw new Error("hubbubb-review-card: you need to define an `entity`");
     }
-    this._config = { ...config };
+    this._config = { apply_automation: "automation.jarvis_apply_accepted_nightly_findings", ...config };
     this._showDecided = false;
     // which items are open: every hass update rewrites the card, and the
     // ones you opened have to stay open through it
@@ -76,6 +77,31 @@ class HubbubbReviewCard extends HTMLElement {
     this._track(Promise.all(ids.map(one)), `accepting ${ids.length}…`, `accepted ${ids.length}`, "accept all");
   }
 
+  async _apply() {
+    const proposals = this._hass.states[this._config.entity]?.attributes?.proposals;
+    const automation = this._hass.states[this._config.apply_automation];
+    if (this._applying || automation?.attributes?.current > 0 ||
+        !automation || ["unavailable", "unknown"].includes(automation.state) ||
+        !groupProposals(proposals).accepted.length ||
+        this._note === RUNNING || this._note === CHECKING) return;
+    this._applying = true;
+    this._note = "requesting application of accepted findings…";
+    this._render();
+    try {
+      // Reuse the existing single-run automation, including its debounce, so
+      // clicking during an automatic acceptance run cannot launch a second one.
+      await this._hass.callService("automation", "trigger", {
+        entity_id: this._config.apply_automation, skip_condition: true,
+      });
+      this._note = "apply request sent — findings will be marked done as they finish";
+    } catch (e) {
+      this._note = `Apply Findings failed: ${e?.message || e}`;
+    } finally {
+      this._applying = false;
+      this._render();
+    }
+  }
+
   _item(p, buttons) {
     const yaml = p.yaml ? `<pre class="jr-yaml">${this._esc(p.yaml)}</pre>` : "";
     // collapsed to its title; tap to read the details and decide
@@ -98,7 +124,11 @@ class HubbubbReviewCard extends HTMLElement {
     const st = this._hass.states[this._config.entity];
     const attrs = st?.attributes ?? {};
     const groups = groupProposals(attrs.proposals);
-    const sig = JSON.stringify([attrs.last_run, attrs.proposals, this._showDecided, this._note]);
+    const automation = this._hass.states[this._config.apply_automation];
+    const applying = this._applying || automation?.attributes?.current > 0;
+    const applyAvailable = automation && !["unavailable", "unknown"].includes(automation.state);
+    const sig = JSON.stringify([attrs.last_run, attrs.detail, attrs.proposals,
+      this._showDecided, this._note, applying, applyAvailable]);
     if (sig === this._sig) return;
     this._sig = sig;
 
@@ -109,7 +139,7 @@ class HubbubbReviewCard extends HTMLElement {
     const accepted = groups.accepted.map((p) =>
       this._item(p, btn("Undo", "pending") + btn("Mark done", "done"))).join("");
     const decided = groups.decided.map((p) => this._item(p, btn("Reopen", "pending"))).join("");
-    const busy = this._note === RUNNING || this._note === CHECKING;
+    const busy = applying || this._note === RUNNING || this._note === CHECKING;
     const lastRun = attrs.last_run ? new Date(attrs.last_run).toLocaleString() : "never";
 
     this.innerHTML = `
@@ -119,7 +149,8 @@ class HubbubbReviewCard extends HTMLElement {
         .jr-top { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; flex-wrap: wrap; }
         .jr-h { font-size: 14px; font-weight: 500; color: var(--secondary-text-color); }
         .jr-sub { font-size: 12px; color: var(--secondary-text-color); }
-        .jr-section { margin-top: 12px; font-size: 13px; font-weight: 500; color: var(--primary-text-color); }
+        .jr-section { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap;
+                      margin-top: 12px; font-size: 13px; font-weight: 500; color: var(--primary-text-color); }
         .jr-item { padding: 10px 0; border-top: 1px solid var(--divider-color); }
         .jr-head { display: flex; gap: 8px; align-items: baseline; cursor: pointer; list-style: none; }
         .jr-head::-webkit-details-marker { display: none; }
@@ -138,6 +169,7 @@ class HubbubbReviewCard extends HTMLElement {
         .jr-btn { border: none; border-radius: 12px; padding: 4px 12px; cursor: pointer; font: inherit; font-size: 12px;
                   background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.12); color: var(--primary-color); }
         .jr-yes { background: rgba(var(--rgb-success-color, 67, 160, 71), 0.15); color: var(--success-color, #43a047); }
+        .jr-btn:disabled { opacity: 0.5; cursor: default; }
         .jr-no { background: rgba(var(--rgb-error-color, 219, 68, 55), 0.12); color: var(--error-color, #db4437); }
         .jr-empty { color: var(--secondary-text-color); font-size: 13px; padding: 6px 0; }
         .jr-toggle { background: none; border: none; color: var(--primary-color); cursor: pointer; font: inherit; font-size: 12px; padding: 0; }
@@ -145,7 +177,7 @@ class HubbubbReviewCard extends HTMLElement {
       <ha-card class="jr-card">
         <div class="jr-top">
           <span class="jr-h">Nightly review</span>
-          <span class="jr-sub">last run ${this._esc(lastRun)}${attrs.detail ? " — " + this._esc(attrs.detail) : ""}${this._note ? " · " + this._esc(this._note) : ""}</span>
+          <span class="jr-sub" role="status">last run ${this._esc(lastRun)}${attrs.detail ? " — " + this._esc(attrs.detail) : ""}${this._note ? " · " + this._esc(this._note) : ""}</span>
           <button class="jr-btn" data-recheck ${busy ? "disabled" : ""}>${this._note === CHECKING ? "Checking…" : "Re-check open"}</button>
           <button class="jr-btn" data-run ${busy ? "disabled" : ""}>${this._note === RUNNING ? "Running…" : "Run now"}</button>
         </div>
@@ -153,7 +185,10 @@ class HubbubbReviewCard extends HTMLElement {
           ${groups.pending.length > 1 ? `<button class="jr-btn jr-yes" data-accept-all>Accept all</button>` : ""}
         </div>
         ${pending || `<div class="jr-empty">Nothing waiting. The review runs at 04:00.</div>`}
-        <div class="jr-section">Accepted — say "apply the nightly findings" (${groups.accepted.length})</div>
+        <div class="jr-section"><span>Accepted (${groups.accepted.length})</span>
+          <button class="jr-btn jr-yes" data-apply ${busy || !applyAvailable || !groups.accepted.length ? "disabled" : ""}
+            title="${!applyAvailable ? "Applying findings is unavailable" : "Apply accepted findings"}">${applying ? "Applying…" : "Apply Findings"}</button>
+        </div>
         ${accepted || `<div class="jr-empty">Nothing accepted yet.</div>`}
         <div class="jr-section">
           <button class="jr-toggle" data-toggle>${this._showDecided ? "Hide" : "Show"} decided (${groups.decided.length})</button>
@@ -177,6 +212,7 @@ class HubbubbReviewCard extends HTMLElement {
       this._render();
     });
     this.querySelector("[data-recheck]").addEventListener("click", () => this._recheck());
+    this.querySelector("[data-apply]").addEventListener("click", () => this._apply());
     this.querySelector("[data-run]").addEventListener("click", () =>
       this._call("run_review", {}, RUNNING, "review finished")
     );
