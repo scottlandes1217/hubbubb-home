@@ -168,7 +168,7 @@ from hubbubb_home.nightly import FindingsReport, _days  # noqa: E402
 from hubbubb_home.review import ReviewReport, parse_proposals  # noqa: E402
 from hubbubb_home.appletv import _TEMPLATE, _match_source, decide_plan  # noqa: E402
 from hubbubb_home.companion import relevant_text  # noqa: E402
-from hubbubb_home.grounding import trim_by_turns, ungrounded  # noqa: E402
+from hubbubb_home.grounding import same_request, trim_by_turns, ungrounded  # noqa: E402
 
 
 # --- memory: spoken question -> FTS5 query -----------------------------------
@@ -2226,6 +2226,15 @@ def test_history_trim_counts_turns_not_tool_messages():
     short = [sys_, *c, *now]
     assert trim_by_turns(short, 2) == short
     assert trim_by_turns([sys_, *a, *b, *c, *now], 0) == [sys_, *a, *b, *c, *now]
+
+
+def test_same_request_spots_a_repeat_not_a_new_command():
+    assert same_request("set my lights to my bright scene", "set the lights to bright")
+    assert same_request("can I get the movie lighting", "I said movie lighting")
+    assert not same_request("turn on the bedroom fan", "turn off the bedroom fan")
+    assert not same_request("add milk to my list", "add eggs to my list")
+    assert not same_request("what is the weather", "turn on the bedroom fan")
+    assert not same_request("the", "a")
 
 
 if __name__ == "__main__":

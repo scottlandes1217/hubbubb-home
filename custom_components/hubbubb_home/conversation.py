@@ -28,6 +28,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.intent import IntentResponse, IntentResponseType
 
 from .companion import CompanionError
+from .grounding import same_request
 from .const import (
     CONF_ACK,
     CONF_ANNOUNCE,
@@ -171,6 +172,24 @@ ANSWER_WINDOW = 120.0
 # The pipeline hands these to an agent with house control rather than
 # answering them locally (assist_pipeline's local fallback filter).
 LLM_INTENTS = ("HassGetState", "HassMediaSearchAndPlay")
+# Asking the local brain the same thing again this soon means its first answer
+# did not do it. The repeat goes to Claude, which does it now, and a coding
+# session is opened to teach the local brain - Claude stays the fallback.
+REPEAT_WINDOW = 300.0
+FALLBACK_AGENT = "conversation.claude_conversation"
+FIX_PROJECT = "jarvis"
+FIX_BRIEF = (
+    "Jarvis's local model failed a voice request and Scott had to repeat it. "
+    "Claude ({agent}) has already carried out the repeat, so do not perform it "
+    "again. Fix the LOCAL model so it handles this kind of request itself next "
+    "time: tools, tool descriptions, exposed entities, its prompt (see the "
+    "memories jarvis-stays-local-first and intent-script-tools-starve-local-"
+    "model). Never point Jarvis at Claude instead. Diagnose with chat_log debug "
+    "logging and POST /api/conversation/process to {brain}, verify the fix the "
+    "same way, then commit with ha-git. If the local model was in fact right, "
+    "change nothing and say so. First ask: {first!r}, local reply: {reply!r}. "
+    "Repeat: {repeat!r}. Claude's reply: {fixed!r}."
+)
 
 
 class FrontDoorConversationEntity(conversation.ConversationEntity):
@@ -196,6 +215,8 @@ class FrontDoorConversationEntity(conversation.ConversationEntity):
         # brain's words straight to TTS - past the title swap.
         self._brain_ids: dict[str, str] = {}
         self._asked = 0.0
+        # (when, text, reply) for each request the local brain answered.
+        self._tries: list[tuple[float, str, str]] = []
 
     @property
     def supported_languages(self) -> list[str] | str:
@@ -225,7 +246,17 @@ class FrontDoorConversationEntity(conversation.ConversationEntity):
             self._asked = time.time()
             return self._reply(user_input, chat_log, ASK, ask=True)
 
-        result = await self._answer(user_input, chat_log)
+        earlier = self._repeat_of(user_input.text)
+        if earlier and self.hass.states.get(FALLBACK_AGENT):
+            result = await self._escalate(user_input, chat_log, earlier)
+        else:
+            result, by_brain = await self._answer(user_input, chat_log)
+            if by_brain:
+                self._tries.append((
+                    time.time(),
+                    user_input.text,
+                    result.response.speech.get("plain", {}).get("speech", ""),
+                ))
         speech = result.response.speech.get("plain", {}).get("speech", "")
         person, _, _ = speakers.resolve(user_input.device_id)
         speech = address(
@@ -248,6 +279,59 @@ class FrontDoorConversationEntity(conversation.ConversationEntity):
         # house just asked is not the moment for introductions.
         return not any(c.role == "assistant" for c in chat_log.content)
 
+    def _repeat_of(self, text: str) -> tuple[float, str, str] | None:
+        """The recent local-brain try this request repeats, taken off the list."""
+        now = time.time()
+        self._tries = [t for t in self._tries if now - t[0] < REPEAT_WINDOW]
+        for i, t in enumerate(self._tries):
+            if same_request(t[1], text):
+                return self._tries.pop(i)
+        return None
+
+    async def _escalate(
+        self,
+        user_input: conversation.ConversationInput,
+        chat_log: conversation.ChatLog,
+        earlier: tuple[float, str, str],
+    ) -> conversation.ConversationResult:
+        """Claude does the repeated request now; a session fixes the local brain."""
+        result = await conversation.async_converse(
+            hass=self.hass,
+            text=user_input.text,
+            conversation_id=None,
+            context=user_input.context,
+            language=user_input.language,
+            agent_id=FALLBACK_AGENT,
+            device_id=user_input.device_id,
+            satellite_id=user_input.satellite_id,
+        )
+        fixed = result.response.speech.get("plain", {}).get("speech", "")
+        chat_log.async_add_assistant_content_without_tools(
+            conversation.AssistantContent(agent_id=self.entity_id, content=fixed)
+        )
+        _LOGGER.info("repeat of %r went to %s", earlier[1], FALLBACK_AGENT)
+        if (
+            result.response.response_type != IntentResponseType.ERROR
+            and self._runtime.companion.configured
+        ):
+            brief = FIX_BRIEF.format(
+                agent=FALLBACK_AGENT, brain=self._brain, first=earlier[1],
+                reply=earlier[2], repeat=user_input.text, fixed=fixed,
+            )
+            self.hass.async_create_background_task(
+                self._file_fix(brief), "hubbubb_home fix local brain"
+            )
+        return result
+
+    async def _file_fix(self, brief: str) -> None:
+        try:
+            await self._runtime.companion.async_call("prompt", {
+                "text": brief, "project": FIX_PROJECT,
+                "new_session": True, "fresh": True, "force": True,
+            })
+        except CompanionError as err:
+            _LOGGER.warning("could not open a session to fix the local brain: %s", err)
+
     async def _meet(self, answer: str) -> str:
         """File the voice under the name given; -> the greeting to lead with."""
         name = spoken_name(answer, self._runtime.name)
@@ -269,8 +353,11 @@ class FrontDoorConversationEntity(conversation.ConversationEntity):
         self,
         user_input: conversation.ConversationInput,
         chat_log: conversation.ChatLog,
-    ) -> conversation.ConversationResult:
-        """What the pipeline would have done: local intents, then the brain."""
+    ) -> tuple[conversation.ConversationResult, bool]:
+        """What the pipeline would have done: local intents, then the brain.
+
+        -> (result, whether the brain answered it).
+        """
         response = await conversation.async_handle_intents(
             self.hass,
             user_input,
@@ -286,7 +373,7 @@ class FrontDoorConversationEntity(conversation.ConversationEntity):
             )
             return conversation.ConversationResult(
                 response=response, conversation_id=chat_log.conversation_id
-            )
+            ), False
         cid = chat_log.conversation_id
         result = await conversation.async_converse(
             hass=self.hass,
@@ -308,7 +395,7 @@ class FrontDoorConversationEntity(conversation.ConversationEntity):
                 content=result.response.speech.get("plain", {}).get("speech", ""),
             )
         )
-        return result
+        return result, True
 
     def _reply(self, user_input, chat_log, speech: str, ask: bool = False):
         response = IntentResponse(language=user_input.language)
