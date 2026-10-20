@@ -1845,6 +1845,7 @@ class HubbubbRingCard extends LitElement {
     marker.setAttribute("aria-hidden", "true");
     box.append(marker);
     this._screenAnchor = point;
+    this._screenPendingEnter = null;
     const editorRequest = (this._screenEditorRequest = {});
     this._screenEditor = null;
     this._screenEditorLoading = true;
@@ -1869,13 +1870,16 @@ class HubbubbRingCard extends LitElement {
       marker.classList.add("failed");
       this._toast(this._errText(err));
     } finally {
-      if (this._screenEditorRequest === editorRequest) this._screenEditorLoading = false;
+      if (this._screenEditorRequest === editorRequest) {
+        this._screenEditorLoading = false;
+        this._screenPendingEnter = null;
+      }
       setTimeout(() => marker.remove(), 650);
     }
   }
 
   async _loadScreenEditor(result) {
-    const editor = (this._screenEditor = result.editor || null);
+    const editor = (this._screenEditor = result.editor?.terminal ? { terminal: true } : result.editor || null);
     this._screenEditorLoading = false;
     await this.updateComplete;
     const entry = this.renderRoot.querySelector(".screen-entry");
@@ -1886,10 +1890,15 @@ class HubbubbRingCard extends LitElement {
       entry.setSelectionRange(this._screenEditor.start ?? entry.value.length,
         this._screenEditor.end ?? entry.value.length);
     }
+    if (this._screenPendingEnter && this._screenPendingEnter === this._screenEditorRequest) {
+      this._screenPendingEnter = null;
+      this._screenSend("enter");
+    }
   }
 
   async _openScreenKeyboard() {
     this._showScreenKeyboard();
+    this._screenPendingEnter = null;
     const request = (this._screenEditorRequest = {});
     this._screenEditorLoading = true;
     try {
@@ -1898,7 +1907,10 @@ class HubbubbRingCard extends LitElement {
     } catch (err) {
       this._toast(this._errText(err));
     } finally {
-      if (this._screenEditorRequest === request) this._screenEditorLoading = false;
+      if (this._screenEditorRequest === request) {
+        this._screenEditorLoading = false;
+        this._screenPendingEnter = null;
+      }
     }
   }
 
@@ -1987,6 +1999,7 @@ class HubbubbRingCard extends LitElement {
   _screenKeyDown(e) {
     if (this._screenEditorLoading) {
       if (e.key === "Backspace" || e.key === "Enter") e.preventDefault();
+      if (e.key === "Enter" && !e.isComposing && !e.shiftKey) this._screenSend("enter");
       return;
     }
     if (e.key === "Enter" && !e.shiftKey && !e.isComposing && !e.defaultPrevented &&
@@ -2003,7 +2016,12 @@ class HubbubbRingCard extends LitElement {
   }
 
   _screenBeforeInput(e) {
-    if (this._screenEditorLoading) { e.preventDefault(); return; }
+    if (this._screenEditorLoading) {
+      e.preventDefault();
+      if (["insertParagraph", "insertLineBreak"].includes(e.inputType) && !e.isComposing)
+        this._screenSend("enter");
+      return;
+    }
     if (["insertParagraph", "insertLineBreak"].includes(e.inputType) && !e.isComposing &&
         !e.defaultPrevented && !this._screenEditor?.multiline) {
       e.preventDefault();
@@ -2020,7 +2038,12 @@ class HubbubbRingCard extends LitElement {
   }
 
   async _screenSend(key = null) {
-    if (this._screenEditorLoading || (!key && this._screenTyping) || !this._view?.screen) return;
+    if (!this._view?.screen) return;
+    if (this._screenEditorLoading) {
+      if (key === "enter") this._screenPendingEnter = this._screenEditorRequest;
+      return;
+    }
+    if (!key && this._screenTyping) return;
     const input = this.renderRoot.querySelector(".screen-entry");
     const text = input?.value || "";
     const editor = this._screenEditor;
@@ -2040,7 +2063,10 @@ class HubbubbRingCard extends LitElement {
     const submitsDraft = !synced && (!key || key === "enter");
     if (submitsDraft && input) input.value = "";
     try {
-      if (synced && (!key || key === "enter")) {
+      if (key === "enter" && synced && text === editor.value) {
+        // Return alone must not depend on an accessibility text setter.
+        await this._screenCommand("agent_screen_input", { key });
+      } else if (synced && (!key || key === "enter")) {
         const result = await this._screenCommand("agent_screen_input", {
           text, original: editor.value, target: editor.target,
           start: input.selectionStart, end: input.selectionEnd,
@@ -2184,6 +2210,7 @@ class HubbubbRingCard extends LitElement {
             autocomplete="off" @keydown=${this._screenKeyDown} @beforeinput=${this._screenBeforeInput} />`
             : html`<textarea class="screen-entry" rows="1" maxlength="16384"
               placeholder=${this._screenEditorLoading ? "Reading Mac field…" :
+                this._screenEditor?.terminal ? "Terminal · Return sends text and Enter" :
                 typeof this._screenEditor?.value === "string" ? "Edit Mac field · Apply to save" : "Text unavailable · type to send"}
               aria-label="Edit text on the Mac" autocomplete="off" autocapitalize="off"
               autocorrect="off" spellcheck="false"

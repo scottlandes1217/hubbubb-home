@@ -204,3 +204,35 @@ console.log('Mission Control queues once, resets zoom, hides keyboard and refres
   assert.equal(card._screenKeyboardObserver,undefined,'refocusing does not restart recenter observer');
 }
 console.log('Terminal Return sends draft plus Enter; zoomed keyboard focus and close preserve view');
+{
+  const {card,input,calls} = setup();
+  Object.defineProperty(card,'updateComplete',{value:Promise.resolve()});
+  input.setSelectionRange=()=>{};
+  card._screenEditorRequest={}; card._screenEditorLoading=true;
+  const e=event(input,{key:'Enter'});card._screenKeyDown(e);
+  await Promise.resolve();assert.equal(calls.length,0,'Return waits for focus read');
+  assert.equal(e.defaultPrevented,true);
+  await card._loadScreenEditor({editable:true,editor:{terminal:true,multiline:true,value:'Terminal output must not become a draft'}});
+  await card._screenCommandTail;
+  assert.equal(input.value,'');assert.deepEqual(card._screenEditor,{terminal:true});
+  assert.deepEqual(calls.map(c=>c.data),[{key:'enter'}],'queued Return arrives once, without sending terminal output');
+  input.value='printf hello';
+  const mobile=event(input,{key:undefined,inputType:'insertParagraph'});card._screenBeforeInput(mobile);
+  await card._screenCommandTail;assert.equal(mobile.defaultPrevented,true);
+  assert.deepEqual(calls.at(-1).data,{text:'printf hello',key:'enter'});
+}
+{
+  const {card,input,calls} = setup();
+  card._screenEditor={value:'unchanged',target:'field'};input.value='unchanged';
+  await card._screenSend('enter');assert.deepEqual(calls.map(c=>c.data),[{key:'enter'}]);
+}
+{
+  const {card,input,calls} = setup();
+  Object.defineProperty(card,'updateComplete',{value:Promise.resolve()});input.setSelectionRange=()=>{};
+  const oldRequest={};card._screenEditorRequest=oldRequest;card._screenEditorLoading=true;
+  card._screenKeyDown(event(input,{key:'Enter'}));
+  card._screenEditorRequest={};
+  await card._loadScreenEditor({editor:{terminal:true}});await Promise.resolve();
+  assert.equal(calls.length,0,'Return queued for another click must not execute');
+}
+console.log('Terminal mode, Return during focus loading, mobile Return and unchanged-field Enter passed');
