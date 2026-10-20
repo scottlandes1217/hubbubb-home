@@ -3,7 +3,7 @@
  * Kept in a separate WebGL canvas so the existing globe, sessions and intro
  * remain on the card's 2D canvas. Uses WebGL 1, with a Canvas fallback in
  * the card when unavailable. */
-export const SHELL_RADII = [0.88, 0.76];
+export const SHELL_RADII = [0.90, 0.78];
 
 // CPU equivalent of surface() below, for devices without WebGL. Latitude is
 // actual depth on a sphere, not a width coordinate on a flat annulus.
@@ -16,14 +16,12 @@ export function membranePoint(angle, latitude, time, voice, shell, out) {
   const depth=Math.abs(Math.sin(b));
   const u=Math.max(0,Math.min(1,(depth-.18)/.37));
   const rim=1-u*u*(3-2*u);
-  // Traveling wave crests and narrow peaks follow the real speech envelope.
-  // Silence leaves both skins spherical. Share the large displacement so
-  // they keep their gap; the smaller folds counter-flow independently.
-  const wave=Math.sin(a*6-t*2.8+Math.sin(a*3+t*.8)*.8);
-  const crest=.5+.5*Math.sin(a*13+t*3.4+Math.sin(a*4-t)*1.2);
-  const spike=1.35*Math.pow(crest,7)-.35;
-  const waveform=.15*broad+.25*wave+.60*spike;
-  const r=SHELL_RADII[shell]+k*rim*(.090*waveform+.006*fold+.001*fold2);
+  // Keep the original slow, soft folds, with a deeper inward squeeze on
+  // each spoken syllable. Shared pressure preserves the gap between skins;
+  // no displacement remains once the speech envelope settles to silence.
+  const pressure=.3+.7*Math.pow(.5+.5*Math.sin(a*2+t*.9),2);
+  const motion=k*rim*pressure;
+  const r=SHELL_RADII[shell]+motion*(-.070+.070*broad+.028*fold+.007*fold2);
   const cb=Math.cos(b);
   out[0]=r*cb*Math.cos(a);out[1]=r*cb*Math.sin(a);out[2]=r*Math.sin(b);
   return out;
@@ -46,11 +44,9 @@ vec3 surface(vec2 uv) {
   // Speech acts on the outer ~16% of the projected skin. The front/back
   // faces stay spherical instead of crumpling with each word.
   float rim = 1.0-smoothstep(.18,.55,abs(sin(b)));
-  float wave = sin(a*6.0-t*2.8+sin(a*3.0+t*.8)*.8);
-  float crest = .5+.5*sin(a*13.0+t*3.4+sin(a*4.0-t)*1.2);
-  float spike = 1.35*pow(crest,7.0)-.35;
-  float waveform = .15*broad+.25*wave+.60*spike;
-  float r = uRadius + uVoice*rim*(.090*waveform+.006*fold+.001*fold2);
+  float pressure = .3+.7*pow(.5+.5*sin(a*2.0+t*.9),2.0);
+  float motion = uVoice*rim*pressure;
+  float r = uRadius + motion*(-.070+.070*broad+.028*fold+.007*fold2);
   float cb = cos(b);
   return r * vec3(cb*cos(a), cb*sin(a), sin(b));
 }

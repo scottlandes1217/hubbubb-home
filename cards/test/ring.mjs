@@ -124,7 +124,8 @@ const audio = () => ({ currentTime: 0.2, paused: false, ended: false, readyState
         return max;
       });
       assert.ok(edges[0]-edges[1]>.025,'bubble silhouettes stay distinct');
-      assert.ok(edges[1]>.68,'inner silhouette leaves room for the core and sessions');
+      // The deeper speech squeeze still clears the session arcs at .465.
+      assert.ok(edges[1]>.65,'compressed inner silhouette leaves room for the core and sessions');
     }
     for (const st of sheets) {
       for (let b = 0; b < 360; b += 3) for (const v of [-1,-.75,-.5,-.25,0,.25,.5,.75,1]) {
