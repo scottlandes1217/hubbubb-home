@@ -10,18 +10,20 @@ export const SHELL_RADII = [0.90, 0.78];
 export function membranePoint(angle, latitude, time, voice, shell, out) {
   const a=angle,b=latitude,t=time,k=Math.max(0,Math.min(1.2,voice));
   const broad=Math.sin(a*3+t*.51)*.46 + Math.sin(a*5-t*.37+1.8)*.27 + Math.sin(a*7+t*.26)*.17;
-  const flow=a+t*(shell===0?.12:-.10);
-  const fold=Math.sin(flow*5+b*13+Math.sin(flow*3-b*4+t*.7)*1.6-t*.8+shell*2.1);
-  const fold2=Math.sin(flow*9-b*19+t*.6+shell*1.3);
+  const flow=a+t*(shell===0?.16:-.13);
+  // Triangle waves form thin creases with angular shoulders. Warping their
+  // phase breaks up the spacing so the film crumples rather than forming teeth.
+  const crease=2/Math.PI*Math.asin(Math.sin(a*7+b*10+Math.sin(a*3+t*1.5)*.9-t*2.1));
+  const fold=2/Math.PI*Math.asin(Math.sin(flow*8+b*17+Math.sin(flow*3-b*4+t*1.1)*1.6-t*2.8+shell*2.1));
+  const fold2=2/Math.PI*Math.asin(Math.sin(flow*17-b*27+t*3.1+shell*1.3));
   const depth=Math.abs(Math.sin(b));
   const u=Math.max(0,Math.min(1,(depth-.18)/.37));
   const rim=1-u*u*(3-2*u);
-  // Keep the original slow, soft folds, with a deeper inward squeeze on
-  // each spoken syllable. Shared pressure preserves the gap between skins;
-  // no displacement remains once the speech envelope settles to silence.
-  const pressure=.3+.7*Math.pow(.5+.5*Math.sin(a*2+t*.9),2);
+  // Shared compression and large creases preserve the gap; the smaller
+  // folds flutter independently. Silence always returns to spherical skins.
+  const pressure=.55+.45*Math.pow(.5+.5*Math.sin(a*2+t*.9),2);
   const motion=k*rim*pressure;
-  const r=SHELL_RADII[shell]+motion*(-.070+.070*broad+.028*fold+.007*fold2);
+  const r=SHELL_RADII[shell]+motion*(-.055+.038*broad+.045*crease+.021*fold+.008*fold2);
   const cb=Math.cos(b);
   out[0]=r*cb*Math.cos(a);out[1]=r*cb*Math.sin(a);out[2]=r*Math.sin(b);
   return out;
@@ -38,15 +40,16 @@ vec3 surface(vec2 uv) {
     + sin(a*5.0-t*.37+1.8)*.27 + sin(a*7.0+t*.26)*.17;
   // Shared pressure keeps two silhouettes separate; depth-dependent folds
   // travel independently through each skin, including its rear hemisphere.
-  float flow = a+t*(uShell<.5 ? .12 : -.10);
-  float fold = sin(flow*5.0+b*13.0+sin(flow*3.0-b*4.0+t*.7)*1.6-t*.8+uShell*2.1);
-  float fold2 = sin(flow*9.0-b*19.0+t*.6+uShell*1.3);
+  float flow = a+t*(uShell<.5 ? .16 : -.13);
+  float crease = .6366197724*asin(sin(a*7.0+b*10.0+sin(a*3.0+t*1.5)*.9-t*2.1));
+  float fold = .6366197724*asin(sin(flow*8.0+b*17.0+sin(flow*3.0-b*4.0+t*1.1)*1.6-t*2.8+uShell*2.1));
+  float fold2 = .6366197724*asin(sin(flow*17.0-b*27.0+t*3.1+uShell*1.3));
   // Speech acts on the outer ~16% of the projected skin. The front/back
   // faces stay spherical instead of crumpling with each word.
   float rim = 1.0-smoothstep(.18,.55,abs(sin(b)));
-  float pressure = .3+.7*pow(.5+.5*sin(a*2.0+t*.9),2.0);
+  float pressure = .55+.45*pow(.5+.5*sin(a*2.0+t*.9),2.0);
   float motion = uVoice*rim*pressure;
-  float r = uRadius + motion*(-.070+.070*broad+.028*fold+.007*fold2);
+  float r = uRadius + motion*(-.055+.038*broad+.045*crease+.021*fold+.008*fold2);
   float cb = cos(b);
   return r * vec3(cb*cos(a), cb*sin(a), sin(b));
 }
@@ -89,7 +92,7 @@ void main() {
   float thread=pow(.5+.5*sin((n+n2*.35)*38.0+vPoint.z*18.0),12.0);
   // A little light across both faces makes these read as hollow bubbles;
   // grazing light and flowing filaments reveal the folds near the rim.
-  float a=(.004 + edge*(.27+thread*.22)) * smoke;
+  float a=(.004 + edge*(.27+uVoice*.08+thread*(.22+uVoice*.10))) * smoke;
   a += thread*.012*smoothstep(.4,.85,length(vPoint.xy));
   float grain=.65+.35*hash(floor(vPoint*650.0));
   a *= grain*uBright;
