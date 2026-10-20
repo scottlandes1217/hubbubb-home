@@ -6639,6 +6639,10 @@ class HubbubbRingCard extends LitElement {
   static styles = css`
     :host {
       display: block;
+      /* iOS enlarges text when a phone turns sideways, block by block, so
+         landscape came out a jumble of sizes. Ours are set exactly as wanted. */
+      -webkit-text-size-adjust: 100%;
+      text-size-adjust: 100%;
       /* The build-mode chrome's palette as channels, so a whole look can
          retint it: line = borders, glow = fills and shadows, glass = panel
          background, ink = text. */
@@ -7152,7 +7156,7 @@ class HubbubbRingCard extends LitElement {
     /* Phones: calendar, to-do lists and review fill the screen edge to edge,
        pinned to the visible viewport like build mode's panel, instead of a
        box floating in a margin. */
-    @media (max-width: 620px) {
+    @media (max-width: 620px), (max-height: 500px) and (pointer: coarse) {
       .sheet.review,
       .sheet.calendar,
       .sheet.todos {
@@ -8631,10 +8635,13 @@ class HubbubbRingCard extends LitElement {
       animation: jr-blink 1s ease-in-out infinite;
     }
 
-    /* Phones: build mode is a full-screen overlay pinned to the visual
+    /* Phones, either way up: a landscape phone is ~900px wide but only ~400
+       tall, and the desktop console's three columns crushed into that.
+       Coarse pointer keeps a short desktop window on the desktop layout.
+       Build mode is a full-screen overlay pinned to the visual
        viewport — the keyboard shrinks it instead of scrolling the dashboard,
        so the composer always sits right on top of the keyboard. */
-    @media (max-width: 620px) {
+    @media (max-width: 620px), (max-height: 500px) and (pointer: coarse) {
       .panel {
         flex-direction: column;
       }

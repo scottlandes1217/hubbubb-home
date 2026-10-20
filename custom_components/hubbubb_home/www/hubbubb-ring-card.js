@@ -955,6 +955,10 @@ void main() {
     `}};Ut(Ft,"build",Ra),Ut(Ft,"version",da),Ut(Ft,"properties",{_config:{state:!0},_todos:{state:!0},_state:{state:!0},_mp:{state:!0},_build:{state:!0},_sessions:{state:!0},_meetLabel:{state:!0},_confirmList:{state:!0},_projects:{state:!0},_sel:{state:!0},_msgs:{state:!0},_ask:{state:!0},_askSent:{state:!0},_activity:{state:!0},_screen:{state:!0},_permission:{state:!0},_modelBusy:{state:!0},_models:{state:!0},_suggestion:{state:!0},_modes:{state:!0},_model:{state:!0},_queue:{state:!0},_swipe:{state:!0},_details:{state:!0},_view:{state:!0},_zoom:{state:!0},_screenPose:{state:!0},_screenKeyboard:{state:!0},_screenPan:{state:!0},_screenCanvas:{state:!0},_screenTyping:{state:!0},_screenMissionBusy:{state:!0},_screenEditor:{state:!0},_screenEditorLoading:{state:!0},_sideW:{state:!0},_files:{state:!0},_dragging:{state:!0},_uploading:{state:!0},_err:{state:!0},_confirmKill:{state:!0},_picking:{state:!0},_pending:{state:!0},_voiceState:{state:!0},_announce:{state:!0},_messages:{state:!0},_dictating:{state:!0},_booting:{state:!0},_landed:{state:!0},_sheet:{state:!0}}),Ut(Ft,"styles",Pt`
     :host {
       display: block;
+      /* iOS enlarges text when a phone turns sideways, block by block, so
+         landscape came out a jumble of sizes. Ours are set exactly as wanted. */
+      -webkit-text-size-adjust: 100%;
+      text-size-adjust: 100%;
       /* The build-mode chrome's palette as channels, so a whole look can
          retint it: line = borders, glow = fills and shadows, glass = panel
          background, ink = text. */
@@ -1468,7 +1472,7 @@ void main() {
     /* Phones: calendar, to-do lists and review fill the screen edge to edge,
        pinned to the visible viewport like build mode's panel, instead of a
        box floating in a margin. */
-    @media (max-width: 620px) {
+    @media (max-width: 620px), (max-height: 500px) and (pointer: coarse) {
       .sheet.review,
       .sheet.calendar,
       .sheet.todos {
@@ -2947,10 +2951,13 @@ void main() {
       animation: jr-blink 1s ease-in-out infinite;
     }
 
-    /* Phones: build mode is a full-screen overlay pinned to the visual
+    /* Phones, either way up: a landscape phone is ~900px wide but only ~400
+       tall, and the desktop console's three columns crushed into that.
+       Coarse pointer keeps a short desktop window on the desktop layout.
+       Build mode is a full-screen overlay pinned to the visual
        viewport — the keyboard shrinks it instead of scrolling the dashboard,
        so the composer always sits right on top of the keyboard. */
-    @media (max-width: 620px) {
+    @media (max-width: 620px), (max-height: 500px) and (pointer: coarse) {
       .panel {
         flex-direction: column;
       }
