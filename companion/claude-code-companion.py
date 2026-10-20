@@ -886,7 +886,7 @@ def merge_ask(scraped, structured):
     """
     if not scraped:
         return None
-    if not structured:
+    if scraped.get("kind") == "workspace_trust" or not structured:
         return scraped
 
     questions = structured["questions"]
@@ -937,6 +937,49 @@ def merge_ask(scraped, structured):
     }
 
 
+def workspace_trust_prompt(screen):
+    """Recognize Claude's active, unnumbered folder-trust menu only."""
+    lines = [line.strip().strip("│┃").strip() for line in screen.splitlines()]
+    nonempty = [line for line in lines if line and not set(line) <= set("─━═ ")]
+    if not nonempty or not re.search(r"Enter to confirm.*Esc to cancel", nonempty[-1]):
+        return None
+    labels = ["No, exit", "Yes, I trust this folder"]
+    options = []
+    for i, line in enumerate(lines):
+        label = line.removeprefix("❯").strip()
+        if label in labels:
+            options.append((i, label, line.startswith("❯")))
+    if len(options) != 2 or {o[1] for o in options} != set(labels):
+        return None
+    if sum(o[2] for o in options) != 1:
+        return None
+    start = next((i for i, line in enumerate(lines)
+                  if line.startswith("Accessing workspace:")), None)
+    if start is None or start >= options[0][0]:
+        return None
+    return {
+        "kind": "workspace_trust", "header": "Folder trust approval",
+        "text": "\n".join(lines[start:options[0][0]]).strip(),
+        "options": [{"key": "✓" if label == labels[1] else "×",
+                     "label": label, "desc": ""} for _, label, _ in options],
+        "selected": next(i for i, option in enumerate(options) if option[2]),
+    }
+
+
+def answer_workspace_trust(window, key):
+    """Apply an explicit Build choice only while this menu is still active."""
+    prompt = workspace_trust_prompt(capture_pane(window, 0))
+    if not prompt:
+        raise ValueError("The folder trust prompt is no longer active. Refresh and review the current session.")
+    target = next(i for i, option in enumerate(prompt["options"])
+                  if option["key"] == key)
+    keys = []
+    if target != prompt["selected"]:
+        keys.append("Down" if target > prompt["selected"] else "Up")
+    keys.append("Enter")
+    subprocess.run([TMUX, "send-keys", "-t", window, *keys], check=True)
+
+
 def pane_extras(window, screen=None):
     """(ask, activity) scraped off the live tmux screen.
 
@@ -947,6 +990,9 @@ def pane_extras(window, screen=None):
     """
     if screen is None:
         screen = capture_pane(window, 30)
+    trust = workspace_trust_prompt(screen)
+    if trust:
+        return trust, None
     cleaned = []
     for raw in screen.splitlines():
         line = raw.strip()
@@ -1645,6 +1691,17 @@ def deliver(text, session, ask=False, spoken=True):
         return False, "that Claude session is gone."
     if not find_claude(session):
         return False, "Claude is not running there."
+    # Enter on Claude's workspace-trust screen chooses "No, exit". Never
+    # paste a chat message or clear the composer until that decision is made.
+    # Only inspect the visible pane; old dialogs in scrollback are irrelevant.
+    screen = capture_pane(session, 0)
+    if ("Yes, I trust this folder" in screen
+            and "No, exit" in screen):
+        return False, (
+            "Claude is waiting for workspace trust approval. Review the folder "
+            "trust prompt in this session and choose accept or decline. "
+            "Your message has been kept in the queue."
+        )
     # Bracketed paste rather than send-keys -l: a literal newline is Enter to
     # the TUI, so a multi-line message would submit at its first line break.
     # Claude shows this as a paste placeholder and expands it on Enter, exactly
@@ -2459,13 +2516,16 @@ class Handler(BaseHTTPRequestHandler):
             window = (data.get("id") or "").strip()
             key = (data.get("key") or "").strip()
             allowed = {str(n) for n in range(1, 10)} | {
-                "Enter", "Escape", "Up", "Down", "Space", "Tab"}
+                "Enter", "Escape", "Up", "Down", "Space", "Tab", "✓", "×"}
             if key not in allowed:
                 return self.reply(400, {"ok": False, "detail": "key not allowed"})
             if not window_exists(window):
                 return self.reply(404, {"ok": False, "detail": "that session is gone."})
             try:
-                subprocess.run([TMUX, "send-keys", "-t", window, key], check=True)
+                if key in {"✓", "×"}:
+                    answer_workspace_trust(window, key)
+                else:
+                    subprocess.run([TMUX, "send-keys", "-t", window, key], check=True)
                 ok, detail = True, "sent"
             except Exception as exc:
                 ok, detail = False, f"{type(exc).__name__}: {exc}"
