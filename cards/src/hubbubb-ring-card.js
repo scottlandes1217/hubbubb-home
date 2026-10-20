@@ -842,6 +842,7 @@ class HubbubbRingCard extends LitElement {
   }
 
   disconnectedCallback() {
+    this._cancelLogFollow();
     for (const unsub of this._speechUnsubs || []) {
       try { unsub(); } catch (e) {}
     }
@@ -1445,7 +1446,7 @@ class HubbubbRingCard extends LitElement {
         // back to the bottom every poll, which reads as the view twitching
         // while you type. Only take it when something actually moved.
         const next = t.messages;
-        if (next != null && !this._sameMsgs(next, this._msgs)) this._msgs = next;
+        this._receiveMsgs(next);
         this._activity = t.activity || null;
         this._screen = t.screen || null;
         this._suggestion = t.suggestion || null;
@@ -1513,6 +1514,9 @@ class HubbubbRingCard extends LitElement {
   }
 
   _select(id) {
+    this._cancelLogFollow();
+    this._logTouching = false;
+    this._pendingMsgs = null;
     // Hold on to the draft in the box before this render swaps it out.
     if (this._sel && this._sel !== id) this._saveDraft();
     this._sel = id;
@@ -2159,48 +2163,77 @@ class HubbubbRingCard extends LitElement {
     return x?.role === y?.role && x?.text === y?.text;
   }
 
-  /* The listener collapses whitespace before typing, so transcript matching
-     has to compare the collapsed form. */
-  /* Messages that have never been on screen only have an estimated height, so
-     one jump can land short of the end. Each pass renders what it scrolled to,
-     which firms up the estimate for the next — three frames is enough to settle
-     and is still invisible. */
+  _receiveMsgs(next) {
+    if (next == null) return;
+    // The API returns a rolling 110-message window. Replacing it while the
+    // reader is above the bottom removes old rows and shifts every position.
+    // Keep the reading snapshot until they return; retain only the latest update.
+    if (this._msgs != null && !this._stick) {
+      this._pendingMsgs = next;
+    } else {
+      this._pendingMsgs = null;
+      if (!this._sameMsgs(next, this._msgs)) this._msgs = next;
+    }
+  }
+
+  _resumeLogFollow() {
+    this._stick = true;
+    if (this._pendingMsgs) this._receiveMsgs(this._pendingMsgs);
+  }
+
+  _cancelLogFollow() {
+    if (this._bottomFrame != null) cancelAnimationFrame(this._bottomFrame);
+    this._bottomFrame = null;
+    clearTimeout(this._logIdleTimer);
+  }
+
+  _logTouchStart() {
+    this._logTouching = true;
+    this._stick = false;
+    this._cancelLogFollow();
+  }
+
+  _logTouchEnd(e) {
+    this._logTouching = false;
+    this._settleLogScroll(e.currentTarget);
+  }
+
+  _logWheel(e) {
+    this._stick = false;
+    this._cancelLogFollow();
+    this._settleLogScroll(e.currentTarget);
+  }
+
+  _logScroll(e) {
+    const log = e.currentTarget;
+    // A layout change or our own bottom scroll also emits scroll events.
+    // Only explicit reader input pauses following, never a programmatic event.
+    if (!this._stick) this._settleLogScroll(log);
+  }
+
+  _settleLogScroll(log) {
+    clearTimeout(this._logIdleTimer);
+    const session = this._sel;
+    // Touchend precedes iOS momentum scrolling. Each subsequent scroll event
+    // postpones following until the reader has actually stopped at the bottom.
+    this._logIdleTimer = setTimeout(() => {
+      if (this._logTouching || this._sel !== session ||
+          this.renderRoot?.querySelector(".log") !== log) return;
+      if (log.scrollHeight - log.scrollTop - log.clientHeight <= 4) this._resumeLogFollow();
+    }, 180);
+  }
+
   _toBottom() {
-    let n = 0;
-    const go = () => {
-      // The settle runs for several frames and a timer after it. Scrolling up
-      // while output streams in clears _stick, and every pass must honour
-      // that, or the reader is yanked back to the bottom mid-scroll.
-      if (!this._stick) return;
+    if (!this._stick || this._logTouching || this._bottomFrame != null) return;
+    const session = this._sel;
+    this._bottomFrame = requestAnimationFrame(() => {
+      this._bottomFrame = null;
+      if (!this._stick || this._logTouching || this._sel !== session) return;
       const log = this.renderRoot?.querySelector(".log");
-      if (log) {
-        // scrollHeight is only an estimate while off-screen messages are still
-        // unrendered, and on a fresh load every message below the fold is, so
-        // aiming at it alone lands short. Asking for the last child forces it
-        // to render and puts us on the real bottom.
-        log.lastElementChild?.scrollIntoView({ block: "end" });
-        log.scrollTop = log.scrollHeight;
-        // scrollIntoView will happily scroll our ancestors too; the panel owns
-        // the screen in build mode, so put them back.
-        this._unscroll();
-      }
-      // Keep going even when the log is not in the DOM yet. Returning on that
-      // first frame abandoned the whole settle, and on a fresh load the
-      // transcript can land a frame before the panel that displays it — which
-      // is exactly when opening a session left you at the top.
-      if (++n < 6) requestAnimationFrame(go);
-    };
-    requestAnimationFrame(go);
-    // rAF does not fire in a backgrounded tab, and the companion app
-    // backgrounds freely, so a timer gets the last word.
-    clearTimeout(this._bottomT);
-    this._bottomT = setTimeout(() => {
-      const log = this.renderRoot?.querySelector(".log");
-      if (!log || !this._stick) return;
-      log.lastElementChild?.scrollIntoView({ block: "end" });
-      log.scrollTop = log.scrollHeight;
-      this._unscroll();
-    }, 250);
+      // Message heights are real, so a single local scroll is sufficient.
+      // Never scrollIntoView: it also moves the page and HA's outer scrollers.
+      if (log) log.scrollTop = log.scrollHeight;
+    });
   }
 
   _composerEl() {
@@ -2300,7 +2333,7 @@ class HubbubbRingCard extends LitElement {
     const item = { id: this._sel, text, at: Date.now(), state: "held" };
     this._queue = [...(this._queue || []), item];
     this._saveQueue();
-    this._stick = true;
+    this._resumeLogFollow();
     // Busy means the terminal would swallow it into Claude's own queue, where
     // it can no longer be edited or taken back. Hold it here instead and let
     // _drainQueue send it the moment the turn ends; "Send now" overrides.
@@ -3125,7 +3158,7 @@ class HubbubbRingCard extends LitElement {
     this._setupCanvas();
     if (changed.has("_sel") || changed.has("_build")) this._syncUrl();
     if (changed.has("_sel") && this._sel) this._restoreDraft();
-    if (changed.has("_msgs") && this._stick) this._toBottom();
+    if (["_msgs", "_activity", "_screen", "_ask", "_queue"].some(key => changed.has(key)) && this._stick) this._toBottom();
   }
 
   _setupCanvas() {
@@ -6203,22 +6236,13 @@ class HubbubbRingCard extends LitElement {
         : nothing}
       <div
         class="log"
-        @scroll=${(e) => {
-          const el = e.target;
-          this._stick = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-        }}
-        @wheel=${(e) => {
-          // A wheel or trackpad nudge up is intent before it is 40px of
-          // distance; without this the next settle pulls it straight back.
-          if (e.deltaY < 0) this._stick = false;
-        }}
-        @touchstart=${() => {
-          this._stick = false;
-        }}
-        @touchend=${(e) => {
-          const el = e.currentTarget;
-          this._stick = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-        }}
+        @scroll=${this._logScroll}
+        @pointerdown=${e => { if (e.pointerType === "mouse") this._logWheel(e); }}
+        @keydown=${e => { if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)) this._logWheel(e); }}
+        @wheel=${this._logWheel}
+        @touchstart=${this._logTouchStart}
+        @touchend=${this._logTouchEnd}
+        @touchcancel=${this._logTouchEnd}
       >
         ${this._msgs == null
           ? html`<div class="dim pad">Loading transcript…</div>`
@@ -7799,16 +7823,9 @@ class HubbubbRingCard extends LitElement {
       line-height: 1.5;
       white-space: pre-wrap;
       overflow-wrap: break-word;
-      /* A full transcript is ~110 messages and, because every line of tool
-         output is its own div, ~840 elements of pre-wrap text. Laying all of
-         that out is what made opening build mode stall and what every forced
-         reflow while typing had to repeat — the composer's auto-grow measures
-         itself on each keystroke, and that measurement is only cheap if the
-         log above it is not in the same layout pass. Off-screen messages now
-         skip layout and paint entirely, and the auto keyword keeps each
-         one's real height once rendered, so scrolling does not jump. */
-      content-visibility: auto;
-      contain-intrinsic-size: auto 44px;
+      /* Estimated off-screen heights changed during mobile swipes, shifting
+         the transcript under the finger. Keep real layout heights throughout. */
+      flex-shrink: 0;
     }
     .msg.assistant {
       align-self: flex-start;
