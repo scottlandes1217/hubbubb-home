@@ -7162,12 +7162,14 @@ class HubbubbRingCard extends LitElement {
       .sheet.todos {
         position: fixed;
         z-index: 20;
-        left: env(safe-area-inset-left, 0px);
-        right: env(safe-area-inset-right, 0px);
+        /* Edge to edge; the side insets (the notch, in landscape) are
+           padding, so the background fills them and text clears them. */
+        left: 0;
+        right: 0;
         top: calc(var(--jr-vvt, 0px) + env(safe-area-inset-top, 0px));
         bottom: auto;
         height: calc(var(--jr-vvh, 100dvh) - env(safe-area-inset-top, 0px));
-        padding: 0;
+        padding: 0 env(safe-area-inset-right, 0px) 0 env(safe-area-inset-left, 0px);
         background: #061014;
       }
       .sheet.review .sheet-box,
@@ -8686,9 +8688,9 @@ class HubbubbRingCard extends LitElement {
            screen is straight. That is why the corners stopped being clipped:
            the panel no longer reaches into the curve, rather than trying to
            guess a radius that matches it. In portrait the left/right insets
-           are 0, so the sides sit truly flush with no gap. */
-        left: env(safe-area-inset-left, 0px);
-        right: env(safe-area-inset-right, 0px);
+           are 0, so this is plain 14px there. */
+        left: 0;
+        right: 0;
         top: calc(var(--jr-vvt, 0px) + env(safe-area-inset-top, 0px));
         /* Runs all the way to the bottom of the visible viewport: with the
            keyboard up that is the keyboard's top edge, so the composer sits
@@ -8705,7 +8707,11 @@ class HubbubbRingCard extends LitElement {
         /* Tight at the bottom: the composer is the last thing in the panel and
            a full 12px under it read as dead space. The sides and top keep
            their breathing room. */
-        padding: 12px 14px 10px;
+        /* The side insets are padding, not position: in landscape they are
+           ~50px each for the notch, and as position they left the dashboard
+           showing down both sides. */
+        padding: 12px max(14px, env(safe-area-inset-right, 0px)) 10px
+          max(14px, env(safe-area-inset-left, 0px));
       }
       /* The dedicated build page: no overlay tricks — the panel is a normal
          element sized to exactly fill the screen below HA's header, so the
@@ -8730,9 +8736,9 @@ class HubbubbRingCard extends LitElement {
            screen is straight. That is why the corners stopped being clipped:
            the panel no longer reaches into the curve, rather than trying to
            guess a radius that matches it. In portrait the left/right insets
-           are 0, so the sides sit truly flush with no gap. */
-        left: env(safe-area-inset-left, 0px);
-        right: env(safe-area-inset-right, 0px);
+           are 0, so this is plain 14px there. */
+        left: 0;
+        right: 0;
         top: calc(var(--jr-vvt, 0px) + env(safe-area-inset-top, 0px));
         /* Runs all the way to the bottom of the visible viewport: with the
            keyboard up that is the keyboard's top edge, so the composer sits
@@ -8747,7 +8753,11 @@ class HubbubbRingCard extends LitElement {
         /* Tight at the bottom: the composer is the last thing in the panel and
            a full 12px under it read as dead space. The sides and top keep
            their breathing room. */
-        padding: 12px 14px 10px;
+        /* The side insets are padding, not position: in landscape they are
+           ~50px each for the notch, and as position they left the dashboard
+           showing down both sides. */
+        padding: 12px max(14px, env(safe-area-inset-right, 0px)) 10px
+          max(14px, env(safe-area-inset-left, 0px));
       }
       .composer textarea {
         font-size: 16px; /* anything smaller makes iOS zoom the page */
