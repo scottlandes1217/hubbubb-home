@@ -656,7 +656,7 @@ void main() {
       <div class="hello-ring"><span></span><span></span><span></span></div>
       <div class="hello-name">J.A.R.V.I.S.</div>
       <div class="hello-sub">
-        ${o?"Local":`Cloud \xB7 ${a}`}${t!=null&&t.project?n` · ${t.project}`:R}
+        ${o?"Local":`Cloud \xB7 ${a}`}
       </div>
       <div class="hello-ready">Ready when you are</div>
     </div>`}_useSuggestion(){let t=this._composerEl();!t||!this._suggestion||(t.value=this._suggestion,this._autoGrow(t),this._draftSoon(),t.focus(),t.setSelectionRange(t.value.length,t.value.length))}_renderSession(){let t=(this._sessions||[]).find(o=>o.id===this._sel);return n`

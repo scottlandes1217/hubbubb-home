@@ -5754,7 +5754,7 @@ class HubbubbRingCard extends LitElement {
       <div class="hello-ring"><span></span><span></span><span></span></div>
       <div class="hello-name">J.A.R.V.I.S.</div>
       <div class="hello-sub">
-        ${local ? "Local" : `Cloud · ${model}`}${s?.project ? html` · ${s.project}` : nothing}
+        ${local ? "Local" : `Cloud · ${model}`}
       </div>
       <div class="hello-ready">Ready when you are</div>
     </div>`;
