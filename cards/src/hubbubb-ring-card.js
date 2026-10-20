@@ -6289,12 +6289,15 @@ class HubbubbRingCard extends LitElement {
             : nothing}
           <span class="caret">${this._details ? "▴" : "▾"}</span>
         </button>
-        <button class="hbtn" data-ai="view-mac-screen" title="See the Mac's screen" @click=${() => this._openScreen()}>Screen</button>
+        <button class="hbtn session-tool" data-ai="view-mac-screen" title="Mac screen" aria-label="Mac screen"
+          @click=${() => this._openScreen()}><ha-icon icon="mdi:monitor"></ha-icon></button>
         <button
-          class="hbtn danger ${this._confirmKill === this._sel ? "armed" : ""}"
+          class="hbtn session-tool danger ${this._confirmKill === this._sel ? "armed" : ""}"
           data-ai="end-session"
+          title=${this._confirmKill === this._sel ? "Confirm end session" : "End session"}
+          aria-label=${this._confirmKill === this._sel ? "Confirm end session" : "End session"}
           @click=${() => this._killSession(this._sel)}
-        >${this._confirmKill === this._sel ? "Confirm?" : "End"}</button>
+        ><ha-icon icon=${this._confirmKill === this._sel ? "mdi:check" : "mdi:close"}></ha-icon></button>
       </div>
       ${this._details
         ? html`<div class="details">
@@ -7600,11 +7603,12 @@ class HubbubbRingCard extends LitElement {
     }
     .screen-head { flex-wrap: wrap; }
     .screen-head .hbtn { flex-shrink: 0; }
-    .screen-head .screen-tool {
+    .screen-head .screen-tool, .phead .session-tool {
       display: inline-flex; align-items: center; justify-content: center;
-      width: 40px; height: 40px; padding: 0; letter-spacing: normal;
+      width: 40px; height: 40px; padding: 0; letter-spacing: normal; flex-shrink: 0;
       --mdc-icon-size: 21px;
     }
+    .phead .session-tool.danger { color: #ff5a64; }
     .screen-tool[aria-pressed="true"] { background: rgba(var(--jr-glow), .2); }
     .phead {
       display: flex;
