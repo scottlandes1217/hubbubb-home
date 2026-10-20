@@ -1779,6 +1779,10 @@ class HubbubbRingCard extends LitElement {
   _toBottom() {
     let n = 0;
     const go = () => {
+      // The settle runs for several frames and a timer after it. Scrolling up
+      // while output streams in clears _stick, and every pass must honour
+      // that, or the reader is yanked back to the bottom mid-scroll.
+      if (!this._stick) return;
       const log = this.renderRoot?.querySelector(".log");
       if (log) {
         // scrollHeight is only an estimate while off-screen messages are still
@@ -1803,7 +1807,7 @@ class HubbubbRingCard extends LitElement {
     clearTimeout(this._bottomT);
     this._bottomT = setTimeout(() => {
       const log = this.renderRoot?.querySelector(".log");
-      if (!log) return;
+      if (!log || !this._stick) return;
       log.lastElementChild?.scrollIntoView({ block: "end" });
       log.scrollTop = log.scrollHeight;
       this._unscroll();
@@ -5813,6 +5817,18 @@ class HubbubbRingCard extends LitElement {
         class="log"
         @scroll=${(e) => {
           const el = e.target;
+          this._stick = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+        }}
+        @wheel=${(e) => {
+          // A wheel or trackpad nudge up is intent before it is 40px of
+          // distance; without this the next settle pulls it straight back.
+          if (e.deltaY < 0) this._stick = false;
+        }}
+        @touchstart=${() => {
+          this._stick = false;
+        }}
+        @touchend=${(e) => {
+          const el = e.currentTarget;
           this._stick = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
         }}
       >
