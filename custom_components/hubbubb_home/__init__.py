@@ -149,6 +149,8 @@ AGENT_SERVICES = {
     "agent_models": ("models", "GET"),
     "agent_file": ("file", "GET"),
     "agent_screen": ("screen", "GET"),
+    "agent_screen_click": ("screen/click", "POST"),
+    "agent_screen_input": ("screen/input", "POST"),
     "agent_fleet": ("fleet", "GET"),
     "agent_fleet_act": ("fleet", "POST"),
 }

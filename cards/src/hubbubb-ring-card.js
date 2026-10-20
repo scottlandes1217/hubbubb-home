@@ -23,6 +23,7 @@ import { createMembrane, membranePoint, SHELL_RADII } from "./im3-membrane.js";
 import { nowNext, parseEvent } from "./hubbubb-calendar.js";
 import { groupProposals } from "./review-groups.js";
 import { promptKey, splitPaths } from "./paths.js";
+import { screenPoint, screenFieldAt, screenKeyboardPose, ScreenGesture } from "./screen-control.js";
 import {
   clearCore,
   coalesce,
@@ -464,6 +465,13 @@ class HubbubbRingCard extends LitElement {
     _details: { state: true },
     _view: { state: true },
     _zoom: { state: true },
+    _screenPose: { state: true },
+    _screenKeyboard: { state: true },
+    _screenPan: { state: true },
+    _screenCanvas: { state: true },
+    _screenTyping: { state: true },
+    _screenEditor: { state: true },
+    _screenEditorLoading: { state: true },
     _sideW: { state: true },
     _files: { state: true },
     _dragging: { state: true },
@@ -1671,20 +1679,365 @@ class HubbubbRingCard extends LitElement {
      Claude or Codex is doing in a browser, from a phone. Opening a file or
      closing the viewer ends the loop; a second tap starts a fresh one. */
   async _openScreen() {
+    this._screenKeyboardObserver?.disconnect();
+    this._screenCanvas = null;
+    this._screenAnchor = null;
+    this._screenRun?.wake?.();
     const run = (this._screenRun = {});
     const live = () => this._screenRun === run && this._view?.screen && this.isConnected;
     this._zoom = 1;
+    this._screenGesture = new ScreenGesture();
+    this._screenPose = this._screenGesture.pose;
+    this._screenLastTap = null;
+    this._screenPan = false;
+    this._screenKeyboard = false;
+    this._screenTyping = false;
+    this._screenEditor = null;
+    this._screenEditorLoading = false;
     this._view = { path: "Mac screen", screen: true, loading: true };
     while (live()) {
+      run.urgent = false;
       let next;
       try {
         next = { ...(await this._api("agent_screen", {})), path: "Mac screen", screen: true };
+        // Decode before swapping frames: no flash or temporarily zero-sized
+        // click target while the next JPEG arrives.
+        if (next.image) {
+          const frame = new Image();
+          frame.src = next.image;
+          if (frame.decode) await frame.decode();
+        }
       } catch (e) {
-        next = { path: "Mac screen", screen: true, error: this._errText(e) };
+        next = this._view?.image ? this._view
+          : { path: "Mac screen", screen: true, error: this._errText(e) };
       }
       if (!live()) break;
       this._view = next;
-      await new Promise((r) => setTimeout(r, 1500));
+      // Serial requests avoid piling up on a slow connection. A click wakes
+      // the loop immediately, including when a capture is already in flight.
+      if (!run.urgent) await new Promise((resolve) => {
+        const timer = setTimeout(() => { run.wake = null; resolve(); }, 250);
+        run.wake = () => { clearTimeout(timer); run.wake = null; resolve(); };
+      });
+    }
+  }
+
+  _screenPointerDown(e) {
+    if (e.button !== 0 || !this._view?.screen) return;
+    // Suppress compatibility mouse focus: its later mousedown would blur the
+    // phone input that we focus synchronously when this gesture finishes.
+    e.preventDefault();
+    const box = e.currentTarget, r = box.getBoundingClientRect();
+    const gesture = this._screenGesture || (this._screenGesture = new ScreenGesture());
+    if (!gesture.points.size) gesture.hadPinch = false;
+    gesture.down(e.pointerId, e.clientX - r.left, e.clientY - r.top, r.width, r.height,
+      this._screenCanvas?.width || r.width, this._screenCanvas?.height || r.height);
+    this._screenPose = gesture.pose;
+    box.setPointerCapture(e.pointerId);
+  }
+
+  _screenPointerMove(e) {
+    const gesture = this._screenGesture;
+    if (!gesture?.points.has(e.pointerId)) return;
+    const r = e.currentTarget.getBoundingClientRect();
+    const previous = gesture.points.get(e.pointerId);
+    const pose = { ...gesture.pose };
+    const single = gesture.points.size === 1 && !gesture.hadPinch;
+    if (gesture.points.size > 1) gesture.hadPinch = true;
+    gesture.move(e.pointerId, e.clientX - r.left, e.clientY - r.top);
+    if (!this._screenPan && single) {
+      gesture.pose = pose;
+      if (gesture.blocked) this._queueScreenScroll(e.currentTarget, e.clientX, e.clientY,
+        e.clientX - r.left - previous.x, e.clientY - r.top - previous.y);
+    }
+    this._screenPose = gesture.pose;
+  }
+
+  _screenPointerUp(e) {
+    const gesture = this._screenGesture;
+    if (!gesture?.points.has(e.pointerId)) return;
+    e.preventDefault();
+    const cancelled = e.type !== "pointerup";
+    if (!cancelled) this._screenPointerMove(e);
+    if (!gesture.up(e.pointerId, cancelled)) return;
+    const img = e.currentTarget.querySelector(".screen-image");
+    if (!img) return;
+    const last = this._screenLastTap, now = performance.now();
+    const twice = last && now - last.at < 400 &&
+      Math.hypot(e.clientX - last.x, e.clientY - last.y) < 24;
+    this._screenLastTap = twice ? null : { at: now, x: e.clientX, y: e.clientY };
+    this._screenClick({ currentTarget: img, clientX: e.clientX, clientY: e.clientY,
+      detail: twice ? 2 : 1 });
+  }
+
+  _queueScreenScroll(box, x, y, dx, dy) {
+    const img = box.querySelector(".screen-image");
+    if (!img) return;
+    const point = screenPoint(img.getBoundingClientRect(), img.naturalWidth, img.naturalHeight, x, y);
+    if (!point || (!dx && !dy)) return;
+    const pending = this._screenScrollPending || { ...point, dx: 0, dy: 0 };
+    pending.dx += dx * 2; pending.dy += dy * 2;
+    this._screenScrollPending = pending;
+    if (this._screenScrollTimer || this._screenScrollBusy) return;
+    this._screenScrollTimer = setTimeout(() => this._flushScreenScroll(), 60);
+  }
+
+  async _flushScreenScroll() {
+    this._screenScrollTimer = null;
+    const scroll = this._screenScrollPending;
+    this._screenScrollPending = null;
+    if (!scroll || !this._view?.screen) return;
+    scroll.dx = Math.max(-2000, Math.min(2000, Math.round(scroll.dx)));
+    scroll.dy = Math.max(-2000, Math.min(2000, Math.round(scroll.dy)));
+    this._screenScrollBusy = true;
+    try {
+      await this._screenCommand("agent_screen_input", { scroll });
+      if (this._screenRun) { this._screenRun.urgent = true; this._screenRun.wake?.(); }
+    } catch (err) { if (this._view?.screen) this._toast(this._errText(err)); }
+    finally {
+      this._screenScrollBusy = false;
+      if (this._screenScrollPending) this._screenScrollTimer = setTimeout(() => this._flushScreenScroll(), 60);
+    }
+  }
+
+  _screenWheel(e) {
+    e.preventDefault();
+    const unit = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? e.currentTarget.clientHeight : 1;
+    this._queueScreenScroll(e.currentTarget, e.clientX, e.clientY, -e.deltaX * unit / 2, -e.deltaY * unit / 2);
+  }
+
+  async _closeViewer() {
+    if (this._view?.screen) {
+      this._hideScreenKeyboard();
+      clearTimeout(this._screenScrollTimer);
+      this._screenScrollTimer = null;
+      this._screenScrollPending = null;
+      this._screenEditorRequest = null;
+      this._screenRun?.wake?.();
+      this._screenRun = null;
+    }
+    this._view = null;
+    await this.updateComplete;
+    // Removing the focused phone editor can leave WebKit's viewport offset
+    // behind without a resize event. Re-pin through the keyboard animation.
+    this._vvH = null;
+    this._vvT = null;
+    this._vvSync();
+    this._settlePin();
+  }
+
+  async _screenClick(e) {
+    const img = e.currentTarget;
+    const point = screenPoint(img.getBoundingClientRect(), img.naturalWidth,
+      img.naturalHeight, e.clientX, e.clientY);
+    if (!point || !this._view?.screen) return;
+    const run = this._screenRun;
+    const box = img.parentElement, rect = box.getBoundingClientRect();
+    const marker = document.createElement("span");
+    marker.className = "screen-tap";
+    marker.style.left = `${e.clientX - rect.left}px`;
+    marker.style.top = `${e.clientY - rect.top}px`;
+    marker.setAttribute("aria-hidden", "true");
+    box.append(marker);
+    this._screenAnchor = point;
+    const editorRequest = (this._screenEditorRequest = {});
+    this._screenEditor = null;
+    this._screenEditorLoading = true;
+    const entry = this.renderRoot.querySelector(".screen-entry");
+    if (entry) entry.value = "";
+    // This focus must happen synchronously in pointerup, before the network
+    // request. iOS will not reliably open a keyboard from its later reply.
+    if (screenFieldAt(this._view.fields, point)) this._showScreenKeyboard();
+    try {
+      const result = await this._screenCommand("agent_screen_click", { ...point, count: e.detail === 2 ? 2 : 1 });
+      marker.classList.add("accepted");
+      if (run && this._screenRun === run) {
+        run.urgent = true;
+        run.wake?.();
+        if (result.editable && this._view?.screen && !this._screenKeyboard) this._showScreenKeyboard();
+        if (this._screenEditorRequest === editorRequest) {
+          await this._loadScreenEditor(result);
+          if (!result.editable && this._screenKeyboard) this._hideScreenKeyboard();
+        }
+      }
+    } catch (err) {
+      marker.classList.add("failed");
+      this._toast(this._errText(err));
+    } finally {
+      if (this._screenEditorRequest === editorRequest) this._screenEditorLoading = false;
+      setTimeout(() => marker.remove(), 650);
+    }
+  }
+
+  async _loadScreenEditor(result) {
+    const editor = (this._screenEditor = result.editor || null);
+    this._screenEditorLoading = false;
+    await this.updateComplete;
+    const entry = this.renderRoot.querySelector(".screen-entry");
+    if (!entry) return;
+    if (this._screenEditor !== editor) return;
+    entry.value = this._screenEditor?.value || "";
+    if (typeof this._screenEditor?.value === "string") {
+      entry.setSelectionRange(this._screenEditor.start ?? entry.value.length,
+        this._screenEditor.end ?? entry.value.length);
+    }
+  }
+
+  async _openScreenKeyboard() {
+    this._showScreenKeyboard();
+    const request = (this._screenEditorRequest = {});
+    this._screenEditorLoading = true;
+    try {
+      const result = await this._screenCommand("agent_screen_input", { read: true });
+      if (this._screenEditorRequest === request) await this._loadScreenEditor(result);
+    } catch (err) {
+      this._toast(this._errText(err));
+    } finally {
+      if (this._screenEditorRequest === request) this._screenEditorLoading = false;
+    }
+  }
+
+  _showScreenKeyboard() {
+    const box = this.renderRoot.querySelector(".screen-view .vbody");
+    const img = box?.querySelector(".screen-image");
+    const form = this.renderRoot.querySelector(".screen-type");
+    if (!box || !img || !form) return;
+    if (!this._screenKeyboard) {
+      this._screenBeforeKeyboardPose = { ...(this._screenPose || { x: 0, y: 0, z: 1 }) };
+      this._screenCanvas = { width: box.clientWidth, height: box.clientHeight };
+      // Freeze the image before focus can change the visual viewport.
+      img.style.width = `${box.clientWidth}px`;
+      img.style.height = `${box.clientHeight}px`;
+      img.style.maxWidth = "none";
+    }
+    this._screenKeyboard = true;
+    form.hidden = false;
+    form.querySelector(".screen-entry")?.focus({ preventScroll: true });
+    this._screenKeyboardObserver?.disconnect();
+    this._screenKeyboardObserver = new ResizeObserver(() => {
+      if (!this._view?.screen || !this._screenKeyboard || !box.isConnected) {
+        this._screenKeyboardObserver?.disconnect();
+        return;
+      }
+      this._positionScreenKeyboard();
+    });
+    this._screenKeyboardObserver.observe(box);
+    this.updateComplete.then(() => this._positionScreenKeyboard());
+  }
+
+  _positionScreenKeyboard() {
+    if (!this._screenKeyboard || !this._screenCanvas) return;
+    const box = this.renderRoot.querySelector(".screen-view .vbody");
+    const img = box?.querySelector(".screen-image");
+    if (!img?.naturalWidth || !box.clientHeight) return;
+    const pose = screenKeyboardPose(this._screenCanvas,
+      { width: box.clientWidth, height: box.clientHeight },
+      { width: img.naturalWidth, height: img.naturalHeight },
+      this._screenAnchor || { x: .5, y: .5 }, this._screenPose?.z || 1);
+    this._screenPose = pose;
+    if (this._screenGesture) {
+      this._screenGesture.pose = pose;
+      this._screenGesture.rebase();
+    }
+  }
+
+  _hideScreenKeyboard() {
+    this._screenKeyboardObserver?.disconnect();
+    this.renderRoot.querySelector(".screen-entry")?.blur();
+    this._screenKeyboard = false;
+    this._screenCanvas = null;
+    this._screenPose = this._screenBeforeKeyboardPose || { x: 0, y: 0, z: 1 };
+    if (this._screenGesture) this._screenGesture.pose = this._screenPose;
+  }
+
+  _screenCommand(service, data) {
+    const run = this._screenRun;
+    // Mouse focus and keyboard events must reach the Mac in the same order
+    // as the phone gestures, including when the network is slow.
+    const request = (this._screenCommandTail || Promise.resolve()).then(async () => {
+      if (this._screenRun !== run || !this._view?.screen) throw new Error("Screen view closed.");
+      if (service === "agent_screen_input" && !data.scroll && run.focusFailed) {
+        throw new Error("Tap the Mac input again before typing.");
+      }
+      try {
+        const result = await this._api(service, data);
+        if (service === "agent_screen_click") run.focusFailed = false;
+        return result;
+      } catch (err) {
+        if (service === "agent_screen_click") run.focusFailed = true;
+        throw err;
+      }
+    });
+    this._screenCommandTail = request.catch(() => {});
+    return request;
+  }
+
+  _screenKeyDown(e) {
+    if (this._screenEditorLoading) {
+      if (e.key === "Backspace" || e.key === "Enter") e.preventDefault();
+      return;
+    }
+    if (typeof this._screenEditor?.value === "string") return;
+    if (e.key !== "Backspace" || e.isComposing || e.ctrlKey || e.metaKey || e.altKey ||
+        e.currentTarget.value || e.defaultPrevented) return;
+    e.preventDefault();
+    this._screenSend("backspace");
+  }
+
+  _screenBeforeInput(e) {
+    if (this._screenEditorLoading) { e.preventDefault(); return; }
+    if (typeof this._screenEditor?.value === "string") return;
+    // Mobile keyboards may deliver editing intentions without a keydown.
+    // Draft text is edited locally; deletion from an empty draft edits the Mac.
+    if (e.inputType !== "deleteContentBackward" || e.isComposing ||
+        e.currentTarget.value || e.defaultPrevented) return;
+    e.preventDefault();
+    this._screenSend("backspace");
+  }
+
+  async _screenSend(key = null) {
+    if (this._screenEditorLoading || (!key && this._screenTyping) || !this._view?.screen) return;
+    const input = this.renderRoot.querySelector(".screen-entry");
+    const text = input?.value || "";
+    const editor = this._screenEditor;
+    const synced = typeof editor?.value === "string";
+    if (key === "backspace" && synced && input) {
+      const start = input.selectionStart, end = input.selectionEnd;
+      const previous = Array.from(text.slice(0, start)).pop()?.length || 0;
+      input.setRangeText("", start === end ? Math.max(0, start - previous) : start, end, "end");
+      return;
+    }
+    if (!key && !text && !synced) return;
+    const run = this._screenRun;
+    run.inputPending = (run.inputPending || 0) + 1;
+    this._screenTyping = true;
+    // Once submitted, deletion belongs to the Mac text, even while Send is
+    // in flight. Keep newly composed text separate from that submission.
+    if (!key && input && !synced) input.value = "";
+    try {
+      if (synced && (!key || key === "enter")) {
+        const result = await this._screenCommand("agent_screen_input", {
+          text, original: editor.value, target: editor.target,
+          start: input.selectionStart, end: input.selectionEnd,
+        });
+        if (this._screenEditor === editor) {
+          this._screenEditor = result.editor || { ...editor, value: text };
+          if (input.value === text && typeof result.editor?.value === "string") input.value = result.editor.value;
+        }
+        if (key === "enter") await this._screenCommand("agent_screen_input", { key });
+      } else {
+        await this._screenCommand("agent_screen_input", key ? { key } : { text });
+      }
+      if (run && this._screenRun === run) {
+        run.urgent = true;
+        run.wake?.();
+      }
+    } catch (err) {
+      if (!key && !synced && input?.isConnected) input.value = text + input.value;
+      if (this._screenRun === run && this._view?.screen) this._toast(this._errText(err));
+    } finally {
+      run.inputPending--;
+      if (this._screenRun === run) this._screenTyping = run.inputPending > 0;
     }
   }
 
@@ -1722,16 +2075,28 @@ class HubbubbRingCard extends LitElement {
     return html`
       <div class="phead">
         <span class="ptitle" title=${v.path}>${name}${v.line ? `:${v.line}` : ""}</span>
-        <button class="hbtn" data-ai="close-file" @click=${() => (this._view = null)}>✕</button>
+        ${v.screen ? html`<button class="hbtn" data-ai="screen-keyboard"
+          @click=${() => this._openScreenKeyboard()}>Keyboard</button>
+          <button class="hbtn" @click=${() => { this._screenPan = !this._screenPan; }}>${this._screenPan ? "Drag: Pan" : "Drag: Scroll"}</button>` : nothing}
+        <button class="hbtn" data-ai="close-file" @click=${() => this._closeViewer()}>✕</button>
       </div>
-      <div class="vpath">${v.path}</div>
-      <div class="vbody">
+      <div class="vpath">${v.screen ? "Tap to click · Pinch to zoom · Switch Drag to scroll or pan" : v.path}</div>
+      <div class="vbody"
+        @wheel=${v.screen ? this._screenWheel : null}
+        @pointerdown=${v.screen ? this._screenPointerDown : null}
+        @pointermove=${v.screen ? this._screenPointerMove : null}
+        @pointerup=${v.screen ? this._screenPointerUp : null}
+        @pointercancel=${v.screen ? this._screenPointerUp : null}
+        @lostpointercapture=${v.screen ? this._screenPointerUp : null}>
         ${v.loading
           ? html`<div class="dim pad">Loading…</div>`
           : v.error
             ? html`<div class="dim pad">${v.error}</div>`
             : v.image
-              ? html`<img
+              ? v.screen ? html`<img class="vimg screen-image" src=${v.image}
+                  alt="Mac screen — tap to click" draggable="false"
+                  style=${`${this._screenCanvas ? `width:${this._screenCanvas.width}px;height:${this._screenCanvas.height}px;max-width:none;` : ""}transform:translate(${this._screenPose?.x || 0}px,${this._screenPose?.y || 0}px) scale(${this._screenPose?.z || 1})`}
+                />` : html`<img
                   class="vimg"
                   src=${v.image}
                   alt=${name}
@@ -1757,6 +2122,30 @@ class HubbubbRingCard extends LitElement {
                   )}</pre>`}
         ${v.truncated ? html`<div class="dim pad">Showing the first 512 KB.</div>` : nothing}
       </div>
+      ${v.screen ? html`
+        <form class="screen-type" ?hidden=${!this._screenKeyboard}
+          @submit=${(e) => { e.preventDefault(); this._screenSend(); }}>
+          ${this._screenEditor?.secure ? html`<input class="screen-entry" type="password" maxlength="4096"
+            placeholder="Password hidden · type to send" aria-label="New password text"
+            autocomplete="off" @keydown=${this._screenKeyDown} @beforeinput=${this._screenBeforeInput} />`
+            : html`<textarea class="screen-entry" rows="1" maxlength="16384"
+              placeholder=${this._screenEditorLoading ? "Reading Mac field…" :
+                typeof this._screenEditor?.value === "string" ? "Edit Mac field · Apply to save" : "Text unavailable · type to send"}
+              aria-label="Edit text on the Mac" autocomplete="off" autocapitalize="off"
+              autocorrect="off" spellcheck="false"
+              @keydown=${this._screenKeyDown} @beforeinput=${this._screenBeforeInput}></textarea>`}
+          <button class="hbtn" type="submit" ?disabled=${this._screenTyping || this._screenEditorLoading}
+            @pointerdown=${(e) => e.preventDefault()}>${this._screenEditorLoading ? "Loading…" :
+              this._screenTyping ? "Saving…" : typeof this._screenEditor?.value === "string" ? "Apply" : "Send"}</button>
+          <button class="hbtn" type="button" title="Press Enter on the Mac"
+            @pointerdown=${(e) => e.preventDefault()}
+            @click=${() => this._screenSend("enter")}>↵</button>
+          <button class="hbtn" type="button" title="Press Backspace on the Mac"
+            @pointerdown=${(e) => e.preventDefault()}
+            @click=${() => this._screenSend("backspace")}>⌫</button>
+          <button class="hbtn" type="button" title="Hide keyboard"
+            @click=${() => this._hideScreenKeyboard()}>✕</button>
+        </form>` : nothing}
     `;
   }
 
@@ -6076,7 +6465,7 @@ class HubbubbRingCard extends LitElement {
                 </svg>
               </button>`}
           ${build && !this._config.build_dashboard
-            ? html`<div class="panel ${this._sel ? "open" : ""} ${this._view ? "view" : ""}">
+            ? html`<div class="panel ${this._sel ? "open" : ""} ${this._view ? "view" : ""} ${this._view?.screen ? "screen-view" : ""}">
                 <div class="side" style=${this._sideW ? `flex-basis:${this._sideW}px` : ""}>${this._renderList()}</div>
                 <div class="grip" title="Drag to resize" @pointerdown=${this._gripDown}></div>
                 <div class="main">
@@ -6940,6 +7329,68 @@ class HubbubbRingCard extends LitElement {
       height: auto;
       cursor: zoom-in;
       touch-action: pan-x pan-y;
+    }
+    .screen-view .vbody {
+      position: relative; overflow: hidden; background: #000; touch-action: none;
+    }
+    .screen-image {
+      width: 100%; height: 100%; object-fit: contain;
+      cursor: crosshair; touch-action: none; transform-origin: 0 0;
+      user-select: none; -webkit-user-select: none;
+    }
+    .screen-tap {
+      position: absolute; pointer-events: none; z-index: 2;
+      width: 28px; height: 28px; border: 2px solid #fff; border-radius: 50%;
+      background: rgba(80, 200, 255, .22);
+      box-shadow: 0 0 12px rgba(80, 200, 255, .8);
+      animation: screen-tap-wait .65s ease-in-out infinite alternate;
+    }
+    .screen-tap.accepted { border-color: #68ffc0; animation: screen-tap-done .65s ease-out forwards; }
+    .screen-tap.failed { border-color: #ff7373; animation: screen-tap-done .65s ease-out forwards; }
+    .screen-type {
+      display: flex; flex: none; align-items: center; gap: 5px;
+      padding: 6px; background: #07131a; z-index: 3;
+    }
+    .screen-type[hidden] { display: none; }
+    .screen-entry {
+      flex: 1; min-width: 0; padding: 7px; border: 1px solid #456;
+      border-radius: 6px; background: #10212c; color: white; font-size: 16px;
+      height: 36px; box-sizing: border-box; resize: none; font-family: inherit;
+    }
+    .screen-type .hbtn { flex: none; }
+    @keyframes screen-tap-wait {
+      from { transform: translate(-50%, -50%) scale(.8); opacity: .7; }
+      to { transform: translate(-50%, -50%) scale(1.15); opacity: 1; }
+    }
+    @keyframes screen-tap-done {
+      from { transform: translate(-50%, -50%) scale(1); opacity: 1; }
+      to { transform: translate(-50%, -50%) scale(1.6); opacity: 0; }
+    }
+    @media (orientation: landscape) and (pointer: coarse) and (max-height: 600px) {
+      .wrap.build .panel.screen-view.screen-view {
+        position: fixed;
+        inset: var(--jr-vvt, 0px) 0 auto;
+        width: auto;
+        height: var(--jr-vvh, 100dvh);
+        margin: 0;
+        padding: env(safe-area-inset-top, 0px) env(safe-area-inset-right, 0px)
+                 env(safe-area-inset-bottom, 0px) env(safe-area-inset-left, 0px);
+        border: none; border-radius: 0;
+        z-index: 30; background: #000;
+      }
+      .panel.screen-view > .side,
+      .panel.screen-view > .main,
+      .panel.screen-view > .grip { display: none; }
+      .panel.screen-view > .viewer {
+        flex: 1; padding: 0; margin: 0; border: none;
+      }
+      .screen-view .vpath { display: none; }
+      .screen-view .viewer > .phead {
+        position: absolute; top: env(safe-area-inset-top, 0px);
+        right: env(safe-area-inset-right, 0px); z-index: 1;
+        padding: 4px; margin: 0; background: rgba(0, 0, 0, .65);
+      }
+      .screen-view .viewer > .phead .ptitle { display: none; }
     }
     .vent {
       display: block;

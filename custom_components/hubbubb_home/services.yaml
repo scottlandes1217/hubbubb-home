@@ -145,6 +145,15 @@ agent_file:
 agent_screen:
   fields:
     display: { selector: { text: } }
+agent_screen_input:
+  fields:
+    text: { selector: { text: } }
+    key: { selector: { text: } }
+agent_screen_click:
+  fields:
+    x: { required: true, selector: { number: { min: 0, max: 1, step: 0.001 } } }
+    y: { required: true, selector: { number: { min: 0, max: 1, step: 0.001 } } }
+    count: { selector: { number: { min: 1, max: 2, step: 1 } } }
 run_review:
   name: Run the nightly review
   description: >-
