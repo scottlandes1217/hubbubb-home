@@ -696,89 +696,101 @@ def test_approval_tap_deny_timeout_and_cache():
 
 
 def test_hubbubb_tool_gate_matrix():
+    """A phone tap only for: shared puck, several linked accounts, unsure who."""
     import asyncio
     import time as _time
 
     from hubbubb_home.approvals import Approvals
     from hubbubb_home.llm_api import AskHubbubbTool
 
-    class _Hubbubb:
-        async def async_ask(self, request, **kwargs):
-            return "42"
+    class _Client:
+        def __init__(self, who):
+            self.who = who
 
-    def call(runtime):
+        async def async_ask(self, request, **kwargs):
+            return self.who
+
+    class _Auth:
+        async def async_get_user(self, user_id):
+            return {
+                "u-scott": types.SimpleNamespace(
+                    name="Scott Landes", system_generated=False),
+                "u-system": types.SimpleNamespace(
+                    name="Supervisor", system_generated=True),
+            }.get(user_id)
+
+    hass = types.SimpleNamespace(auth=_Auth())
+
+    def call(runtime, device_id=None, user_id=None):
+        ctx = types.SimpleNamespace(
+            device_id=device_id,
+            context=types.SimpleNamespace(user_id=user_id),
+        )
         return asyncio.run(
             AskHubbubbTool(runtime).async_call(
-                None,
-                types.SimpleNamespace(tool_args={"request": "what's new?"}),
-                None,
+                hass, types.SimpleNamespace(tool_args={"request": "inbox?"}), ctx
             )
         )
 
-    book = SpeakerBook(None, "", "")
-    runtime = types.SimpleNamespace(
-        hubbubb=_Hubbubb(),
-        hubbubb_people={},
-        speakers=book,
-        approvals=Approvals(_TapHass(answer=True), "Jarvis",
-                            "Scott: notify.mobile_app_scott"),
-    )
+    def house(people, answer=True):
+        taps = _TapHass(answer=answer)
+        return taps, types.SimpleNamespace(
+            hubbubb=_Client("shared"),
+            hubbubb_people={p: _Client(p) for p in people},
+            speakers=SpeakerBook(None, "", "puck-bedroom: Scott"),
+            approvals=Approvals(taps, "Jarvis",
+                                "Scott: notify.mobile_app_scott\n"
+                                "Vega: notify.mobile_app_vega"),
+        )
 
-    # Nobody known: refused with ask-who guidance, no notification sent.
-    assert call(runtime)["error"] == "speaker_not_verified"
+    # Phone app, signed in as Scott: his own account, no tap - even with a
+    # stranger's voice event lying around and two accounts linked.
+    taps, rt = house(["scott", "vega"])
+    rt.speakers.record({"person": None, "confidence": 0.1, "ts": _time.time()})
+    assert call(rt, user_id="u-scott") == {"answer": "scott"}
+    assert taps.sent == []
 
-    # With an approver device configured, a 0.7 lean is enough to CHALLENGE.
-    # The tap is the gate: a wrong guess rings the wrong person's phone, shows
-    # them the request, and they decline. Requiring 0.90 first made this tool
-    # unusable - all 8 of Scott's own enrolment samples score under 0.90
-    # against his own profile, so it asked "who is speaking?" every time.
-    book.record({"person": "Scott", "confidence": 0.7, "ts": _time.time()})
-    assert call(runtime) == {"answer": "42"}
+    # A system user is not a person; falls through to the puck rules.
+    assert call(rt, user_id="u-system")["error"] == "speaker_not_verified"
 
-    # 0.92 voice: challenge the device, approved, answered.
-    book.record({"person": "Scott", "confidence": 0.92, "ts": _time.time()})
-    assert call(runtime) == {"answer": "42"}
+    # Bedroom puck mapped to Scott: his room, no tap.
+    taps, rt = house(["scott", "vega"])
+    assert call(rt, device_id="puck-bedroom") == {"answer": "scott"}
+    assert taps.sent == []
 
-    # "This is Scott": challenged too (cache makes it instant here).
-    told = SpeakerBook(None, "", "")
-    told.set_override("Scott")
-    runtime.speakers = told
-    assert call(runtime) == {"answer": "42"}
+    # Shared puck, one linked account: nobody to confuse them with, no tap.
+    taps, rt = house(["scott"])
+    assert call(rt, device_id="puck-kitchen") == {"answer": "scott"}
+    taps, rt = house([])
+    assert call(rt, device_id="puck-kitchen") == {"answer": "shared"}
+    assert taps.sent == []
 
-    # Denied from the device: error, and the tool is told not to retry.
-    denied = types.SimpleNamespace(
-        hubbubb=_Hubbubb(),
-        hubbubb_people={},
-        speakers=told,
-        approvals=Approvals(_TapHass(answer=False), "Jarvis",
-                            "Scott: notify.mobile_app_scott"),
-    )
-    assert "did not approve" in call(denied)["error"]
+    # Shared puck, two accounts, confident voice or "this is Scott": no tap.
+    taps, rt = house(["scott", "vega"])
+    rt.speakers.record({"person": "Scott", "confidence": 0.8, "ts": _time.time()})
+    assert call(rt, device_id="puck-kitchen") == {"answer": "scott"}
+    rt.speakers.set_override("Vega")
+    assert call(rt, device_id="puck-kitchen") == {"answer": "vega"}
+    assert taps.sent == []
 
-    # Blank approvers map: exactly the old behavior, no identity needed.
-    open_runtime = types.SimpleNamespace(
-        hubbubb=_Hubbubb(),
-        hubbubb_people={},
-        speakers=SpeakerBook(None, "", ""),
-        approvals=Approvals(None, "Jarvis", ""),
-    )
-    assert call(open_runtime) == {"answer": "42"}
+    # Shared puck, two accounts, only a lean: ring the leaned-on phone.
+    taps, rt = house(["scott", "vega"])
+    rt.speakers.record({"person": "Scott", "confidence": 0.6, "ts": _time.time()})
+    assert call(rt, device_id="puck-kitchen") == {"answer": "scott"}
+    assert [s for s, _ in taps.sent] == ["notify.mobile_app_scott"]
 
-    # Per-person credentials but NO approver device: nothing catches a wrong
-    # guess, because voice alone decides whose Hubbubb account gets spent. This
-    # is the one case that still demands VERIFY_CONFIDENCE, and lowering the
-    # bar for the tap path above must not have lowered it here.
-    creds = SpeakerBook(None, "", "")
-    creds_runtime = types.SimpleNamespace(
-        hubbubb=_Hubbubb(),
-        hubbubb_people={"scott": _Hubbubb()},
-        speakers=creds,
-        approvals=Approvals(None, "Jarvis", ""),
-    )
-    creds.record({"person": "Scott", "confidence": 0.7, "ts": _time.time()})
-    assert call(creds_runtime)["error"] == "speaker_not_verified"
-    creds.record({"person": "Scott", "confidence": 0.92, "ts": _time.time()})
-    assert call(creds_runtime) == {"answer": "42"}
+    # ...denied: final.
+    taps, rt = house(["scott", "vega"], answer=False)
+    rt.speakers.record({"person": "Scott", "confidence": 0.6, "ts": _time.time()})
+    assert "did not approve" in call(rt, device_id="puck-kitchen")["error"]
+
+    # ...no idea at all, or a lean with no approvers to ring: ask who.
+    taps, rt = house(["scott", "vega"])
+    assert call(rt, device_id="puck-kitchen")["error"] == "speaker_not_verified"
+    rt.approvals = Approvals(None, "Jarvis", "")
+    rt.speakers.record({"person": "Scott", "confidence": 0.6, "ts": _time.time()})
+    assert call(rt, device_id="puck-kitchen")["error"] == "speaker_not_verified"
+    assert taps.sent == []
 
 
 def test_people_lines_split_on_the_first_two_colons_only():
@@ -1094,10 +1106,10 @@ def test_hubbubb_tool_uses_the_verified_persons_own_client():
     assert "No Hubbubb account is linked for Vega" in result["error"]
     assert shared.calls == 0
 
-    # People map set but no approvers: identity is still demanded...
+    # Two accounts linked and no approvers: identity is still demanded...
     lone = types.SimpleNamespace(
         hubbubb=shared,
-        hubbubb_people={"scott": scotts},
+        hubbubb_people={"scott": scotts, "vega": _Client("vega")},
         speakers=SpeakerBook(None, "", ""),
         approvals=Approvals(None, "Jarvis", ""),
     )

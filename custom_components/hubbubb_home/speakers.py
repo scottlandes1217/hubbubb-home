@@ -134,6 +134,10 @@ class SpeakerBook:
         """Forget the clip most recently learned before this utterance."""
         return await self._post("/unlearn", {}) or {}
 
+    def owner_of(self, device_id: str | None) -> str | None:
+        """Whose room this puck is in, if it is mapped to one person."""
+        return self._devices.get(device_id) if device_id else None
+
     def resolve(
         self, device_id: str | None = None
     ) -> tuple[str | None, float, str | None]:
@@ -181,8 +185,7 @@ class SpeakerBook:
             # explain itself. Anyone standing in the house can already reach
             # the physical switch; the things that genuinely need a person
             # attached (memories, lists, calendar, Hubbubb) are still refused
-            # here and still separately gated by the 0.90 verify threshold and
-            # the phone-tap approval.
+            # here and still separately gated by the tools themselves.
             return (
                 "You do not recognize this speaker - treat them as a guest. "
                 "Introduce yourself when it feels natural, and answer "

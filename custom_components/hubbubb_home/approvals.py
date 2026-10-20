@@ -20,10 +20,6 @@ from .speakers import parse_map
 
 _LOGGER = logging.getLogger(__name__)
 
-# Only a voice match at least this sure (or a spoken "this is X") is worth
-# challenging; anything weaker and the house asks who is speaking instead of
-# guessing whose device to ring.
-VERIFY_CONFIDENCE = 0.90
 # How long a tap is awaited before the request fails closed.
 REQUEST_TIMEOUT = 45
 # One approval covers follow-ups for a few minutes, or every second question

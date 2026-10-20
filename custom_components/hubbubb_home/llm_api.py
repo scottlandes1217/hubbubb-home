@@ -26,12 +26,11 @@ from homeassistant.helpers import llm
 from homeassistant.util import dt as dt_util
 from homeassistant.util.json import JsonObjectType
 
-from .approvals import VERIFY_CONFIDENCE
 from .companion import CompanionError
 from .const import DOMAIN
 from .hubbubb import HubbubbError, HubbubbPending
 from .intents import _open_items, match_item, pick_list
-from .speakers import SpeakerServiceError
+from .speakers import CONFIDENT, SpeakerServiceError
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -919,6 +918,20 @@ class DateTool(_RuntimeTool):
             return {"error": f"{err}; use YYYY-MM-DD or YYYY-MM-DD HH:MM"}
 
 
+def profile_for(name: str, people: dict) -> str:
+    """An HA user's name -> the linked Hubbubb profile it means.
+
+    Profiles are keyed by whatever was typed (often a first name); HA users
+    carry the full one. Unmatched, the name itself, so the caller's "no
+    account linked for ..." names the right person.
+    """
+    full = name.strip().lower()
+    for key in (full, full.split()[0]):
+        if key in people:
+            return key
+    return name.strip()
+
+
 class AskHubbubbTool(_RuntimeTool):
     name = "ask_hubbubb"
     description = (
@@ -933,63 +946,65 @@ class AskHubbubbTool(_RuntimeTool):
     )
     parameters = vol.Schema({vol.Required("request"): str})
 
+    async def _identify(self, hass, llm_context) -> tuple[str | None, bool]:
+        """-> (who is asking, whether that needs a phone tap to confirm).
+
+        A tap only earns its keep where a wrong guess is plausible: a shared
+        puck, more than one linked Hubbubb account to pick between, and no
+        confident idea who is talking. A phone or dashboard is signed in as
+        its owner, a puck in the speaker map belongs to one person's room,
+        and with one linked account there is nobody else to mistake them for.
+        """
+        people = self._runtime.hubbubb_people
+        context = getattr(llm_context, "context", None)
+        if user_id := getattr(context, "user_id", None):
+            user = await hass.auth.async_get_user(user_id)
+            if user and not user.system_generated and user.name:
+                return profile_for(user.name, people), False
+        speakers = self._runtime.speakers
+        device_id = getattr(llm_context, "device_id", None)
+        person, confidence, source = speakers.resolve(device_id)
+        if speakers.owner_of(device_id):
+            return person, False
+        if len(people) <= 1:
+            return person or next(iter(people), None), False
+        # The old 0.90 bar was out of reach for real utterances - all 8 of
+        # Scott's own enrolment samples score under it - so "knows who is
+        # speaking" is the house's ordinary confident match.
+        known = source == "told" or confidence >= CONFIDENT
+        return person, not (person and known)
+
     async def async_call(
         self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context
     ) -> JsonObjectType:
         request = tool_input.tool_args["request"]
         approvals = self._runtime.approvals
         people = self._runtime.hubbubb_people
-        person = None
-        # Per-person credentials need a person even with no approvers set;
-        # otherwise the call would silently fall back to the shared account.
-        if approvals.configured or people:
-            person, confidence, source = self._runtime.speakers.resolve(
-                getattr(llm_context, "device_id", None)
-            )
-            # An approver device is a second factor, and a self-correcting one:
-            # a wrong guess rings the wrong person's phone, shows them the
-            # request, and they decline. So when approvers are configured voice
-            # only has to nominate a likely person - the tap is the gate, not
-            # the voice score.
-            #
-            # VERIFY_CONFIDENCE was doing the opposite of its job here. All 8 of
-            # Scott's own enrolment samples score below 0.90 against his own
-            # profile, and live utterances are noisier still, so the bar was
-            # unreachable and this tool asked "who is speaking?" every single
-            # time it was used. A gate nobody can ever pass is not security, it
-            # is just the assistant refusing to work.
-            #
-            # Without approvers there is no second factor: voice alone decides
-            # whose Hubbubb credentials get spent and nothing catches a wrong
-            # guess, which is the one case that still needs the high bar.
-            unverified = (
-                not person
-                if approvals.configured
-                else (
-                    not person
-                    or (source != "told" and confidence < VERIFY_CONFIDENCE)
+        person, unsure = await self._identify(hass, llm_context)
+        # A tap is only asked for when a wrong guess is plausible. Unsure with
+        # no approver to ring (or nobody even to guess) means ask who it is;
+        # per-person credentials always need a person, or the call would
+        # silently fall back to the shared account.
+        tap = unsure and person and approvals.configured
+        if (unsure and not tap) or (people and not person):
+            return {
+                "error": "speaker_not_verified",
+                "detail": (
+                    "You are not sure who is speaking. Ask who is "
+                    "speaking, wait for their answer (identify_speaker), "
+                    "then call this again."
+                ),
+            }
+        if tap and not await approvals.async_request(
+            person, f"Hubbubb request: {request[:100]}"
+        ):
+            return {
+                "error": (
+                    f"{person} did not approve this from their device "
+                    "(denied, timed out, or no device is configured for "
+                    "them). Denial is final - do not retry."
                 )
-            )
-            if unverified:
-                return {
-                    "error": "speaker_not_verified",
-                    "detail": (
-                        "You are not sure who is speaking. Ask who is "
-                        "speaking, wait for their answer (identify_speaker), "
-                        "then call this again."
-                    ),
-                }
-        if approvals.configured:
-            if not await approvals.async_request(
-                person, f"Hubbubb request: {request[:100]}"
-            ):
-                return {
-                    "error": (
-                        f"{person} did not approve this from their device "
-                        "(denied, timed out, or no device is configured for "
-                        "them). Denial is final - do not retry."
-                    )
-                }
+            }
         client = self._runtime.hubbubb
         if people:
             # The verified speaker acts as themselves in Hubbubb, so the
