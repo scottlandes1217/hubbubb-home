@@ -2893,14 +2893,13 @@ class HubbubbRingCard extends LitElement {
     return out;
   }
 
-  _sheetTables(dt, cur, burst) {
+  _sheetTables(dt, cur) {
     const voice = (this._speech?.env || 0) * cur.speech;
-    const want = Math.max(burst, Math.min(1, voice * 1.35));
+    const want = Math.min(1, voice * 1.35);
     const current = this._crumple || 0;
     const tau = want > current ? 0.012 : 0.045;
     this._crumple = current + (want - current) * (1 - Math.exp(-dt / tau));
-    // Continuous advection: pauses relax the skin, without resetting its
-    // texture or rotating a fixed arrangement of vertices around the globe.
+    // Keep the texture flowing continuously; only speech deforms the skins.
     this._flowT = (this._flowT || 0) + dt * (0.8 + this._crumple * 0.2);
     if (!this._sheetState) this._sheetState = SHEETS.map((s,index) => ({index}));
     for (const st of this._sheetState) {
@@ -4523,7 +4522,7 @@ class HubbubbRingCard extends LitElement {
   _drawIm3(dt, ctx, cx, cy, half, cur, env, R, G, B) {
     const t = this._t;
     const boot = this._im3Boot(dt);
-    const sheets = this._sheetTables(dt, cur, boot.burst);
+    const sheets = this._sheetTables(dt, cur);
     if (boot.ring > 0) {
       ctx.save();
       ctx.globalAlpha = boot.ring;
@@ -5753,7 +5752,7 @@ class HubbubbRingCard extends LitElement {
     const model = this._modelName(s);
     return html`<div class="hello">
       <div class="hello-ring"><span></span><span></span><span></span></div>
-      <div class="hello-name">${local ? this._name : "Claude"}</div>
+      <div class="hello-name">J.A.R.V.I.S.</div>
       <div class="hello-sub">
         ${local ? "Local" : `Cloud · ${model}`}${s?.project ? html` · ${s.project}` : nothing}
       </div>
