@@ -171,3 +171,36 @@ console.log('Touch scroll, pinch isolation and zoomed pan passed');
   assert.equal(woke,true);assert.equal(card._screenMissionBusy,false);
 }
 console.log('Mission Control queues once, resets zoom, hides keyboard and refreshes screen');
+{
+  const {card,input,calls} = setup();
+  input.value = 'printf hello';
+  const e = event(input,{key:'Enter'});card._screenKeyDown(e);
+  await card._screenCommandTail;
+  assert.equal(e.defaultPrevented,true);assert.equal(input.value,'');
+  assert.deepEqual(calls[0].data,{text:'printf hello',key:'enter'});
+  const mobile=event(input,{key:undefined,inputType:'insertLineBreak'});
+  card._screenBeforeInput(mobile);await card._screenCommandTail;
+  assert.equal(mobile.defaultPrevented,true);assert.deepEqual(calls[1].data,{key:'enter'});
+  card._screenEditor={value:'first\nsecond',multiline:true};
+  const multiline=event(input,{key:'Enter'});card._screenKeyDown(multiline);
+  assert.equal(multiline.defaultPrevented,false,'multiline editor retains native line breaks');
+}
+{
+  const {card,input} = setup();input.blur=()=>{};
+  card._screenKeyboard=true;card._screenCanvas={width:800,height:400};
+  card._screenPose={x:-240,y:-180,z:3};card._screenBeforeKeyboardPose={x:-10,y:-20,z:2};
+  const pose={...card._screenPose};
+  card._positionScreenKeyboard();assert.deepEqual(card._screenPose,pose,'keyboard cannot recenter a zoomed view');
+  card._hideScreenKeyboard();assert.deepEqual(card._screenPose,pose,'keyboard close cannot restore stale pan or zoom');
+}
+{
+  const {card,input} = setup();
+  card._screenKeyboard=true;card._screenPose={x:-250,y:-200,z:2};
+  let focused=false;input.focus=()=>{focused=true};
+  const form={querySelector:()=>input};const box={querySelector:()=>({})};
+  card.renderRoot={querySelector:s=>s==='.screen-type'?form:box};
+  card._showScreenKeyboard();assert.equal(focused,true);
+  assert.deepEqual(card._screenPose,{x:-250,y:-200,z:2});
+  assert.equal(card._screenKeyboardObserver,undefined,'refocusing does not restart recenter observer');
+}
+console.log('Terminal Return sends draft plus Enter; zoomed keyboard focus and close preserve view');

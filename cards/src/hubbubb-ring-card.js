@@ -1859,8 +1859,8 @@ class HubbubbRingCard extends LitElement {
       if (run && this._screenRun === run) {
         run.urgent = true;
         run.wake?.();
-        if (result.editable && this._view?.screen && !this._screenKeyboard) this._showScreenKeyboard();
         if (this._screenEditorRequest === editorRequest) {
+          if (result.editable && this._view?.screen && !this._screenKeyboard) this._showScreenKeyboard();
           await this._loadScreenEditor(result);
           if (!result.editable && this._screenKeyboard) this._hideScreenKeyboard();
         }
@@ -1907,6 +1907,10 @@ class HubbubbRingCard extends LitElement {
     const img = box?.querySelector(".screen-image");
     const form = this.renderRoot.querySelector(".screen-type");
     if (!box || !img || !form) return;
+    if (this._screenKeyboard) {
+      form.querySelector(".screen-entry")?.focus({ preventScroll: true });
+      return;
+    }
     if (!this._screenKeyboard) {
       this._screenBeforeKeyboardPose = { ...(this._screenPose || { x: 0, y: 0, z: 1 }) };
       this._screenCanvas = { width: box.clientWidth, height: box.clientHeight };
@@ -1931,7 +1935,7 @@ class HubbubbRingCard extends LitElement {
   }
 
   _positionScreenKeyboard() {
-    if (!this._screenKeyboard || !this._screenCanvas) return;
+    if (!this._screenKeyboard || !this._screenCanvas || (this._screenPose?.z || 1) > 1) return;
     const box = this.renderRoot.querySelector(".screen-view .vbody");
     const img = box?.querySelector(".screen-image");
     if (!img?.naturalWidth || !box.clientHeight) return;
@@ -1951,7 +1955,10 @@ class HubbubbRingCard extends LitElement {
     this.renderRoot.querySelector(".screen-entry")?.blur();
     this._screenKeyboard = false;
     this._screenCanvas = null;
-    this._screenPose = this._screenBeforeKeyboardPose || { x: 0, y: 0, z: 1 };
+    // Keep the reader's current zoom and pan, including adjustments made
+    // while the keyboard was open. Only undo automatic panning at fit size.
+    if ((this._screenPose?.z || 1) <= 1)
+      this._screenPose = { x: 0, y: 0, z: 1 };
     if (this._screenGesture) this._screenGesture.pose = this._screenPose;
   }
 
@@ -1982,6 +1989,12 @@ class HubbubbRingCard extends LitElement {
       if (e.key === "Backspace" || e.key === "Enter") e.preventDefault();
       return;
     }
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing && !e.defaultPrevented &&
+        !this._screenEditor?.multiline) {
+      e.preventDefault();
+      this._screenSend("enter");
+      return;
+    }
     if (typeof this._screenEditor?.value === "string") return;
     if (e.key !== "Backspace" || e.isComposing || e.ctrlKey || e.metaKey || e.altKey ||
         e.currentTarget.value || e.defaultPrevented) return;
@@ -1991,6 +2004,12 @@ class HubbubbRingCard extends LitElement {
 
   _screenBeforeInput(e) {
     if (this._screenEditorLoading) { e.preventDefault(); return; }
+    if (["insertParagraph", "insertLineBreak"].includes(e.inputType) && !e.isComposing &&
+        !e.defaultPrevented && !this._screenEditor?.multiline) {
+      e.preventDefault();
+      this._screenSend("enter");
+      return;
+    }
     if (typeof this._screenEditor?.value === "string") return;
     // Mobile keyboards may deliver editing intentions without a keydown.
     // Draft text is edited locally; deletion from an empty draft edits the Mac.
@@ -2018,7 +2037,8 @@ class HubbubbRingCard extends LitElement {
     this._screenTyping = true;
     // Once submitted, deletion belongs to the Mac text, even while Send is
     // in flight. Keep newly composed text separate from that submission.
-    if (!key && input && !synced) input.value = "";
+    const submitsDraft = !synced && (!key || key === "enter");
+    if (submitsDraft && input) input.value = "";
     try {
       if (synced && (!key || key === "enter")) {
         const result = await this._screenCommand("agent_screen_input", {
@@ -2031,14 +2051,15 @@ class HubbubbRingCard extends LitElement {
         }
         if (key === "enter") await this._screenCommand("agent_screen_input", { key });
       } else {
-        await this._screenCommand("agent_screen_input", key ? { key } : { text });
+        await this._screenCommand("agent_screen_input",
+          key === "enter" && text ? { text, key } : key ? { key } : { text });
       }
       if (run && this._screenRun === run) {
         run.urgent = true;
         run.wake?.();
       }
     } catch (err) {
-      if (!key && !synced && input?.isConnected) input.value = text + input.value;
+      if (submitsDraft && input?.isConnected) input.value = text + input.value;
       if (this._screenRun === run && this._view?.screen) this._toast(this._errText(err));
     } finally {
       run.inputPending--;
@@ -2098,13 +2119,20 @@ class HubbubbRingCard extends LitElement {
     return html`
       <div class=${v.screen ? "phead screen-head" : "phead"}>
         <span class="ptitle" title=${v.path}>${name}${v.line ? `:${v.line}` : ""}</span>
-        ${v.screen ? html`<button class="hbtn" data-ai="screen-mission-control"
-          title="Show Mac windows and desktops" ?disabled=${this._screenMissionBusy}
-          @click=${this._screenMissionControl}>${this._screenMissionBusy ? "Opening…" : "Mission Control"}</button>
-          <button class="hbtn" data-ai="screen-keyboard"
-          @click=${() => this._openScreenKeyboard()}>Keyboard</button>
-          <button class="hbtn" @click=${() => { this._screenPan = !this._screenPan; }}>${this._screenPan ? "Drag: Pan" : "Drag: Scroll"}</button>` : nothing}
-        <button class="hbtn" data-ai="close-file" @click=${() => this._closeViewer()}>✕</button>
+        ${v.screen ? html`<button class="hbtn screen-tool" data-ai="screen-mission-control"
+          title="Mission Control" aria-label="Mission Control" ?disabled=${this._screenMissionBusy}
+          @click=${this._screenMissionControl}><ha-icon icon="mdi:view-dashboard-outline"></ha-icon></button>
+          <button class="hbtn screen-tool" data-ai="screen-keyboard" title="Keyboard" aria-label="Keyboard"
+            @click=${() => this._openScreenKeyboard()}><ha-icon icon="mdi:keyboard-outline"></ha-icon></button>
+          <button class="hbtn screen-tool" data-ai="screen-drag-mode"
+            title=${this._screenPan ? "Pan mode · tap to scroll" : "Scroll mode · tap to pan"}
+            aria-label=${this._screenPan ? "Pan mode · tap to scroll" : "Scroll mode · tap to pan"}
+            aria-pressed=${this._screenPan ? "true" : "false"}
+            @click=${() => { this._screenPan = !this._screenPan; }}>
+            <ha-icon icon=${this._screenPan ? "mdi:cursor-move" : "mdi:swap-vertical"}></ha-icon></button>` : nothing}
+        <button class=${v.screen ? "hbtn screen-tool" : "hbtn"} data-ai="close-file"
+          title="Close screen" aria-label="Close screen" @click=${() => this._closeViewer()}>
+          ${v.screen ? html`<ha-icon icon="mdi:close"></ha-icon>` : "✕"}</button>
       </div>
       <div class="vpath">${v.screen ? "Tap to click · Pinch to zoom · Switch Drag to scroll or pan" : v.path}</div>
       <div class="vbody"
@@ -7545,6 +7573,12 @@ class HubbubbRingCard extends LitElement {
     }
     .screen-head { flex-wrap: wrap; }
     .screen-head .hbtn { flex-shrink: 0; }
+    .screen-head .screen-tool {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 40px; height: 40px; padding: 0; letter-spacing: normal;
+      --mdc-icon-size: 21px;
+    }
+    .screen-tool[aria-pressed="true"] { background: rgba(var(--jr-glow), .2); }
     .phead {
       display: flex;
       align-items: center;
