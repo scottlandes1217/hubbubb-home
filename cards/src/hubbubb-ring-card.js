@@ -470,6 +470,7 @@ class HubbubbRingCard extends LitElement {
     _screenPan: { state: true },
     _screenCanvas: { state: true },
     _screenTyping: { state: true },
+    _screenMissionBusy: { state: true },
     _screenEditor: { state: true },
     _screenEditorLoading: { state: true },
     _sideW: { state: true },
@@ -1960,7 +1961,7 @@ class HubbubbRingCard extends LitElement {
     // as the phone gestures, including when the network is slow.
     const request = (this._screenCommandTail || Promise.resolve()).then(async () => {
       if (this._screenRun !== run || !this._view?.screen) throw new Error("Screen view closed.");
-      if (service === "agent_screen_input" && !data.scroll && run.focusFailed) {
+      if (service === "agent_screen_input" && !data.scroll && !data.action && run.focusFailed) {
         throw new Error("Tap the Mac input again before typing.");
       }
       try {
@@ -2073,13 +2074,34 @@ class HubbubbRingCard extends LitElement {
     this._zoom = Math.min(8, Math.max(1, (this._pinchFrom.z * d) / this._pinchFrom.d));
   }
 
+  async _screenMissionControl() {
+    if (this._screenMissionBusy || !this._view?.screen) return;
+    const run = this._screenRun;
+    this._screenMissionBusy = true;
+    this._hideScreenKeyboard();
+    this._screenEditorRequest = null;
+    this._screenEditor = null;
+    this._screenEditorLoading = false;
+    this._screenGesture = new ScreenGesture();
+    this._screenPose = this._screenGesture.pose;
+    try {
+      await this._screenCommand("agent_screen_input", { action: "mission_control" });
+      if (run && this._screenRun === run) { run.urgent = true; run.wake?.(); }
+    } catch (err) {
+      if (this._screenRun === run && this._view?.screen) this._toast(this._errText(err));
+    } finally { this._screenMissionBusy = false; }
+  }
+
   _renderViewer() {
     const v = this._view;
     const name = v.path.replace(/\/$/, "").split("/").pop() || v.path;
     return html`
-      <div class="phead">
+      <div class=${v.screen ? "phead screen-head" : "phead"}>
         <span class="ptitle" title=${v.path}>${name}${v.line ? `:${v.line}` : ""}</span>
-        ${v.screen ? html`<button class="hbtn" data-ai="screen-keyboard"
+        ${v.screen ? html`<button class="hbtn" data-ai="screen-mission-control"
+          title="Show Mac windows and desktops" ?disabled=${this._screenMissionBusy}
+          @click=${this._screenMissionControl}>${this._screenMissionBusy ? "Opening…" : "Mission Control"}</button>
+          <button class="hbtn" data-ai="screen-keyboard"
           @click=${() => this._openScreenKeyboard()}>Keyboard</button>
           <button class="hbtn" @click=${() => { this._screenPan = !this._screenPan; }}>${this._screenPan ? "Drag: Pan" : "Drag: Scroll"}</button>` : nothing}
         <button class="hbtn" data-ai="close-file" @click=${() => this._closeViewer()}>✕</button>
@@ -7521,6 +7543,8 @@ class HubbubbRingCard extends LitElement {
       text-align: left;
       overscroll-behavior: contain;
     }
+    .screen-head { flex-wrap: wrap; }
+    .screen-head .hbtn { flex-shrink: 0; }
     .phead {
       display: flex;
       align-items: center;

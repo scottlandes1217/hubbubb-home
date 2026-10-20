@@ -154,3 +154,20 @@ console.log('Existing field text, selection, clearing, password privacy, scroll 
   assert.equal(scrolls.length, 0, 'Pan mode only moves the local image');
 }
 console.log('Touch scroll, pinch isolation and zoomed pan passed');
+{
+  const {card,calls} = setup();
+  let release, woke = false, hidden = false;
+  card._screenRun.focusFailed = true;
+  card._screenRun.wake = () => { woke = true; };
+  card._hideScreenKeyboard = () => { hidden = true; };
+  card._screenPose = {x:-100,y:-100,z:3};
+  card._api = async (service,data) => {calls.push({service,data});await new Promise(r=>{release=r});return {ok:true};};
+  const open = card._screenMissionControl();
+  await Promise.resolve(); await card._screenMissionControl();
+  assert.equal(calls.length,1,'repeated taps do not toggle Mission Control twice');
+  assert.deepEqual(calls[0].data,{action:'mission_control'});
+  assert.equal(hidden,true);assert.equal(card._screenPose.z,1);
+  release();await open;
+  assert.equal(woke,true);assert.equal(card._screenMissionBusy,false);
+}
+console.log('Mission Control queues once, resets zoom, hides keyboard and refreshes screen');
