@@ -9,9 +9,13 @@ the executor, as memory.py does and for the same reason.
 
 from __future__ import annotations
 
+import html as _html
+import json
 import logging
+import re
 import sqlite3
 from datetime import date
+from urllib.parse import urlsplit
 
 from homeassistant.core import HomeAssistant
 
@@ -28,6 +32,92 @@ def as_lines(value) -> str:
     else:
         items = str(value or "").splitlines()
     return "\n".join(line for line in (i.strip() for i in items) if line)
+
+
+_LD_JSON = re.compile(
+    r"<script[^>]+application/ld\+json[^>]*>(.*?)</script>", re.S | re.I
+)
+_TAG = re.compile(r"<[^>]+>")
+
+
+def _clean(value) -> str:
+    return " ".join(_TAG.sub(" ", _html.unescape(str(value or ""))).split())
+
+
+def _walk(node):
+    """Every dict in a JSON-LD blob: lists, @graph and nesting included."""
+    if isinstance(node, list):
+        for item in node:
+            yield from _walk(item)
+    elif isinstance(node, dict):
+        yield node
+        for value in node.values():
+            if isinstance(value, (list, dict)):
+                yield from _walk(value)
+
+
+def _steps(node) -> list[str]:
+    """recipeInstructions: a string, HowToSteps, or HowToSections of them."""
+    if isinstance(node, str):
+        return [line for line in (_clean(x) for x in re.split(r"\n|<br\s*/?>", node)) if line]
+    if isinstance(node, list):
+        return [s for item in node for s in _steps(item)]
+    if isinstance(node, dict):
+        if "itemListElement" in node:
+            return _steps(node["itemListElement"])
+        return _steps(node.get("text") or node.get("name") or "")
+    return []
+
+
+def _minutes(iso) -> str:
+    """PT1H30M -> '1 h 30 min'; anything unparseable -> ''."""
+    m = re.fullmatch(r"P(?:\d+D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:\d+S)?", str(iso or ""))
+    if not m or not any(m.groups()):
+        return ""
+    h, mins = divmod(int(m[1] or 0) * 60 + int(m[2] or 0), 60)
+    return " ".join(p for p in (f"{h} h" if h else "", f"{mins} min" if mins else "") if p)
+
+
+def recipe_from_html(page: str, url: str) -> dict | None:
+    """The schema.org Recipe a recipe site embeds for search engines, or None.
+
+    Nearly every recipe site publishes one, so no model reads the page.
+    """
+    for block in _LD_JSON.findall(page or ""):
+        try:
+            data = json.loads(block.strip())
+        except ValueError:
+            continue
+        for node in _walk(data):
+            kind = node.get("@type")
+            if "Recipe" not in (kind if isinstance(kind, list) else [kind]):
+                continue
+            ingredients = [i for i in map(_clean, node.get("recipeIngredient") or []) if i]
+            steps = _steps(node.get("recipeInstructions"))
+            title = _clean(node.get("name"))
+            if not title or not (ingredients or steps):
+                continue
+            image = node.get("image")
+            while isinstance(image, (list, dict)):
+                image = (image[0] if image else "") if isinstance(image, list) else image.get("url")
+            rating = node.get("aggregateRating")
+            rating = rating if isinstance(rating, dict) else {}
+            yld = node.get("recipeYield")
+            if isinstance(yld, list):
+                yld = yld[0] if yld else ""
+            return {
+                "title": title,
+                "ingredients": ingredients,
+                "steps": steps,
+                "source": url,
+                "site": (urlsplit(url).hostname or "").removeprefix("www."),
+                "image": image if isinstance(image, str) else "",
+                "time": _minutes(node.get("totalTime") or node.get("cookTime")),
+                "serves": _clean(yld),
+                "rating": _clean(rating.get("ratingValue"))[:4],
+                "reviews": _clean(rating.get("ratingCount") or rating.get("reviewCount")),
+            }
+    return None
 
 
 EVENT_RECIPES = "hubbubb_home_recipes"  # fired after any save or delete

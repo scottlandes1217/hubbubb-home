@@ -6,6 +6,7 @@ handful of names from it, so those are stubbed here. That keeps the check to
 the only version of a test anybody runs.
 """
 
+import json
 import sys
 import types
 from datetime import datetime, timedelta, timezone
@@ -161,7 +162,7 @@ _pkg.__path__ = [str(PKG)]
 sys.modules["hubbubb_home"] = _pkg
 
 from hubbubb_home.memory import Memory  # noqa: E402
-from hubbubb_home.recipes import Recipes, as_lines  # noqa: E402
+from hubbubb_home.recipes import Recipes, as_lines, recipe_from_html  # noqa: E402
 from hubbubb_home.speakers import SpeakerBook  # noqa: E402
 from hubbubb_home.timers import TimerPool  # noqa: E402
 from hubbubb_home.nightly import FindingsReport, _days  # noqa: E402
@@ -284,6 +285,39 @@ def test_recipes_round_trip_against_a_real_database():
             assert len(await book.async_all()) == 1
 
         asyncio.run(_run())
+
+
+def test_recipe_from_html_reads_schema_org():
+    ld = {
+        "@graph": [
+            {"@type": "WebPage", "name": "not this"},
+            {
+                "@type": ["Recipe", "NewsArticle"],
+                "name": "Dal &amp; rice",
+                "recipeIngredient": ["1 cup <b>lentils</b>", " "],
+                "recipeInstructions": [
+                    {"@type": "HowToSection", "itemListElement": [
+                        {"@type": "HowToStep", "text": "Rinse."},
+                        {"@type": "HowToStep", "text": "Simmer."},
+                    ]},
+                    "Serve.",
+                ],
+                "image": [{"url": "https://x/a.jpg"}],
+                "totalTime": "PT1H35M",
+                "recipeYield": ["4", "4 bowls"],
+                "aggregateRating": {"ratingValue": 4.873, "ratingCount": "12"},
+            },
+        ]
+    }
+    page = '<script>{}</script><script type="application/ld+json">%s</script>' % json.dumps(ld)
+    r = recipe_from_html(page, "https://www.example.com/dal")
+    assert r["title"] == "Dal & rice", r
+    assert r["ingredients"] == ["1 cup lentils"], r
+    assert r["steps"] == ["Rinse.", "Simmer.", "Serve."], r
+    assert (r["image"], r["time"], r["serves"], r["rating"], r["site"]) == (
+        "https://x/a.jpg", "1 h 35 min", "4", "4.87", "example.com"), r
+    assert recipe_from_html("<p>no data</p>", "https://x") is None
+    assert recipe_from_html('<script type="application/ld+json">{bad</script>', "u") is None
 
 
 def test_memory_migrates_a_pre_person_database():

@@ -42,6 +42,15 @@ recipe_delete:
       required: true
       selector: { number: { min: 1, mode: box } }
 recipe_list: {}
+recipe_web:
+  fields:
+    query:
+      required: true
+      example: "chicken tikka masala"
+      selector: { text: }
+    limit:
+      default: 5
+      selector: { number: { min: 1, max: 10 } }
 memory_list: {}
 skills: {}
 recipe_find:

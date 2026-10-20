@@ -53,6 +53,7 @@ class HubbubbRecipes extends LitElement {
     _err: { state: true },
     _busy: { state: true },
     _confirm: { state: true },
+    _find: { state: true },
   };
 
   constructor() {
@@ -64,6 +65,7 @@ class HubbubbRecipes extends LitElement {
     this._err = "";
     this._busy = false;
     this._confirm = false;
+    this._find = null; // { q, results, open } while looking online, or null
   }
 
   connectedCallback() {
@@ -119,6 +121,7 @@ class HubbubbRecipes extends LitElement {
   _open(r) {
     this._sel = r.id;
     this._form = null;
+    this._find = null;
     this._confirm = false;
   }
 
@@ -126,7 +129,25 @@ class HubbubbRecipes extends LitElement {
     this._form = r
       ? { id: r.id, title: r.title, ingredients: r.ingredients.join("\n"), steps: r.steps.join("\n"), source: r.source }
       : blankForm();
+    this._find = null;
     this._confirm = false;
+  }
+
+  async _search() {
+    const q = this._find.q.trim();
+    if (!q) return;
+    this._find = { ...this._find, results: null, open: null };
+    const res = await this._try(() => this._call("recipe_web", { query: q }));
+    if (this._find) this._find = { ...this._find, results: res?.recipes || [], searched: res ? q : "" };
+  }
+
+  async _add(r) {
+    const { title, ingredients, steps, source } = r;
+    const res = await this._try(() => this._call("recipe_save", { title, ingredients, steps, source }));
+    if (!res) return;
+    await this._load();
+    this._find = null;
+    this._sel = res.recipe.id;
   }
 
   async _save() {
@@ -155,16 +176,16 @@ class HubbubbRecipes extends LitElement {
   render() {
     const rows = filterRecipes(this._recipes, this._q);
     // Narrow screens show one pane: the list, or whatever is open.
-    const showList = !this.narrow || (!this._current && !this._form);
-    const showMain = !this.narrow || this._current || this._form;
+    const showList = !this.narrow || (!this._current && !this._form && !this._find);
+    const showMain = !this.narrow || this._current || this._form || this._find;
     return html`
       <div class="bar">
         <ha-menu-button .hass=${this.hass} .narrow=${this.narrow}></ha-menu-button>
         ${this.narrow && showMain
-          ? html`<button class="back" @click=${() => { this._sel = null; this._form = null; }}>‹</button>`
+          ? html`<button class="back" @click=${() => { this._sel = null; this._form = null; this._find = null; }}>‹</button>`
           : nothing}
         <div class="title">Recipes</div>
-        <button class="add" ?disabled=${this._busy} @click=${() => this._edit(null)}>+ Add</button>
+        <button class="add" ?disabled=${this._busy} @click=${() => { this._form = null; this._find = { q: "", results: [], open: null }; }}>+ Add</button>
       </div>
       ${this._err
         ? html`<div class="err" @click=${() => (this._err = "")}>${this._err}<span class="x">dismiss</span></div>`
@@ -184,7 +205,7 @@ class HubbubbRecipes extends LitElement {
             </div>`
           : nothing}
         ${showMain
-          ? html`<div class="col main">${this._form ? this._renderForm() : this._current ? this._renderRecipe(this._current) : html`<div class="empty">Pick a recipe.</div>`}</div>`
+          ? html`<div class="col main">${this._find ? this._renderFind() : this._form ? this._renderForm() : this._current ? this._renderRecipe(this._current) : html`<div class="empty">Pick a recipe.</div>`}</div>`
           : nothing}
       </div>
     `;
@@ -211,6 +232,43 @@ class HubbubbRecipes extends LitElement {
         <ol>${r.steps.map((s) => html`<li>${s}</li>`)}</ol>
         <div class="meta">Saved ${r.created}</div>
       </div>
+    `;
+  }
+
+  _renderFind() {
+    const f = this._find;
+    return html`
+      <div class="card">
+        <h2>What would you like to make?</h2>
+        <form class="find" @submit=${(e) => { e.preventDefault(); this._search(); }}>
+          <input autofocus placeholder="e.g. a quick weeknight chicken curry" .value=${f.q} @input=${(e) => (this._find = { ...this._find, q: e.target.value })} />
+          <button class="primary" ?disabled=${this._busy || !f.q.trim()}>Find</button>
+        </form>
+        <div class="meta">or <a href="#" @click=${(e) => { e.preventDefault(); this._edit(null); }}>write one in yourself</a></div>
+      </div>
+      ${f.results === null
+        ? html`<div class="empty">Looking for recipes…</div>`
+        : f.results.map((r, i) => html`
+            <div class="card hit">
+              ${r.image ? html`<img src=${r.image} alt="" loading="lazy" referrerpolicy="no-referrer" />` : nothing}
+              <div class="body">
+                <div class="name">${r.title}</div>
+                <div class="meta">${[r.site, r.time, r.serves && `serves ${r.serves}`, r.rating && `★ ${r.rating}${r.reviews ? ` (${r.reviews})` : ""}`].filter(Boolean).join(" · ")}</div>
+                <div class="meta">${r.ingredients.length} ingredients · ${r.steps.length} steps</div>
+                <div class="actions">
+                  <button class="primary" ?disabled=${this._busy} @click=${() => this._add(r)}>Add to cookbook</button>
+                  <button @click=${() => (this._find = { ...f, open: f.open === i ? null : i })}>${f.open === i ? "Hide" : "Preview"}</button>
+                  <a class="link" href=${r.source} target="_blank" rel="noopener">Open page</a>
+                </div>
+                ${f.open === i
+                  ? html`<h3>Ingredients</h3><ul>${r.ingredients.map((x) => html`<li>${x}</li>`)}</ul>
+                      <h3>Steps</h3><ol>${r.steps.map((x) => html`<li>${x}</li>`)}</ol>`
+                  : nothing}
+              </div>
+            </div>`)}
+      ${f.searched && f.results && !f.results.length
+        ? html`<div class="empty">No recipes found for "${f.searched}". Try different words.</div>`
+        : nothing}
     `;
   }
 
@@ -352,6 +410,26 @@ class HubbubbRecipes extends LitElement {
     .actions .primary { background: var(--primary-color); color: var(--text-primary-color, #fff); border-color: transparent; }
     .actions .danger { color: var(--error-color, #db4437); }
     button:disabled { opacity: 0.5; cursor: default; }
+    .find { display: flex; gap: 8px; margin: 8px 0; }
+    .find input { margin: 0; flex: 1; }
+    .find button, .actions .link {
+      padding: 8px 14px;
+      border-radius: 8px;
+      border: 0;
+      font: inherit;
+      cursor: pointer;
+    }
+    .find button { background: var(--primary-color); color: var(--text-primary-color, #fff); }
+    .actions .link { color: var(--primary-color); text-decoration: none; align-self: center; }
+    .meta a { color: var(--primary-color); }
+    .hit { display: flex; gap: 16px; margin-top: 12px; align-items: flex-start; }
+    .hit img { width: 120px; height: 120px; object-fit: cover; border-radius: 8px; flex: none; }
+    .hit .body { flex: 1; min-width: 0; }
+    .hit .actions { flex-wrap: wrap; margin-top: 10px; }
+    @media (max-width: 500px) {
+      .hit { flex-direction: column; }
+      .hit img { width: 100%; height: 160px; }
+    }
   `;
 }
 

@@ -138,7 +138,9 @@ class CompanionClient:
         except aiohttp.ClientError as err:
             raise CompanionError(f"companion unreachable: {err}") from err
 
-    async def async_search(self, query: str, limit: int) -> list[dict]:
+    async def async_search(
+        self, query: str, limit: int, pages: int = PAGES_READ
+    ) -> list[dict]:
         """Web results from the SearXNG instance on the companion's machine.
 
         It runs beside the companion (port 8888) so its address follows the
@@ -167,7 +169,7 @@ class CompanionClient:
             for r in data.get("results", [])[:limit]
         ]
         pages = await asyncio.gather(
-            *(self._page_text(r["url"], query) for r in results[:PAGES_READ])
+            *(self._page_text(r["url"], query) for r in results[:pages])
         )
         for result, text in zip(results, pages):
             if text:
@@ -175,19 +177,29 @@ class CompanionClient:
         return results
 
     async def _page_text(self, url: str, query: str) -> str:
+        html = await self.async_html(url)
+        return relevant_text(html, query) if html else ""
+
+    async def async_html(self, url: str, timeout: float = 5) -> str:
         """Best effort: a page that is slow, huge or not HTML just adds nothing."""
         try:
             async with self._session.get(
                 url,
                 headers={"User-Agent": "Mozilla/5.0"},
-                timeout=aiohttp.ClientTimeout(total=5),
+                timeout=aiohttp.ClientTimeout(total=timeout),
             ) as resp:
                 if resp.status >= 400 or "html" not in resp.content_type:
                     return ""
-                html = (await resp.content.read(3_000_000)).decode("utf-8", "replace")
+                # content.read(n) stops at whatever is buffered, often one
+                # chunk, so read to the end (or the cap) explicitly.
+                body = b""
+                async for chunk in resp.content.iter_chunked(65536):
+                    body += chunk
+                    if len(body) >= 3_000_000:
+                        break
+                return body.decode("utf-8", "replace")
         except (aiohttp.ClientError, asyncio.TimeoutError):
             return ""
-        return relevant_text(html, query)
 
     async def async_available(self) -> bool:
         """True when a companion is configured and answering."""

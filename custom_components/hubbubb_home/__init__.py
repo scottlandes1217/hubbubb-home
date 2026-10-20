@@ -10,6 +10,7 @@ fourteenth way to hold an API key.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 from dataclasses import dataclass, field
@@ -564,6 +565,12 @@ SERVICE_SCHEMAS: dict[str, vol.Schema] = {
     ),
     "recipe_delete": vol.Schema({vol.Required("id"): vol.Coerce(int)}),
     "recipe_list": vol.Schema({}),
+    "recipe_web": vol.Schema(
+        {
+            vol.Required("query"): vol.All(str, vol.Length(min=2, max=200)),
+            vol.Optional("limit", default=5): vol.All(vol.Coerce(int), vol.Range(1, 10)),
+        }
+    ),
     "memory_list": vol.Schema({}),
     "skills": vol.Schema({}),
     "recipe_find": vol.Schema(
@@ -637,6 +644,27 @@ def _async_register_services(hass: HomeAssistant, runtime: Runtime) -> None:
 
     async def recipe_list(call: ServiceCall) -> ServiceResponse:
         return {"recipes": await runtime.recipes.async_all()}
+
+    async def recipe_web(call: ServiceCall) -> ServiceResponse:
+        """Top recipes online for the Recipes panel's "find one" box.
+
+        Only pages carrying schema.org Recipe data count (about half), so three times the asked
+        number are read to fill the list; nothing is saved here.
+        """
+        from .recipes import recipe_from_html
+
+        limit = call.data["limit"]
+        try:
+            results = await runtime.companion.async_search(
+                f"{call.data['query']} recipe", limit * 3, pages=0
+            )
+        except CompanionError as err:
+            raise HomeAssistantError(str(err)) from err
+        pages = await asyncio.gather(
+            *(runtime.companion.async_html(r["url"], timeout=10) for r in results)
+        )
+        found = [recipe_from_html(page, r["url"]) for r, page in zip(results, pages)]
+        return {"recipes": [r for r in found if r][:limit]}
 
     async def memory_list(call: ServiceCall) -> ServiceResponse:
         """Household facts plus the caller's own, for the ring's Memories sheet.
@@ -771,6 +799,7 @@ def _async_register_services(hass: HomeAssistant, runtime: Runtime) -> None:
         "recipe_save": recipe_save,
         "recipe_delete": recipe_delete,
         "recipe_list": recipe_list,
+        "recipe_web": recipe_web,
         "recipe_find": recipe_find,
         "memory_list": memory_list,
         "skills": skills,
