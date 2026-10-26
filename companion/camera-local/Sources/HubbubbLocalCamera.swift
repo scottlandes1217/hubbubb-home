@@ -815,6 +815,8 @@ private struct Track {
     var facing = false
     // The body box came from Vision's body detector, not guessed from a face.
     var bodySeen = true
+    // Head yaw and pitch in degrees, for diagnosing "looking at the camera".
+    var headAngles: (yaw: Double, pitch: Double)?
     var lastSeen: Date
     var visible = true
     var name: String?
@@ -861,6 +863,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     private var latestFrame: CGImage?
     private var latestNames: [String] = []
     private var latestAnimals: [String] = []
+    private var latestHeads: [[String: Any]] = []
     private var followPausedUntil = Date.distantPast
     private var nobodyInView = true  // under settingsLock; read by the mood engine
     // Vision thread only: no re-framing until then (a hand is raised to gesture).
@@ -967,6 +970,9 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 tracks[index].facing = observation.map {
                     GestureGate.isFacing(yaw: $0.yaw?.doubleValue, pitch: $0.pitch?.doubleValue, limit: lookAngle)
                 } ?? false
+                tracks[index].headAngles = observation.map {
+                    (($0.yaw?.doubleValue ?? .nan) * 180 / .pi, ($0.pitch?.doubleValue ?? .nan) * 180 / .pi)
+                }
             }
             let visible = tracks.filter(\.visible)
             identifyFaces(handler, now: now)
@@ -1002,6 +1008,9 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             latestFrame = fullFrame
             latestNames = names
             latestAnimals = animalNames
+            latestHeads = visible.compactMap { track in
+                track.headAngles.map { ["name": track.name ?? "someone", "yaw": $0.yaw.isNaN ? NSNull() : Int($0.yaw), "pitch": $0.pitch.isNaN ? NSNull() : Int($0.pitch), "looking": track.facing] }
+            }
             settingsLock.unlock()
             reportPresence(names, animals: animalNames, now: now)
 
@@ -1754,7 +1763,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     func inView() -> [String: Any] {
         settingsLock.lock()
         defer { settingsLock.unlock() }
-        return ["people": latestNames, "animals": latestAnimals]
+        return ["people": latestNames, "animals": latestAnimals, "heads": latestHeads]
     }
 
     /// Answer a question about the room from the camera, panning to search when
