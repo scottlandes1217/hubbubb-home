@@ -23,6 +23,27 @@ private func hubbubbLinkCameraGetPosition(_ pan: UnsafeMutablePointer<Float>, _ 
 @_silgen_name("HubbubbLinkCameraPointAt")
 private func hubbubbLinkCameraPointAt(_ pan: Float, _ tilt: Float) -> Int32
 
+/// One line in ~/Library/Logs/Hubbubb Local Camera.log - what the camera
+/// decided and why, for when it does something odd. Started afresh past 1 MB.
+private let logQueue = DispatchQueue(label: "com.hubbubb.camera.log")
+private func note(_ format: String, _ args: CVarArg...) {
+    let line = "\(ISO8601DateFormatter().string(from: Date())) \(String(format: format, arguments: args))\n"
+    logQueue.async {
+        let url = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Logs/Hubbubb Local Camera.log")
+        if let size = (try? FileManager.default.attributesOfItem(atPath: url.path))?[.size] as? Int, size > 1_000_000 {
+            try? FileManager.default.removeItem(at: url)
+        }
+        if let handle = try? FileHandle(forWritingTo: url) {
+            handle.seekToEndOfFile()
+            handle.write(Data(line.utf8))
+            try? handle.close()
+        } else {
+            try? Data(line.utf8).write(to: url)
+        }
+    }
+}
+
 private func cameraPosition() -> (pan: Float, tilt: Float)? {
     var pan: Float = 0, tilt: Float = 0
     return hubbubbLinkCameraGetPosition(&pan, &tilt) == 1 ? (pan, tilt) : nil
@@ -92,6 +113,9 @@ private struct RoomMap {
         precondition(wide.pan > tight.pan * 3.9 && wide.pan <= 8, "moves scale down with zoom")
         precondition(Gimbal.exitDirection(lastX: 0.8, velocityX: -1) == 1, "edge wins")
         precondition(Gimbal.exitDirection(lastX: 0.5, velocityX: -0.3) == -1, "then motion")
+        precondition(Gimbal.exitTilt(lastY: 0.7, velocityY: 0) == 1, "standing up leaves out of the top")
+        precondition(Gimbal.exitTilt(lastY: 0.5, velocityY: 0.4) == 1, "rising fast counts too")
+        precondition(Gimbal.exitTilt(lastY: 0.5, velocityY: 0) == 0, "a sideways exit needs no tilt")
         var book = ItemBook()
         book.items["airpods case"] = .init(name: "AirPods case", description: "", image: "")
         book.items["car keys"] = .init(name: "car keys", description: "", image: "")
@@ -257,7 +281,9 @@ private enum Framing {
     static func zoom(current: CGFloat, face: CGRect?, body: CGRect?, fill: CGFloat, maxFace: CGFloat = 0.25) -> CGFloat {
         var target: CGFloat = 4
         if let body { target = min(target, current * fill / max(body.height, 0.01)) }
-        if let face { target = min(target, current * (body == nil ? maxFace * 0.8 : maxFace) / max(face.height, 0.01)) }
+        // Only a face (body not found): assume a half-body shot means a face
+        // about an eighth of the frame tall, not a head shot.
+        if let face { target = min(target, current * (body == nil ? maxFace * 0.5 : maxFace) / max(face.height, 0.01)) }
         return min(4, max(1, target))
     }
 
@@ -290,6 +316,14 @@ private enum Gimbal {
         if lastX > 0.6 { return 1 }
         if lastX < 0.4 { return -1 }
         return velocityX >= 0 ? 1 : -1
+    }
+
+    /// Whether they left out of the top (stood up: +1), the bottom (-1), or
+    /// neither (0), from where their face was last seen (Vision y grows upward).
+    static func exitTilt(lastY: CGFloat, velocityY: CGFloat) -> Float {
+        if lastY > 0.62 || velocityY > 0.25 { return 1 }
+        if lastY < 0.3 || velocityY < -0.25 { return -1 }
+        return 0
     }
 }
 
@@ -362,12 +396,12 @@ private final class CameraService {
         // macOS shows a one-time "login item added" notice; System Settings →
         // General → Login Items turns it off.
         if SMAppService.mainApp.status != .enabled {
-            do { try SMAppService.mainApp.register() } catch { NSLog("Hubbubb camera: could not add a login item: \(error)") }
+            do { try SMAppService.mainApp.register() } catch { note("Hubbubb camera: could not add a login item: \(error)") }
         }
         server = CameraServer { [weak self] method, path, query, body in
             self?.route(method, path, query, body) ?? .json("503 Service Unavailable", ["ok": false])
         }
-        if server == nil { NSLog("Hubbubb camera: no companion token or port \(CameraServer.port) busy; Home Assistant cannot connect") }
+        if server == nil { note("Hubbubb camera: no companion token or port \(CameraServer.port) busy; Home Assistant cannot connect") }
         switch AVCaptureDevice.authorizationStatus(for: .video) {
         case .authorized:
             configure()
@@ -807,6 +841,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     private var latestNames: [String] = []
     private var latestAnimals: [String] = []
     private var followPausedUntil = Date.distantPast
+    private var nobodyInView = true  // under settingsLock; read by the mood engine
     private let lookQueue = DispatchQueue(label: "com.hubbubb.camera.look")
     private var itemBook = ItemBook.load()  // lookQueue only
     // Jarvis's body language (moodQueue only).
@@ -829,6 +864,9 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     private var smoothedFaceCenter: CGPoint?
     private var lastCenterTime = Date.distantPast
     private var velocityX: CGFloat = 0
+    private var velocityY: CGFloat = 0
+    // Alternate search passes between seated and standing head height.
+    private var searchRaised = false
     private var gimbalMoving = false
     private var chased = false
     private var faceLostSince: Date?
@@ -909,13 +947,20 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             identifyFaces(handler, now: now)
             let enrollMessage = enroll(handler, visible: tracks.filter(\.visible))
 
+            settingsLock.lock()
+            nobodyInView = visible.isEmpty
+            settingsLock.unlock()
             if visible.isEmpty {
+                // Jarvis's nodding pauses following; never let it keep the camera
+                // still while the person is out of view.
+                if let lostSince = faceLostSince, now.timeIntervalSince(lostSince) > 0.8 { endMood(reason: "lost sight of them") }
                 recoverLostFace()
             } else {
                 if faceLostSince != nil {
                     smoothedFaceCenter = nil
                     chased = false
                     velocityX = 0
+                    velocityY = 0
                     ptzQueue.async { [weak self] in self?.searchPan = nil }
                 }
                 faceLostSince = nil
@@ -1256,8 +1301,16 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     func setMood(_ mood: String, strength: Double) {
         moodQueue.async { [self] in
             let now = Date()
-            if mood == "idle" {
-                stopMood()
+            settingsLock.lock()
+            let nobody = nobodyInView
+            settingsLock.unlock()
+            // Idle ends it; and with nobody in view the camera has better things
+            // to do (finding them) than nodding at an empty couch.
+            if mood == "idle" || nobody {
+                if moodTimer != nil {
+                    note("Hubbubb camera: mood idle%@", nobody && mood != "idle" ? " (nobody in view)" : "")
+                    stopMood()
+                }
                 return
             }
             if moodTimer == nil {
@@ -1269,7 +1322,10 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 moodTimer = timer
                 timer.resume()
             }
-            if mood != currentMood { moodStarted = now }
+            if mood != currentMood {
+                moodStarted = now
+                note("Hubbubb camera: mood %@", mood)
+            }
             currentMood = mood
             moodStrength = strength
             moodRefreshed = now
@@ -1283,9 +1339,21 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
 
     private func moodTick() {
         guard let base = moodBase else { return }
-        if Date().timeIntervalSince(moodRefreshed) > 60 { return stopMood() }
+        if Date().timeIntervalSince(moodRefreshed) > 30 {
+            note("Hubbubb camera: no word from Home Assistant for 30 s; ending the %@ motion", currentMood)
+            return stopMood()
+        }
         let o = Mood.offset(currentMood, t: Date().timeIntervalSince(moodStarted), strength: moodStrength)
         ptzQueue.async { _ = hubbubbLinkCameraPointAt(base.pan + o.pan, base.tilt + o.tilt) }
+    }
+
+    /// End any mood from the vision thread (person lost); a no-op when idle.
+    private func endMood(reason: String) {
+        moodQueue.async { [self] in
+            guard moodTimer != nil else { return }
+            note("Hubbubb camera: ending the %@ motion: %@", currentMood, reason)
+            stopMood()
+        }
     }
 
     private func stopMood() {
@@ -1467,7 +1535,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         settingsLock.unlock()
         let rawValue = range.minimum + Int((clamped - 1) / 3 * CGFloat(range.maximum - range.minimum))
         ptzQueue.async {
-            if hubbubbLinkCameraZoomSet(rawValue) != 1 { NSLog("Hubbubb camera: the Link 2 rejected a zoom command") }
+            if hubbubbLinkCameraZoomSet(rawValue) != 1 { note("Hubbubb camera: the Link 2 rejected a zoom command") }
         }
     }
 
@@ -1484,7 +1552,10 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         guard enabled else { return }
         // Zooming out is always safe; zoom in only once the gimbal has them centred.
         guard target < current || (abs(point.x - 0.5) < 0.10 && abs(point.y - 0.5) < 0.12) else { return }
-        let smoothed = current + (target - current) * 0.12
+        // Out fast (standing up leaves a tight frame in a second), in gently.
+        let nearEdge = abs(point.x - 0.5) > 0.3 || abs(point.y - 0.5) > 0.3
+        let rate: CGFloat = target < current ? (nearEdge ? 0.7 : 0.35) : 0.12
+        let smoothed = current + (target - current) * rate
         guard abs(smoothed - current) > 0.04 else { return }
         applyHardwareZoom(smoothed)
     }
@@ -1521,8 +1592,15 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         if !chased, let last = smoothedFaceCenter {
             chased = true
             lastAutoFollowUpdate = now
+            // Up or down first when that is how they left (standing up); sideways
+            // only when they walked off the side.
+            let rise = Gimbal.exitTilt(lastY: last.y, velocityY: velocityY)
             let direction = Gimbal.exitDirection(lastX: last.x, velocityX: velocityX)
-            let jump = Float(70 / current * 0.6)
+            let sideways = rise == 0 || last.x > 0.75 || last.x < 0.25
+            let jump = sideways ? Float(70 / current * 0.6) : 0
+            let lift = rise * Float(43 / current * 0.6)
+            note("Hubbubb camera: lost them at (%.2f, %.2f), zoom %.1f; chasing pan %+.0f° tilt %+.0f°",
+                  Double(last.x), Double(last.y), Double(current), Double(direction * jump), Double(lift))
             if autoZoom, current > 1.03 { applyHardwareZoom(1) }
             ptzQueue.async { [weak self] in
                 guard let self, let position = cameraPosition() else { return }
@@ -1530,7 +1608,8 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 self.searchCenter = target
                 self.searchPan = target
                 self.searchDirection = direction
-                _ = hubbubbLinkCameraPointAt(target, position.tilt)
+                self.searchRaised = rise > 0
+                _ = hubbubbLinkCameraPointAt(target, position.tilt + lift)
             }
             return
         }
@@ -1551,9 +1630,12 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             if next > high || next < low {
                 self.searchDirection = -self.searchDirection
                 next = min(high, max(low, next))
+                // Each pass alternates seated and standing head height: the room
+                // map mostly learns seated heads, and a standing one is ~15° up.
+                self.searchRaised.toggle()
             }
             self.searchPan = next
-            _ = hubbubbLinkCameraPointAt(next, tilt(next))
+            _ = hubbubbLinkCameraPointAt(next, tilt(next) + (self.searchRaised ? 15 : 0))
         }
     }
 
@@ -1570,6 +1652,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         } ?? measured
         if let last = smoothedFaceCenter, now.timeIntervalSince(lastCenterTime) > 0 {
             velocityX = velocityX * 0.6 + (center.x - last.x) / now.timeIntervalSince(lastCenterTime) * 0.4
+            velocityY = velocityY * 0.6 + (center.y - last.y) / now.timeIntervalSince(lastCenterTime) * 0.4
         }
         smoothedFaceCenter = center
         lastCenterTime = now

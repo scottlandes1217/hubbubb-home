@@ -112,3 +112,9 @@ glance, speech-like nods; a few degrees at most), pausing following until
 `idle` or 60 s without a refresh, then returns. Home Assistant drives it from
 the voice pucks' states, along with optional coloured lights; both are set up
 in the Camera panel's Jarvis tab.
+
+## When it does something odd
+
+`~/Library/Logs/Hubbubb Local Camera.log` records each decision worth asking
+about: losing someone (where, at what zoom, which way it chased) and every
+Jarvis motion starting and ending (and why).
