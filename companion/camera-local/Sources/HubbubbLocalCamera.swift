@@ -466,7 +466,12 @@ private enum HandShape {
         let dx = (thumbTip.x - thumbMP.x) * 16 / 9, dy = thumbTip.y - thumbMP.y
         let thumbLowered = dy / max(0.0001, hypot(dx, dy)) < -0.2
         if thumbRaised && curled >= 3 && thumbToBase > palmWidth * 0.35 { return "thumbs_up" }
-        if thumbLowered && curled >= 3 && thumbToPalm > palmWidth * 0.55 && thumbToBase > palmWidth * 0.35 { return "thumbs_down" }
+        // Thumbs-down can't rely on curled fingers: knuckles to the camera, the
+        // folded fingertips are hidden and Vision places them as if straight
+        // (seen in recorded real hands). A thumb well below its joints, with no
+        // finger pointing up, is the gesture.
+        let thumbWellDown = thumbTip.y < thumbMP.y - size * 0.4 && thumbTip.y < thumbIP.y
+        if thumbLowered && thumbWellDown && extended == 0 && thumbToBase > palmWidth * 0.35 { return "thumbs_down" }
         // A relaxed open hand keeps its thumb at about half a palm out.
         if extended == 4 && thumbToPalm > palmWidth * 0.3 { return "open_palm" }
         return nil
@@ -650,6 +655,17 @@ private enum HubbubbLocalCameraApp {
     static func main() {
         if CommandLine.arguments.contains("--self-test") {
             RoomMap.selfTest()
+            return
+        }
+        // `--replay file.jsonl`: run recorded real hands through the shape rules.
+        if let at = CommandLine.arguments.firstIndex(of: "--replay"), at + 1 < CommandLine.arguments.count,
+           let text = try? String(contentsOfFile: CommandLine.arguments[at + 1], encoding: .utf8) {
+            for line in text.split(separator: "\n") {
+                guard let row = (try? JSONSerialization.jsonObject(with: Data(line.utf8))) as? [String: Any],
+                      let joints = row["joints"] as? [String: [Double]] else { continue }
+                let points = joints.mapValues { CGPoint(x: $0[0], y: $0[1]) }
+                print(Int(row["ts"] as? Double ?? 0), HandShape.classify(points) ?? "-")
+            }
             return
         }
         let application = NSApplication.shared
