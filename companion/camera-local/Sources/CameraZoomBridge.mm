@@ -82,30 +82,12 @@ extern "C" int HubbubbLinkCameraPointAt(float pan, float tilt) {
     return cameraController->SetPanTiltAbsolute(targetPan, targetTilt) ? 1 : 0;
 }
 
-extern "C" int HubbubbLinkCameraFollowFace(float centerX, float centerY) {
+// Move the camera by pan/tilt degrees from where it points now.
+extern "C" int HubbubbLinkCameraNudge(float pan, float tilt) {
     std::lock_guard<std::mutex> lock(cameraMutex);
-    if (!cameraController || centerX < 0.0f || centerX > 1.0f || centerY < 0.0f || centerY > 1.0f) return 0;
-    if (!cameraController->GetPanTiltAbsoluteRange(panRange, tiltRange)) return 0;
-
-    const float horizontalError = centerX - 0.5f;
-    const float verticalError = centerY - 0.5f;
-    constexpr float deadZone = 0.08f;
-    if (std::abs(horizontalError) < deadZone && std::abs(verticalError) < deadZone) return 1;
-
-    constexpr float degreesPerFrameError = 10.0f;
-    constexpr float maxDegreesPerUpdate = 0.65f;
-    const long panStep = std::max(1L, panRange.step);
-    const long tiltStep = std::max(1L, tiltRange.step);
-    auto movement = [=](float error, long step) {
-        const float degrees = std::clamp(error * degreesPerFrameError,
-                                         -maxDegreesPerUpdate, maxDegreesPerUpdate);
-        long units = std::lround(degrees * unitsPerDegree);
-        if (units == 0 && std::abs(error) >= deadZone) units = error > 0 ? step : -step;
-        return static_cast<long>(std::round(static_cast<double>(units) / step)) * step;
-    };
-
-    const long targetPan = std::clamp(panRange.cur + movement(horizontalError, panStep), panRange.min, panRange.max);
-    const long targetTilt = std::clamp(tiltRange.cur + movement(verticalError, tiltStep), tiltRange.min, tiltRange.max);
+    if (!cameraController || !cameraController->GetPanTiltAbsoluteRange(panRange, tiltRange)) return 0;
+    const long targetPan = std::clamp(panRange.cur + std::lround(pan * unitsPerDegree), panRange.min, panRange.max);
+    const long targetTilt = std::clamp(tiltRange.cur + std::lround(tilt * unitsPerDegree), tiltRange.min, tiltRange.max);
     return cameraController->SetPanTiltAbsolute(targetPan, targetTilt) ? 1 : 0;
 }
 

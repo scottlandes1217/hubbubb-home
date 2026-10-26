@@ -83,12 +83,45 @@ private struct RoomMap {
         guard let search = map.search else { fatalError("should be learned") }
         precondition(search.low == -60 && search.high == 15, "span is \(search.low)...\(search.high)")
         precondition(search.tilt(-50) == -20 && search.tilt(10) == -5, "tilt follows the nearest seen spot")
+        let still = Gimbal.step(error: CGPoint(x: 0.06, y: 0), zoom: 1, moving: false, gain: 0.45)
+        precondition(!still.moving, "small error inside the dead zone stays still")
+        let settling = Gimbal.step(error: CGPoint(x: 0.06, y: 0), zoom: 1, moving: true, gain: 0.45)
+        precondition(settling.moving && settling.pan > 0, "but finishes a move it started")
+        let wide = Gimbal.step(error: CGPoint(x: 0.2, y: 0), zoom: 1, moving: false, gain: 0.45)
+        let tight = Gimbal.step(error: CGPoint(x: 0.2, y: 0), zoom: 4, moving: false, gain: 0.45)
+        precondition(wide.pan > tight.pan * 3.9 && wide.pan <= 8, "moves scale down with zoom")
+        precondition(Gimbal.exitDirection(lastX: 0.8, velocityX: -1) == 1, "edge wins")
+        precondition(Gimbal.exitDirection(lastX: 0.5, velocityX: -0.3) == -1, "then motion")
         print("RoomMap self-test passed")
     }
 }
 
-@_silgen_name("HubbubbLinkCameraFollowFace")
-private func hubbubbLinkCameraFollowFace(_ centerX: Float, _ centerY: Float) -> Int32
+@_silgen_name("HubbubbLinkCameraNudge")
+private func hubbubbLinkCameraNudge(_ pan: Float, _ tilt: Float) -> Int32
+
+/// The follow controller's math, kept pure so `--self-test` can check it.
+private enum Gimbal {
+    /// One correction, in degrees, for a subject `error` off center (in frame
+    /// fractions). Proportional and zoom-aware, so it neither crawls at 1× nor
+    /// overshoots at 4×. Hysteresis: starts beyond 10% off, keeps going until
+    /// within 3%, so it settles instead of twitching at the edge of a dead zone.
+    static func step(error: CGPoint, zoom: CGFloat, moving: Bool, gain: CGFloat) -> (pan: Float, tilt: Float, moving: Bool) {
+        let size = max(abs(error.x), abs(error.y))
+        guard moving ? size > 0.03 : size > 0.10 else { return (0, 0, false) }
+        // Link 2: about 70° × 43° across the frame at 1×.
+        let pan = max(-8, min(8, error.x * 70 / zoom * gain))
+        let tilt = max(-5, min(5, error.y * 43 / zoom * gain))
+        return (Float(pan), Float(tilt), true)
+    }
+
+    /// Which way someone left the frame: the edge they were near, else the
+    /// way they were moving.
+    static func exitDirection(lastX: CGFloat, velocityX: CGFloat) -> Float {
+        if lastX > 0.6 { return 1 }
+        if lastX < 0.4 { return -1 }
+        return velocityX >= 0 ? 1 : -1
+    }
+}
 
 @main
 private enum HubbubbLocalCameraApp {
@@ -1255,8 +1288,11 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     private var lastAutoZoomUpdate = Date.distantPast
     private var lastAutoFollowUpdate = Date.distantPast
     private var smoothedFaceCenter: CGPoint?
+    private var lastCenterTime = Date.distantPast
+    private var velocityX: CGFloat = 0
+    private var gimbalMoving = false
+    private var chased = false
     private var faceLostSince: Date?
-    private var searchSuggestedDirection: Float = 1
     // ptzQueue-only: the sweep's current pan and direction, and the room map.
     private var searchPan: Float?
     private var searchCenter: Float?
@@ -1327,6 +1363,8 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             } else {
                 if faceLostSince != nil {
                     smoothedFaceCenter = nil
+                    chased = false
+                    velocityX = 0
                     ptzQueue.async { [weak self] in self?.searchPan = nil }
                 }
                 faceLostSince = nil
@@ -1430,10 +1468,6 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     /// Point the camera at whoever is in view: one person's face, or the group.
     private func frame(_ visible: [Track]) {
         let aim = visible.map(\.aim).reduce(visible[0].aim) { $0.union($1) }
-        let horizontalOffset = aim.midX - 0.5
-        if abs(horizontalOffset) > 0.05 {
-            searchSuggestedDirection = horizontalOffset > 0 ? 1 : -1
-        }
         // Someone near the middle of the frame: note where the camera points.
         let now = Date()
         if abs(aim.midX - 0.5) < 0.2, abs(aim.midY - 0.5) < 0.25, now.timeIntervalSince(lastMapUpdate) > 2 {
@@ -1780,21 +1814,31 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         // up is how it kept looking for someone out of frame; never resting is
         // a camera panning all day in an empty room.
         let searchCycle = lostFor.truncatingRemainder(dividingBy: 45)
-        guard following, lostFor > 0.45, searchCycle < 20 else { return }
+        guard following, lostFor > 0.3, searchCycle < 20 else { return }
 
-        // Widen in small steps first; this usually reacquires someone who simply
-        // stepped outside the tightly zoomed face box without moving the gimbal.
-        if autoZoom, current > 1.03, now.timeIntervalSince(lastAutoZoomUpdate) > 0.20 {
-            lastAutoZoomUpdate = now
-            applyHardwareZoom(max(1, current + (1 - current) * 0.18))
+        // Chase first: they walked out of one side, so zoom out at once and jump
+        // about half a frame that way - usually that is exactly where they are.
+        if !chased, let last = smoothedFaceCenter {
+            chased = true
+            lastAutoFollowUpdate = now
+            let direction = Gimbal.exitDirection(lastX: last.x, velocityX: velocityX)
+            let jump = Float(70 / current * 0.6)
+            if autoZoom, current > 1.03 { applyHardwareZoom(1) }
+            ptzQueue.async { [weak self] in
+                guard let self, let position = cameraPosition() else { return }
+                let target = position.pan + direction * jump
+                self.searchCenter = target
+                self.searchPan = target
+                self.searchDirection = direction
+                _ = hubbubbLinkCameraPointAt(target, position.tilt)
+            }
             return
         }
 
-        // Once wide, make a slow bounded sweep so a person who moved sideways
-        // can be found again. A newly detected face immediately stops the sweep.
+        // Still nobody: sweep the room, carrying on in the direction they went.
+        // A newly detected person immediately stops the sweep.
         guard lostFor > 1.5, now.timeIntervalSince(lastAutoFollowUpdate) > 0.28 else { return }
         lastAutoFollowUpdate = now
-        let suggestedDirection = searchSuggestedDirection
         ptzQueue.async { [weak self] in
             guard let self else { return }
             let (low, high, tilt) = self.searchSpan()
@@ -1802,7 +1846,6 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 guard let position = cameraPosition() else { return }
                 self.searchCenter = position.pan
                 self.searchPan = min(high, max(low, position.pan))
-                self.searchDirection = suggestedDirection
             }
             var next = (self.searchPan ?? 0) + self.searchDirection * 6
             if next > high || next < low {
@@ -1818,28 +1861,27 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         let now = Date()
         settingsLock.lock()
         let enabled = autoFollowEnabled && now > followPausedUntil
+        let zoom = currentZoomFactor
         settingsLock.unlock()
-        guard enabled else { return }
-        guard now.timeIntervalSince(lastAutoFollowUpdate) > 0.20 else { return }
-        lastAutoFollowUpdate = now
-        let measuredCenter = CGPoint(x: face.midX, y: face.midY)
-        let center: CGPoint
-        if let smoothedFaceCenter {
-            let smoothing: CGFloat = 0.30
-            center = CGPoint(
-                x: smoothedFaceCenter.x + (measuredCenter.x - smoothedFaceCenter.x) * smoothing,
-                y: smoothedFaceCenter.y + (measuredCenter.y - smoothedFaceCenter.y) * smoothing
-            )
-        } else {
-            center = measuredCenter
+        // Light smoothing against detection jitter; heavier smoothing is lag.
+        let measured = CGPoint(x: face.midX, y: face.midY)
+        let center = smoothedFaceCenter.map {
+            CGPoint(x: $0.x + (measured.x - $0.x) * 0.5, y: $0.y + (measured.y - $0.y) * 0.5)
+        } ?? measured
+        if let last = smoothedFaceCenter, now.timeIntervalSince(lastCenterTime) > 0 {
+            velocityX = velocityX * 0.6 + (center.x - last.x) / now.timeIntervalSince(lastCenterTime) * 0.4
         }
         smoothedFaceCenter = center
-        guard abs(center.x - 0.5) > 0.08 || abs(center.y - 0.5) > 0.08 else { return }
-        let centerX = Float(center.x)
-        let centerY = Float(center.y)
-        ptzQueue.async {
-            _ = hubbubbLinkCameraFollowFace(centerX, centerY)
-        }
+        lastCenterTime = now
+        guard enabled, now.timeIntervalSince(lastAutoFollowUpdate) > 0.15 else { return }
+        // Calibration knob: share of the error corrected per update. Higher is
+        // snappier; too high and it overshoots, since each frame lags the move.
+        let gain = CGFloat(UserDefaults.standard.object(forKey: "followGain") as? Double ?? 0.45)
+        let step = Gimbal.step(error: CGPoint(x: center.x - 0.5, y: center.y - 0.5), zoom: zoom, moving: gimbalMoving, gain: gain)
+        gimbalMoving = step.moving
+        guard step.moving else { return }
+        lastAutoFollowUpdate = now
+        ptzQueue.async { _ = hubbubbLinkCameraNudge(step.pan, step.tilt) }
     }
 
     // MARK: - Looking for things

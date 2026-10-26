@@ -86,4 +86,8 @@ This is a capture and local-inference prototype, not yet a virtual webcam.
   Until then it searches `searchDegrees` (45) either side of the last
   sighting at `searchTilt` (-20°). Searches run 20 s on, 25 s off.
   `defaults delete home.jarvis.local-camera roomMap` relearns from scratch.
-- `HubbubbLocalCamera --self-test` checks the room map logic.
+- Following moves in proportion to how far off-center the subject is,
+  scaled by zoom, with a start/stop margin; `followGain` (0.45) tunes it.
+  When someone leaves the frame it zooms out and jumps about half a frame
+  the way they went, then sweeps on in that direction.
+- `HubbubbLocalCamera --self-test` checks the room map and follow math.
