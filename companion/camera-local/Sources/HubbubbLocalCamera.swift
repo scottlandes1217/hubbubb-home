@@ -92,12 +92,64 @@ private struct RoomMap {
         precondition(wide.pan > tight.pan * 3.9 && wide.pan <= 8, "moves scale down with zoom")
         precondition(Gimbal.exitDirection(lastX: 0.8, velocityX: -1) == 1, "edge wins")
         precondition(Gimbal.exitDirection(lastX: 0.5, velocityX: -0.3) == -1, "then motion")
+        var book = ItemBook()
+        book.items["airpods case"] = .init(name: "AirPods case", description: "", image: "")
+        book.items["car keys"] = .init(name: "car keys", description: "", image: "")
+        precondition(book.match("Where are my AirPods?")?.name == "AirPods case", "plural and partial names match")
+        precondition(book.match("have you seen my key")?.name == "car keys", "singular matches plural")
+        precondition(book.match("what's on the whiteboard") == nil, "unrelated questions match nothing")
         print("RoomMap self-test passed")
     }
 }
 
 @_silgen_name("HubbubbLinkCameraNudge")
 private func hubbubbLinkCameraNudge(_ pan: Float, _ tilt: Float) -> Int32
+
+/// Things the user has shown the camera: what each looks like (a description
+/// and a cropped photo) and where it was last seen. The photo is handed to the
+/// vision model with the room view, so "my AirPods" means *these* AirPods.
+private struct ItemBook {
+    struct Item: Codable {
+        var name: String
+        var description: String
+        var image: String
+        var lastSeen: String?
+        var lastSeenAt: Date?
+    }
+    var items: [String: Item] = [:]
+
+    static var folder: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Hubbubb Local Camera/items")
+    }
+
+    static func load() -> ItemBook {
+        let data = try? Data(contentsOf: folder.appendingPathComponent("items.json"))
+        return ItemBook(items: data.flatMap { try? JSONDecoder().decode([String: Item].self, from: $0) } ?? [:])
+    }
+
+    func save() throws {
+        try FileManager.default.createDirectory(at: Self.folder, withIntermediateDirectories: true)
+        try JSONEncoder().encode(items).write(to: Self.folder.appendingPathComponent("items.json"), options: .atomic)
+    }
+
+    static func words(_ text: String) -> Set<String> {
+        Set(text.lowercased().split { !$0.isLetter && !$0.isNumber }.map { word in
+            // "airpods" and "airpod", "keys" and "key" are the same thing here.
+            word.count > 3 && word.hasSuffix("s") ? String(word.dropLast()) : String(word)
+        })
+    }
+
+    /// The taught item a question is about: the one sharing the most
+    /// meaningful words with it ("my", "the" and other short words don't count).
+    func match(_ question: String) -> Item? {
+        let asked = Self.words(question)
+        let scored = items.values.map { item in
+            (item, Self.words(item.name).filter { $0.count >= 3 && asked.contains($0) }.count)
+        }
+        return scored.filter { $0.1 > 0 }.max { $0.1 < $1.1 }?.0
+    }
+}
 
 /// The follow controller's math, kept pure so `--self-test` can check it.
 private enum Gimbal {
@@ -1278,6 +1330,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     private var latestAnimals: [String] = []
     private var followPausedUntil = Date.distantPast
     private let lookQueue = DispatchQueue(label: "com.hubbubb.camera.look")
+    private var itemBook = ItemBook.load()  // lookQueue only
     private var looking = false
     private let settingsLock = NSLock()
     private var autoZoomEnabled = true
@@ -1928,6 +1981,8 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 .filter { abs($0 - start.pan) > 20 }
             var seen: [String] = []
             var result: [String: Any] = [:]
+            let item = itemBook.match(question)
+            let reference = item.flatMap { try? Data(contentsOf: ItemBook.folder.appendingPathComponent($0.image)) }
             for position in [nil] + positions.map(Optional.some) {
                 if let position {
                     ptzQueue.sync { _ = hubbubbLinkCameraPointAt(position, start.tilt) }
@@ -1938,10 +1993,20 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                     break
                 }
                 let visible = inView()
-                guard let reply = askVisionModel(question, image: image, visible: visible) else {
+                guard var reply = askVisionModel(question, image: image, visible: visible, item: item, reference: reference) else {
                     result = ["error": "The vision model on the Mac did not answer."]
                     break
                 }
+                // Too far to read or make out: aim, zoom in, ask once more.
+                if let box = reply["closer"] as? CGRect {
+                    moveCloser(to: box)
+                    if let closer = latestJPEG(),
+                       let second = askVisionModel(question, image: closer, visible: visible, item: item, reference: reference) {
+                        reply = second
+                    }
+                    applyHardwareZoom(1)
+                }
+                reply.removeValue(forKey: "closer")
                 result = reply.merging(visible) { current, _ in current }
                 if reply["found"] as? Bool == true { break }
                 if let answer = reply["answer"] as? String { seen.append(answer) }
@@ -1950,6 +2015,17 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             // that misread a soundbar as a bicycle should not leave the camera on it.
             ptzQueue.sync { _ = hubbubbLinkCameraPointAt(start.pan, start.tilt) }
             if result["found"] as? Bool != true, !seen.isEmpty { result["looked_at"] = seen }
+            if var item {
+                if result["found"] as? Bool == true, let answer = result["answer"] as? String {
+                    item.lastSeen = answer
+                    item.lastSeenAt = Date()
+                    itemBook.items[item.name.lowercased()] = item
+                    try? itemBook.save()
+                } else if let lastSeen = item.lastSeen, let at = item.lastSeenAt {
+                    let ago = RelativeDateTimeFormatter().localizedString(for: at, relativeTo: Date())
+                    result["last_seen"] = "\(ago): \(lastSeen)"
+                }
+            }
             settingsLock.lock()
             followPausedUntil = Date()
             settingsLock.unlock()
@@ -1962,34 +2038,80 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         let frame = latestFrame
         settingsLock.unlock()
         guard let frame else { return nil }
-        let scale = min(1, 1280 / CGFloat(frame.width))
+        // 1920 wide: enough to read a whiteboard across the room.
+        let scale = min(1, 1920 / CGFloat(frame.width))
         let image = CIImage(cgImage: frame).transformed(by: CGAffineTransform(scaleX: scale, y: scale))
         return context.jpegRepresentation(of: image, colorSpace: CGColorSpaceCreateDeviceRGB(),
                                           options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.8])
     }
 
     /// One question, one image, to Ollama on this Mac. -> {"found", "answer"} or nil.
-    private func askVisionModel(_ question: String, image: Data, visible: [String: Any]) -> [String: Any]? {
-        // The house model is multimodal, so no second model has to load.
-        let model = UserDefaults.standard.string(forKey: "visionModel") ?? "huihui_ai/Qwen3.6-abliterated:35b-a3b"
+    private func askVisionModel(
+        _ question: String, image: Data, visible: [String: Any], item: ItemBook.Item?, reference: Data?
+    ) -> [String: Any]? {
         let people = (visible["people"] as? [String]).flatMap { $0.isEmpty ? nil : $0.joined(separator: ", ") } ?? "nobody recognized"
+        var images = [image]
+        var known = ""
+        if let item {
+            known = "The user has shown you their \(item.name) before: \(item.description)\n"
+            if let reference {
+                images.insert(reference, at: 0)
+                known += "The first image is that item, as the user held it up. Answer about the second image, the room now.\n"
+            }
+        }
         let prompt = """
         You are the eyes of a home assistant, looking through a camera in the user's home.
         Question: \(question)
-        People recognized in view by face recognition (trust these names): \(people).
-        Reply with JSON only: {"seen": "...", "found": true or false, "answer": "..."}.
-        First fill "seen": list the main things actually in the image. Then "found": true only if something \
-        in "seen" clearly is what the question asks about, or the question is about what is in view. If you \
-        are not sure, found is false - never guess. "answer" is one or two short spoken sentences; say where \
-        things are relative to furniture or other objects. If it is not visible, say briefly what you see instead.
+        \(known)People recognized in view by face recognition (trust these names): \(people).
+        Reply with JSON only: {"seen": "...", "found": true or false, "closer": true or false, \
+        "box": [x0, y0, x1, y1], "answer": "..."}.
+        First fill "seen": list the main things actually in the image, including any readable text. Then "found": \
+        true only if something in "seen" clearly is what the question asks about, or the question is about what \
+        is in view. If you are not sure, found is false - never guess. "answer" is one or two short spoken \
+        sentences; say where things are relative to furniture or other objects, and read text word for word \
+        when asked what something says. If it is not visible, say briefly what you see instead.
+        "closer": true only if the thing is visible but too small or far away to answer - text too small to \
+        read, an object too small to make out. "box": where the thing asked about is, on a 0-1000 scale from \
+        the top-left corner; [0, 0, 0, 0] if it is not visible.
         """
+        guard let parsed = askOllama(prompt, images: images) else { return nil }
+        guard let answer = parsed["answer"] as? String else {
+            return ["found": false, "answer": parsed["raw"] as? String ?? "I could not make sense of the view."]
+        }
+        var reply: [String: Any] = ["found": parsed["found"] as? Bool ?? false, "answer": answer]
+        if parsed["closer"] as? Bool == true, let box = (parsed["box"] as? [NSNumber])?.map({ CGFloat(truncating: $0) / 1000 }),
+           box.count == 4, box[2] > box[0], box[3] > box[1] {
+            reply["closer"] = CGRect(x: box[0], y: box[1], width: box[2] - box[0], height: box[3] - box[1])
+        }
+        return reply
+    }
+
+    /// Aim at `box` (0-1 fractions, top-left origin) and zoom so it fills about
+    /// half the frame. Blocks while the camera moves.
+    private func moveCloser(to box: CGRect) {
+        settingsLock.lock()
+        let zoom = currentZoomFactor
+        settingsLock.unlock()
+        // Same Link 2 field of view as following: ~70° × 43° at 1×.
+        let pan = Float((box.midX - 0.5) * 70 / zoom)
+        let tilt = Float((0.5 - box.midY) * 43 / zoom)
+        ptzQueue.sync { _ = hubbubbLinkCameraNudge(pan, tilt) }
+        applyHardwareZoom(min(4, zoom * 0.5 / max(box.width, box.height, 0.01)))
+        Thread.sleep(forTimeInterval: 2.5)
+    }
+
+    /// One JSON-mode request to Ollama on this Mac. -> the reply's JSON, or
+    /// {"raw": text} if it wasn't JSON, or nil if Ollama didn't answer.
+    private func askOllama(_ prompt: String, images: [Data]) -> [String: Any]? {
+        // The house model is multimodal, so no second model has to load.
+        let model = UserDefaults.standard.string(forKey: "visionModel") ?? "huihui_ai/Qwen3.6-abliterated:35b-a3b"
         guard let url = URL(string: "http://127.0.0.1:11434/api/chat") else { return nil }
         var request = URLRequest(url: url, timeoutInterval: 90)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try? JSONSerialization.data(withJSONObject: [
             "model": model, "stream": false, "think": false, "format": "json",
-            "messages": [["role": "user", "content": prompt, "images": [image.base64EncodedString()]]]
+            "messages": [["role": "user", "content": prompt, "images": images.map { $0.base64EncodedString() }]]
         ])
         let done = DispatchSemaphore(value: 0)
         var content: String?
@@ -2000,12 +2122,59 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         }.resume()
         done.wait()
         guard let content else { return nil }
-        if let parsed = (try? JSONSerialization.jsonObject(with: Data(content.utf8))) as? [String: Any],
-           parsed["answer"] is String {
-            return ["found": parsed["found"] as? Bool ?? false, "answer": parsed["answer"] as Any]
-        }
-        return ["found": false, "answer": content]
+        return (try? JSONSerialization.jsonObject(with: Data(content.utf8))) as? [String: Any] ?? ["raw": content]
     }
+
+    /// Learn what one of the user's things looks like from the current view:
+    /// a description and a cropped photo, saved under `name`. `hint` says which
+    /// thing ("the thing they are holding up", "on the shelf by the door").
+    func learn(name: String, hint: String) -> [String: Any] {
+        lookQueue.sync {
+            settingsLock.lock()
+            let frame = latestFrame
+            settingsLock.unlock()
+            guard let frame, let image = latestJPEG() else { return ["error": "The camera has no picture right now."] }
+            let prompt = """
+            The user is showing a home camera something they call "\(name)". It is \(hint).
+            Reply with JSON only: {"visible": true or false, "description": "...", "box": [x0, y0, x1, y1]}.
+            "visible": whether you can clearly see that object. "description": one sentence on how it looks - \
+            color, shape, material, size, markings - so it can be recognized again from across the room. \
+            "box": where it is in the image, on a 0-1000 scale from the top-left corner.
+            """
+            guard let reply = askOllama(prompt, images: [image]) else {
+                return ["error": "The vision model on the Mac did not answer."]
+            }
+            guard reply["visible"] as? Bool == true, let description = reply["description"] as? String else {
+                return ["error": "I could not make out the \(name) - hold it up closer to the camera, or say where it is."]
+            }
+            // Crop to the thing, padded; the whole frame if the box makes no sense.
+            var crop = frame
+            if let box = (reply["box"] as? [NSNumber])?.map({ CGFloat(truncating: $0) / 1000 }), box.count == 4,
+               box[2] > box[0], box[3] > box[1] {
+                let w = CGFloat(frame.width), h = CGFloat(frame.height)
+                let rect = CGRect(x: box[0] * w, y: box[1] * h, width: (box[2] - box[0]) * w, height: (box[3] - box[1]) * h)
+                    .insetBy(dx: -(box[2] - box[0]) * w * 0.1, dy: -(box[3] - box[1]) * h * 0.1)
+                crop = frame.cropping(to: rect.intersection(CGRect(x: 0, y: 0, width: w, height: h))) ?? frame
+            }
+            let file = name.lowercased().filter { $0.isLetter || $0.isNumber } + ".jpg"
+            // 512 px is plenty to recognize it by, and keeps every later search fast.
+            let shrink = min(1, 512 / CGFloat(max(crop.width, crop.height)))
+            let small = CIImage(cgImage: crop).transformed(by: CGAffineTransform(scaleX: shrink, y: shrink))
+            guard let jpeg = context.jpegRepresentation(of: small, colorSpace: CGColorSpaceCreateDeviceRGB()) else {
+                return ["error": "Could not save the picture."]
+            }
+            do {
+                try FileManager.default.createDirectory(at: ItemBook.folder, withIntermediateDirectories: true)
+                try jpeg.write(to: ItemBook.folder.appendingPathComponent(file), options: .atomic)
+                itemBook.items[name.lowercased()] = .init(name: name, description: description, image: file)
+                try itemBook.save()
+            } catch {
+                return ["error": "Could not save what I learned: \(error.localizedDescription)"]
+            }
+            return ["learned": name, "looks_like": description]
+        }
+    }
+
 
     private func gestureTitle(_ id: String) -> String {
         switch id {
@@ -2116,6 +2285,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
 /// Jarvis's way in: Home Assistant asks the camera questions over the LAN.
 ///   GET  /people  -> {"people": [...], "animals": [...]}
 ///   POST /look    {"question": "..."} -> {"found", "answer", "people", ...}
+///   POST /learn   {"name": "...", "hint": "..."} -> {"learned", "looks_like"}
 /// Every request needs the companion's token (same Mac, same file), so no
 /// second secret has to be set up. Answers are words; frames never leave.
 private final class LookServer {
@@ -2178,6 +2348,15 @@ private final class LookServer {
         switch (request.first, request.dropFirst().first) {
         case ("GET", "/people"):
             return ("200 OK", processor.inView())
+        case ("POST", "/learn"):
+            let request = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+            guard let name = (request?["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !name.isEmpty, name.count <= 60 else {
+                return ("400 Bad Request", ["ok": false, "detail": "send {\"name\": \"...\", \"hint\": \"...\"}"])
+            }
+            let hint = (request?["hint"] as? String).flatMap { $0.isEmpty ? nil : String($0.prefix(200)) }
+                ?? "the thing the person is holding up to the camera"
+            return ("200 OK", processor.learn(name: name, hint: hint))
         case ("POST", "/look"):
             let question = ((try? JSONSerialization.jsonObject(with: body)) as? [String: Any])?["question"] as? String
             guard let question, !question.isEmpty, question.count <= 300 else {

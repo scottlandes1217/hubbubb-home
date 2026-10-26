@@ -178,8 +178,8 @@ class CompanionClient:
                 result["page_text"] = text
         return results
 
-    async def async_look(self, question: str) -> dict:
-        """Ask the camera app what it sees; it pans to search if it must.
+    async def async_camera(self, endpoint: str, payload: dict) -> dict:
+        """Ask the camera app on the companion's Mac to look or to learn.
 
         Same pattern as web search: it runs beside the companion, so its
         address follows the companion URL and it takes the companion's token.
@@ -189,12 +189,12 @@ class CompanionClient:
         """
         if not self._url:
             raise CompanionError(NOT_CONFIGURED)
-        url = f"http://{urlsplit(self._url).hostname}:{CAMERA_PORT}/look"
+        url = f"http://{urlsplit(self._url).hostname}:{CAMERA_PORT}/{endpoint}"
         headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
         try:
             async with self._session.post(
                 url,
-                json={"question": question},
+                json=payload,
                 headers=headers,
                 timeout=aiohttp.ClientTimeout(total=150),
             ) as resp:
