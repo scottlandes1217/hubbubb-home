@@ -78,5 +78,12 @@ This is a capture and local-inference prototype, not yet a virtual webcam.
   (`~/.claude/hooks/.voice-token`). A look asks the local Ollama vision model
   (`visionModel` default), panning to `lookPanOffsets` (default ±0.35 of the
   pan range around the current view) if needed, then returns to where it was.
-- With nobody in view it searches in bursts (20 s on, 25 s off) up to
-  `searchDegrees` (default 45) either side of the last sighting.
+- The camera learns the room: every couple of seconds with someone centered
+  it records its pan/tilt in 5° pan bins (`roomMap` in its defaults). After
+  30 sightings, searches and `look_around` sweeps cover only the span where
+  people have been seen (bins seen at least 3 times), at the tilt where
+  their heads were. Walls, corners and the back of the TV are skipped.
+  Until then it searches `searchDegrees` (45) either side of the last
+  sighting at `searchTilt` (-20°). Searches run 20 s on, 25 s off.
+  `defaults delete home.jarvis.local-camera roomMap` relearns from scratch.
+- `HubbubbLocalCamera --self-test` checks the room map logic.

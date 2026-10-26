@@ -16,11 +16,6 @@ CameraControlInfo panRange{};
 CameraControlInfo tiltRange{};
 bool trackingModeAvailable = false;
 int cachedTrackingState = 0;
-long searchCenterPan = 0;
-bool searchCenterValid = false;
-constexpr long initialSearchRadius = 5L * 3600L;
-long searchRadius = initialSearchRadius;
-long maxSearchRadius = 45L * 3600L;
 }
 
 extern "C" int HubbubbLinkCameraZoomInitialize(long *minimum, long *maximum, long *step, long *current) {
@@ -67,56 +62,24 @@ extern "C" int HubbubbLinkCameraPanStep(int direction) {
     return cameraController->SetPanTiltAbsolute(targetPan, tiltRange.cur) ? 1 : 0;
 }
 
-extern "C" int HubbubbLinkCameraSearchBegin(int maxDegrees) {
+constexpr float unitsPerDegree = 3600.0f;
+
+// Where the camera points, in degrees (0, 0 = straight ahead).
+extern "C" int HubbubbLinkCameraGetPosition(float *pan, float *tilt) {
     std::lock_guard<std::mutex> lock(cameraMutex);
     if (!cameraController || !cameraController->GetPanTiltAbsoluteRange(panRange, tiltRange)) return 0;
-    searchCenterPan = panRange.cur;
-    searchCenterValid = true;
-    searchRadius = initialSearchRadius;
-    maxSearchRadius = std::max(5, maxDegrees) * 3600L;
+    if (pan) *pan = panRange.cur / unitsPerDegree;
+    if (tilt) *tilt = tiltRange.cur / unitsPerDegree;
     return 1;
 }
 
-// Search around the pan position where the person disappeared. Returns the
-// direction to use next; it reverses at the window edges and doubles the
-// window each time, so a search that started on the wrong thing (a dog's
-// face) widens to the whole room instead of circling it forever.
-extern "C" int HubbubbLinkCameraSearchStep(int direction) {
-    std::lock_guard<std::mutex> lock(cameraMutex);
-    if (!cameraController || (direction != -1 && direction != 1)) return 0;
-    if (!cameraController->GetPanTiltAbsoluteRange(panRange, tiltRange)) return 0;
-    const long step = std::max(1L, panRange.step) * 8; // quicker local sweep steps
-    if (!searchCenterValid) {
-        searchCenterPan = panRange.cur;
-        searchCenterValid = true;
-    }
-    const long low = std::max(panRange.min, searchCenterPan - searchRadius);
-    const long high = std::min(panRange.max, searchCenterPan + searchRadius);
-    const long targetPan = std::clamp(panRange.cur + direction * step, low, high);
-    if (targetPan == panRange.cur) {
-        searchRadius = std::min(searchRadius * 2, maxSearchRadius);
-        return -direction;
-    }
-    return cameraController->SetPanTiltAbsolute(targetPan, tiltRange.cur) ? direction : 0;
-}
-
-// Pan to a fraction of the full range: -1 far left, 0 center, 1 far right.
-extern "C" int HubbubbLinkCameraPanTo(float fraction) {
+// Point the camera at pan/tilt degrees, clamped to what it can reach.
+extern "C" int HubbubbLinkCameraPointAt(float pan, float tilt) {
     std::lock_guard<std::mutex> lock(cameraMutex);
     if (!cameraController || !cameraController->GetPanTiltAbsoluteRange(panRange, tiltRange)) return 0;
-    const long middle = (panRange.min + panRange.max) / 2;
-    const long half = (panRange.max - panRange.min) / 2;
-    const long target = std::clamp(middle + std::lround(std::clamp(fraction, -1.0f, 1.0f) * half),
-                                   panRange.min, panRange.max);
-    return cameraController->SetPanTiltAbsolute(target, tiltRange.cur) ? 1 : 0;
-}
-
-// Where the camera points now, on the same -1...1 scale; 0 if unknown.
-extern "C" float HubbubbLinkCameraPanFraction() {
-    std::lock_guard<std::mutex> lock(cameraMutex);
-    if (!cameraController || !cameraController->GetPanTiltAbsoluteRange(panRange, tiltRange)) return 0;
-    const long half = std::max(1L, (panRange.max - panRange.min) / 2);
-    return static_cast<float>(panRange.cur - (panRange.min + panRange.max) / 2) / half;
+    const long targetPan = std::clamp(std::lround(pan * unitsPerDegree), panRange.min, panRange.max);
+    const long targetTilt = std::clamp(std::lround(tilt * unitsPerDegree), tiltRange.min, tiltRange.max);
+    return cameraController->SetPanTiltAbsolute(targetPan, targetTilt) ? 1 : 0;
 }
 
 extern "C" int HubbubbLinkCameraFollowFace(float centerX, float centerY) {
@@ -129,7 +92,6 @@ extern "C" int HubbubbLinkCameraFollowFace(float centerX, float centerY) {
     constexpr float deadZone = 0.08f;
     if (std::abs(horizontalError) < deadZone && std::abs(verticalError) < deadZone) return 1;
 
-    constexpr float unitsPerDegree = 3600.0f;
     constexpr float degreesPerFrameError = 10.0f;
     constexpr float maxDegreesPerUpdate = 0.65f;
     const long panStep = std::max(1L, panRange.step);

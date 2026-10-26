@@ -17,15 +17,75 @@ private func hubbubbLinkCameraZoomSet(_ value: Int) -> Int32
 
 @_silgen_name("HubbubbLinkCameraPanStep")
 private func hubbubbLinkCameraPanStep(_ direction: Int32) -> Int32
-@_silgen_name("HubbubbLinkCameraSearchStep")
-private func hubbubbLinkCameraSearchStep(_ direction: Int32) -> Int32
-@_silgen_name("HubbubbLinkCameraSearchBegin")
-private func hubbubbLinkCameraSearchBegin(_ maxDegrees: Int32) -> Int32
 
-@_silgen_name("HubbubbLinkCameraPanTo")
-private func hubbubbLinkCameraPanTo(_ fraction: Float) -> Int32
-@_silgen_name("HubbubbLinkCameraPanFraction")
-private func hubbubbLinkCameraPanFraction() -> Float
+@_silgen_name("HubbubbLinkCameraGetPosition")
+private func hubbubbLinkCameraGetPosition(_ pan: UnsafeMutablePointer<Float>, _ tilt: UnsafeMutablePointer<Float>) -> Int32
+@_silgen_name("HubbubbLinkCameraPointAt")
+private func hubbubbLinkCameraPointAt(_ pan: Float, _ tilt: Float) -> Int32
+
+private func cameraPosition() -> (pan: Float, tilt: Float)? {
+    var pan: Float = 0, tilt: Float = 0
+    return hubbubbLinkCameraGetPosition(&pan, &tilt) == 1 ? (pan, tilt) : nil
+}
+
+/// Where people have actually been seen, as camera pan/tilt in 5° pan bins.
+/// Searching only that span skips the walls, the corners and the back of the
+/// TV without anyone marking them: nobody is ever seen there.
+private struct RoomMap {
+    static let binDegrees: Float = 5
+    // Sightings before the map is trusted, and per bin before a bin counts
+    // (one false detection at the wall must not widen the search for good).
+    static let needed = 30
+    static let perBin = 3
+    var bins: [Int: (count: Int, tiltSum: Float)] = [:]
+
+    mutating func add(pan: Float, tilt: Float) {
+        let bin = Int((pan / Self.binDegrees).rounded(.down))
+        let old = bins[bin] ?? (0, 0)
+        // Capped so years of sitting on the couch don't drown out the kitchen.
+        guard old.count < 1000 else { return }
+        bins[bin] = (old.count + 1, old.tiltSum + tilt)
+    }
+
+    /// Pan span to sweep and the tilt to hold at a given pan, or nil until learned.
+    var search: (low: Float, high: Float, tilt: (Float) -> Float)? {
+        let trusted = bins.filter { $0.value.count >= Self.perBin }
+        guard bins.values.reduce(0, { $0 + $1.count }) >= Self.needed,
+              let low = trusted.keys.min(), let high = trusted.keys.max() else { return nil }
+        return (Float(low) * Self.binDegrees, Float(high + 1) * Self.binDegrees, { pan in
+            // Head height where people were seen nearest this direction.
+            let nearest = trusted.min { abs(Float($0.key) * Self.binDegrees - pan) < abs(Float($1.key) * Self.binDegrees - pan) }!
+            return nearest.value.tiltSum / Float(nearest.value.count)
+        })
+    }
+
+    static func load() -> RoomMap {
+        var map = RoomMap()
+        let stored = UserDefaults.standard.dictionary(forKey: "roomMap") as? [String: [Double]] ?? [:]
+        for (key, value) in stored where value.count == 2 {
+            if let bin = Int(key) { map.bins[bin] = (Int(value[0]), Float(value[1])) }
+        }
+        return map
+    }
+
+    func save() {
+        let stored = Dictionary(uniqueKeysWithValues: bins.map { (String($0.key), [Double($0.value.count), Double($0.value.tiltSum)]) })
+        UserDefaults.standard.set(stored, forKey: "roomMap")
+    }
+
+    /// `HubbubbLocalCamera --self-test`
+    static func selfTest() {
+        var map = RoomMap()
+        for _ in 0..<20 { map.add(pan: -60, tilt: -20) }   // couch
+        precondition(map.search == nil, "not trusted before \(needed) sightings")
+        for _ in 0..<12 { map.add(pan: 12, tilt: -5) }     // kitchen, standing
+        map.add(pan: 120, tilt: 0)                          // one false hit at the wall
+        guard let search = map.search else { fatalError("should be learned") }
+        precondition(search.low == -60 && search.high == 15, "span is \(search.low)...\(search.high)")
+        precondition(search.tilt(-50) == -20 && search.tilt(10) == -5, "tilt follows the nearest seen spot")
+        print("RoomMap self-test passed")
+    }
+}
 
 @_silgen_name("HubbubbLinkCameraFollowFace")
 private func hubbubbLinkCameraFollowFace(_ centerX: Float, _ centerY: Float) -> Int32
@@ -33,6 +93,10 @@ private func hubbubbLinkCameraFollowFace(_ centerX: Float, _ centerY: Float) -> 
 @main
 private enum HubbubbLocalCameraApp {
     static func main() {
+        if CommandLine.arguments.contains("--self-test") {
+            RoomMap.selfTest()
+            return
+        }
         let application = NSApplication.shared
         application.setActivationPolicy(.regular)
         let delegate = CameraAppDelegate()
@@ -1192,9 +1256,14 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     private var lastAutoFollowUpdate = Date.distantPast
     private var smoothedFaceCenter: CGPoint?
     private var faceLostSince: Date?
-    private var searchDirection: Int32 = 1
-    private var searchSuggestedDirection: Int32 = 1
-    private var searchNeedsBegin = true
+    private var searchSuggestedDirection: Float = 1
+    // ptzQueue-only: the sweep's current pan and direction, and the room map.
+    private var searchPan: Float?
+    private var searchCenter: Float?
+    private var searchDirection: Float = 1
+    private var roomMap = RoomMap.load()
+    private var lastSighting: (pan: Float, tilt: Float)?
+    private var lastMapUpdate = Date.distantPast
     // Seconds between volume steps while thumbs up/down is held; lower = faster ramp.
     private let volumeRepeatInterval: TimeInterval = 0.35
 
@@ -1258,7 +1327,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             } else {
                 if faceLostSince != nil {
                     smoothedFaceCenter = nil
-                    ptzQueue.async { [weak self] in self?.searchNeedsBegin = true }
+                    ptzQueue.async { [weak self] in self?.searchPan = nil }
                 }
                 faceLostSince = nil
                 frame(visible)
@@ -1364,6 +1433,17 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         let horizontalOffset = aim.midX - 0.5
         if abs(horizontalOffset) > 0.05 {
             searchSuggestedDirection = horizontalOffset > 0 ? 1 : -1
+        }
+        // Someone near the middle of the frame: note where the camera points.
+        let now = Date()
+        if abs(aim.midX - 0.5) < 0.2, abs(aim.midY - 0.5) < 0.25, now.timeIntervalSince(lastMapUpdate) > 2 {
+            lastMapUpdate = now
+            ptzQueue.async { [weak self] in
+                guard let self, let position = cameraPosition() else { return }
+                self.lastSighting = position
+                self.roomMap.add(pan: position.pan, tilt: position.tilt)
+                self.roomMap.save()
+            }
         }
         if visible.count == 1, let face = visible[0].face {
             adjustHardwareZoom(forFace: face)
@@ -1675,6 +1755,18 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         applyHardwareZoom(smoothed)
     }
 
+    /// Pan span to search and tilt per pan. ptzQueue only. Learned from where
+    /// people have been seen; until then, `searchDegrees` (45) either side of
+    /// the last sighting at `searchTilt` (-20°: the camera sits high on the TV).
+    private func searchSpan() -> (low: Float, high: Float, tilt: (Float) -> Float) {
+        if let learned = roomMap.search { return learned }
+        let defaults = UserDefaults.standard
+        let degrees = Float(defaults.object(forKey: "searchDegrees") as? Double ?? 45)
+        let tilt = Float(defaults.object(forKey: "searchTilt") as? Double ?? -20)
+        let center = lastSighting?.pan ?? searchCenter ?? cameraPosition()?.pan ?? 0
+        return (center - degrees, center + degrees, { _ in tilt })
+    }
+
     private func recoverLostFace() {
         let now = Date()
         if faceLostSince == nil { faceLostSince = now }
@@ -1705,16 +1797,20 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         let suggestedDirection = searchSuggestedDirection
         ptzQueue.async { [weak self] in
             guard let self else { return }
-            if self.searchNeedsBegin {
+            let (low, high, tilt) = self.searchSpan()
+            if self.searchPan == nil {
+                guard let position = cameraPosition() else { return }
+                self.searchCenter = position.pan
+                self.searchPan = min(high, max(low, position.pan))
                 self.searchDirection = suggestedDirection
-                // Calibration knob: how far either side of the last sighting to
-                // search. The camera sits on the TV, so much wider looks at the wall.
-                let degrees = UserDefaults.standard.object(forKey: "searchDegrees") as? Int ?? 45
-                guard hubbubbLinkCameraSearchBegin(Int32(degrees)) == 1 else { return }
-                self.searchNeedsBegin = false
             }
-            let next = hubbubbLinkCameraSearchStep(self.searchDirection)
-            if next != 0 { self.searchDirection = next }
+            var next = (self.searchPan ?? 0) + self.searchDirection * 6
+            if next > high || next < low {
+                self.searchDirection = -self.searchDirection
+                next = min(high, max(low, next))
+            }
+            self.searchPan = next
+            _ = hubbubbLinkCameraPointAt(next, tilt(next))
         }
     }
 
@@ -1763,19 +1859,19 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             settingsLock.lock()
             followPausedUntil = .distantFuture
             settingsLock.unlock()
-            let start = hubbubbLinkCameraPanFraction()
+            let start = ptzQueue.sync { cameraPosition() } ?? (0, 0)
             applyHardwareZoom(1)
             Thread.sleep(forTimeInterval: 1.0)
-            // Calibration knob: where else to look, as offsets from where the camera
-            // already points (it faces into the room), in fractions of the pan
-            // range; 0.35 is about 47° on the Link 2.
-            let offsets = UserDefaults.standard.array(forKey: "lookPanOffsets") as? [Double] ?? [-0.35, 0.35]
-            let positions = offsets.map { max(-1, min(1, Double(start) + $0)) }
+            // Three views across the span people use, minus any close to where
+            // the camera already looks; the current tilt suits tables and floors.
+            let (low, high, _) = ptzQueue.sync { searchSpan() }
+            let positions = [low + (high - low) / 6, (low + high) / 2, high - (high - low) / 6]
+                .filter { abs($0 - start.pan) > 20 }
             var seen: [String] = []
             var result: [String: Any] = [:]
             for position in [nil] + positions.map(Optional.some) {
                 if let position {
-                    ptzQueue.sync { _ = hubbubbLinkCameraPanTo(Float(position)) }
+                    ptzQueue.sync { _ = hubbubbLinkCameraPointAt(position, start.tilt) }
                     Thread.sleep(forTimeInterval: 1.8)  // let the gimbal settle and new frames arrive
                 }
                 guard let image = latestJPEG() else {
@@ -1793,7 +1889,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             }
             // Always point back where it was: the answer is in words, and a model
             // that misread a soundbar as a bicycle should not leave the camera on it.
-            ptzQueue.sync { _ = hubbubbLinkCameraPanTo(start) }
+            ptzQueue.sync { _ = hubbubbLinkCameraPointAt(start.pan, start.tilt) }
             if result["found"] as? Bool != true, !seen.isEmpty { result["looked_at"] = seen }
             settingsLock.lock()
             followPausedUntil = Date()
