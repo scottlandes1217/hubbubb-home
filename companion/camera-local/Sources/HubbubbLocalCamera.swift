@@ -207,6 +207,8 @@ private struct RoomMap {
         let flat = (wrist: CGPoint(x: 0.6, y: 0.5), elbow: CGPoint(x: 0.5, y: 0.5))
         precondition(!(GestureGate.isRaised(wrist: flat.wrist, elbow: flat.elbow)
                        || GestureGate.isRaised(wrist: flat.wrist, elbow: flat.elbow, up: lying)), "a forearm lying flat on the blanket, away from the head, does not")
+        precondition(GestureGate.together(CGPoint(x: 0.5, y: 0.5), CGPoint(x: 0.53, y: 0.51), handLength: 0.05), "two hands on a phone are together")
+        precondition(!GestureGate.together(CGPoint(x: 0.3, y: 0.5), CGPoint(x: 0.6, y: 0.5), handLength: 0.05), "one hand up, the other on the couch: apart")
         let head = GestureGate.head(face, hair: 0.9, chin: 0.25)
         precondition(head.contains(CGPoint(x: 0.49, y: 0.58)), "a fork at the mouth, just under the chin, is in the head zone")
         precondition(!head.contains(CGPoint(x: 0.6, y: 0.50)), "a thumbs up beside the chest is not")
@@ -388,6 +390,12 @@ private enum GestureGate {
         let mx = (l.x + r.x) / 2, my = (l.y + r.y) / 2
         let nx = (n.x - mx) * 16 / 9, ny = n.y - my
         return (nx * ex + ny * ey) / (eyes * eyes)
+    }
+
+    /// Whether two hands are together, as when holding a phone: wrists within
+    /// `hands` hand-lengths of each other (aspect-corrected).
+    static func together(_ a: CGPoint, _ b: CGPoint, handLength: CGFloat, hands: CGFloat = 2.5) -> Bool {
+        hypot((a.x - b.x) * 16 / 9, a.y - b.y) < max(0.01, handLength) * hands
     }
 
     /// Whether a wrist held still: every recent position within `tolerance`
@@ -1139,6 +1147,9 @@ private struct GestureVotes {
     var pausedUntil = Date.distantPast
     // The gesturing wrist's recent positions; a gesture has to be held still.
     var wrists: [CGPoint] = []
+    // Thumb and index tips relative to the wrist, in hand lengths: scrolling
+    // a phone moves them while the wrist stays put.
+    var tips: [CGPoint] = []
     // One gesture at a time: after one fires, a different one waits.
     var lastFired: String?
     var quietUntil = Date.distantPast
@@ -1436,7 +1447,16 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             let requireLooking = UserDefaults.standard.object(forKey: "requireLooking") as? Bool ?? true
             for index in tracks.indices where tracks[index].visible {
                 let track = tracks[index]
-                var raised = (handsByTrack[track.id] ?? []).filter { hand in
+                // Both hands together - a phone, a cup, a book - is never a gesture.
+                let own = handsByTrack[track.id] ?? []
+                let wrists = own.compactMap { try? $0.recognizedPoint(.wrist) }.filter { $0.confidence > 0.1 }.map(\.location)
+                let handLength = own.compactMap { hand -> CGFloat? in
+                    guard let w = try? hand.recognizedPoint(.wrist), let m = try? hand.recognizedPoint(.middleMCP),
+                          w.confidence > 0.1, m.confidence > 0.1 else { return nil }
+                    return hypot((w.location.x - m.location.x) * 16 / 9, w.location.y - m.location.y)
+                }.max() ?? 0.04
+                let holding = wrists.count >= 2 && GestureGate.together(wrists[0], wrists[1], handLength: handLength)
+                var raised = holding ? [] : own.filter { hand in
                     guard let wrist = try? hand.recognizedPoint(.wrist), wrist.confidence > 0.1 else { return false }
                     // Lifted against gravity or toward their head: reclining, people
                     // hold a hand straight up; lying flat, toward the head works too.
@@ -1475,10 +1495,16 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
 
             if raisedHands > 0 { framingHoldUntil = now.addingTimeInterval(1.2) }
             let people = visible.map { $0.name ?? "someone" }
+            let holdingSomething = visible.contains { track in
+                let w = (handsByTrack[track.id] ?? []).compactMap { try? $0.recognizedPoint(.wrist) }.filter { $0.confidence > 0.1 }.map(\.location)
+                return w.count >= 2 && GestureGate.together(w[0], w[1], handLength: 0.04)
+            }
             let idle = visible.isEmpty
                 ? "No one in view. Preview and gesture analysis stay local."
                 : (hands.isEmpty
                     ? "\(people.joined(separator: ", ")) in view. Raise a hand to gesture."
+                    : holdingSomething && raisedHands == 0
+                    ? "Both hands together (phone?), so gestures are ignored."
                     : lookingAway > 0 && raisedHands == 0
                     ? "Hand raised, but not looking at the camera, so it's ignored. Look at the camera to gesture."
                     : raisedHands == 0
@@ -1617,7 +1643,26 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         if let wrist { votes.wrists.append(wrist) } else { votes.wrists.removeAll() }
         if votes.wrists.count > 5 { votes.wrists.removeFirst() }
         let tolerance = (face?.height ?? 0.1) * CGFloat(UserDefaults.standard.object(forKey: "steadiness") as? Double ?? 0.35)
-        let steady = votes.wrists.count >= 3 && GestureGate.isSteady(votes.wrists, tolerance: tolerance)
+        // The fingers too: a held gesture keeps its shape; a thumb scrolling a
+        // phone does not. (thumb x, thumb y) and (index x, index y) packed as
+        // two points per frame, relative to the wrist in hand lengths.
+        if let hand = primaryHand, let w = try? hand.recognizedPoint(.wrist), let m = try? hand.recognizedPoint(.middleMCP),
+           let t = try? hand.recognizedPoint(.thumbTip), let i = try? hand.recognizedPoint(.indexTip),
+           [w, m, t, i].allSatisfy({ $0.confidence > 0.1 }) {
+            let length = max(0.005, hypot((w.location.x - m.location.x) * 16 / 9, w.location.y - m.location.y))
+            func rel(_ p: VNRecognizedPoint) -> CGPoint {
+                CGPoint(x: (p.location.x - w.location.x) * 16 / 9 / length, y: (p.location.y - w.location.y) / length)
+            }
+            votes.tips.append(rel(t))
+            votes.tips.append(rel(i))
+        } else {
+            votes.tips.removeAll()
+        }
+        if votes.tips.count > 10 { votes.tips.removeFirst(votes.tips.count - 10) }
+        let thumbs = stride(from: 0, to: votes.tips.count, by: 2).map { votes.tips[$0] }
+        let indexes = stride(from: 1, to: votes.tips.count, by: 2).map { votes.tips[$0] }
+        let fingersStill = thumbs.count < 3 || (GestureGate.isSteady(thumbs, tolerance: 0.35) && GestureGate.isSteady(indexes, tolerance: 0.35))
+        let steady = votes.wrists.count >= 3 && GestureGate.isSteady(votes.wrists, tolerance: tolerance) && fingersStill
         fingersUnclear = false
         let rawGesture = steady ? primaryHand.flatMap { classifyGesture($0) } : nil
         if steady, rawGesture == nil, let hand = primaryHand { recordUnrecognized(hand) }
