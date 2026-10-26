@@ -387,6 +387,30 @@
           "description": "accepted, rejected, done, or pending."
         }
       }
+    },
+    "mac_screen_sharing": {
+      "name": "Mac screen mirroring to the TV",
+      "description": "Start or stop extending the camera's Mac onto the TV with Screen Mirroring.",
+      "fields": {
+        "on": {
+          "name": "On",
+          "description": "On starts extending; off stops it."
+        }
+      }
+    },
+    "gesture_test": {
+      "name": "Run a gesture's actions",
+      "description": "Run the actions assigned to a camera gesture, as if someone had made it.",
+      "fields": {
+        "gesture": {
+          "name": "Gesture",
+          "description": "Which gesture."
+        },
+        "person": {
+          "name": "Person",
+          "description": "Who to pretend made it (passed to the actions as person)."
+        }
+      }
     }
   },
   "entity": {

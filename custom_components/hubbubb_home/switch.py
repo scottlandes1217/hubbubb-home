@@ -11,6 +11,12 @@ from homeassistant.helpers.restore_state import RestoreEntity
 from .const import DOMAIN
 from .entity import HubbubbEntity
 
+# Settings that live on the Mac camera: key, display name, icon.
+CAMERA_SWITCHES = (
+    ("follow", "Camera following", "mdi:account-arrow-right"),
+    ("auto_zoom", "Camera auto-zoom", "mdi:magnify-plus-outline"),
+)
+
 # key, display name, icon, default
 SWITCHES = (
     (
@@ -44,6 +50,11 @@ async def async_setup_entry(
         HubbubbSwitch(entry, runtime.name, key, label, icon, default)
         for key, label, icon, default in SWITCHES
     )
+    if runtime.camera is not None:
+        async_add_entities(
+            CameraSwitch(entry, runtime, key, label, icon)
+            for key, label, icon in CAMERA_SWITCHES
+        )
 
 
 class HubbubbSwitch(HubbubbEntity, SwitchEntity, RestoreEntity):
@@ -76,3 +87,32 @@ class HubbubbSwitch(HubbubbEntity, SwitchEntity, RestoreEntity):
     async def async_turn_off(self, **kwargs) -> None:
         self._attr_is_on = False
         self.async_write_ha_state()
+
+
+class CameraSwitch(HubbubbEntity, SwitchEntity):
+    """A camera setting, read from and written to the Mac."""
+
+    def __init__(self, entry: ConfigEntry, runtime, key: str, label: str, icon: str) -> None:
+        super().__init__(entry, runtime.name)
+        self._link = runtime.camera
+        self._key = key
+        self._attr_unique_id = f"{entry.entry_id}_camera_{key}"
+        self._attr_name = label
+        self._attr_icon = icon
+
+    async def async_added_to_hass(self) -> None:
+        self.async_on_remove(self._link.async_add_listener(self.async_write_ha_state))
+
+    @property
+    def available(self) -> bool:
+        return self._link.connected
+
+    @property
+    def is_on(self) -> bool:
+        return bool((self._link.state.get("settings") or {}).get(self._key))
+
+    async def async_turn_on(self, **kwargs) -> None:
+        await self._link.async_settings({self._key: True})
+
+    async def async_turn_off(self, **kwargs) -> None:
+        await self._link.async_settings({self._key: False})

@@ -97,7 +97,7 @@ from .const import (
     SENTENCE_FILES,
     WEBHOOK_MESSAGE,
 )
-from . import appletv
+from . import appletv, eyes
 from .approvals import Approvals
 from .hubbubb import HubbubbClient, HubbubbError, HubbubbUserClient, parse_people
 from .intents import (
@@ -182,6 +182,9 @@ class Runtime:
     # Set after construction: tools speak through the same announcement policy
     # as the message webhook (quiet hours included) without importing __init__.
     announce_message: Any = None
+    # The camera on the companion's Mac (eyes.CameraLink), when there is a companion.
+    camera: Any = None
+    camera_services: list = field(default_factory=list)
     unsubscribe: list = field(default_factory=list)
 
     def option(self, section: str, key: str, default: Any = None) -> Any:
@@ -305,6 +308,16 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     runtime.announce_message = _announce_message
 
+    if companion.configured:
+        runtime.camera = eyes.CameraLink(
+            hass, session, companion_conf.get(CONF_COMPANION_URL),
+            companion_conf.get(CONF_COMPANION_TOKEN), speakers,
+        )
+        await runtime.camera.async_load()
+        runtime.camera_services = eyes.async_register_services(hass, runtime.camera)
+        # Cancelled with the entry; reconnects by itself if the Mac sleeps.
+        entry.async_create_background_task(hass, runtime.camera.async_run(), f"{DOMAIN} camera feed")
+
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
 
     await _async_serve_cards(hass)
@@ -356,7 +369,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         unsub()
     for intent_type in (*ALL_INTENTS, *appletv.ATV_INTENTS):
         intent_helper.async_remove(hass, intent_type)
-    for service in (*AGENT_SERVICES, *SERVICE_SCHEMAS):
+    for service in (*AGENT_SERVICES, *SERVICE_SCHEMAS, *runtime.camera_services):
         hass.services.async_remove(DOMAIN, service)
     # One panel between however many entries; it goes with the last of them.
     if not hass.data[DOMAIN]:

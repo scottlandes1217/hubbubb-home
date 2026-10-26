@@ -9,6 +9,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 
 from .const import DOMAIN
 from .entity import HubbubbEntity
+from .eyes import TITLES
 
 
 async def async_setup_entry(
@@ -24,6 +25,8 @@ async def async_setup_entry(
             ReviewSensor(entry, runtime),
         ]
     )
+    if runtime.camera is not None:
+        async_add_entities([InViewSensor(entry, runtime), GestureSensor(entry, runtime)])
 
 
 class TimersSensor(HubbubbEntity, SensorEntity):
@@ -131,3 +134,58 @@ class ReviewSensor(HubbubbEntity, SensorEntity):
             "pending": len(review.by_status("pending")),
             "accepted": len(review.by_status("accepted")),
         }
+
+
+class InViewSensor(HubbubbEntity, SensorEntity):
+    """Who the camera recognizes right now; animals in the attributes."""
+
+    _attr_name = "In view"
+    _attr_icon = "mdi:account-eye"
+
+    def __init__(self, entry: ConfigEntry, runtime) -> None:
+        super().__init__(entry, runtime.name)
+        self._link = runtime.camera
+        self._attr_unique_id = f"{entry.entry_id}_camera_in_view"
+
+    async def async_added_to_hass(self) -> None:
+        self.async_on_remove(self._link.async_add_listener(self.async_write_ha_state))
+
+    @property
+    def available(self) -> bool:
+        return self._link.connected
+
+    @property
+    def native_value(self) -> str:
+        return ", ".join(self._link.state.get("people") or []) or "nobody"
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return {
+            "people": self._link.state.get("people") or [],
+            "animals": self._link.state.get("animals") or [],
+        }
+
+
+class GestureSensor(HubbubbEntity, SensorEntity):
+    """The last gesture recognized, and who made it."""
+
+    _attr_name = "Last gesture"
+    _attr_icon = "mdi:hand-wave"
+
+    def __init__(self, entry: ConfigEntry, runtime) -> None:
+        super().__init__(entry, runtime.name)
+        self._link = runtime.camera
+        self._attr_unique_id = f"{entry.entry_id}_camera_last_gesture"
+
+    async def async_added_to_hass(self) -> None:
+        self.async_on_remove(self._link.async_add_listener(self.async_write_ha_state))
+
+    @property
+    def native_value(self) -> str | None:
+        last = self._link.last_gesture
+        return TITLES.get(last["gesture"]) if last else None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        last = self._link.last_gesture or {}
+        return {"gesture": last.get("gesture"), "person": last.get("person")}

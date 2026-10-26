@@ -24,7 +24,7 @@ import aiohttp
 from aiohttp import web
 from homeassistant.components import webhook
 from homeassistant.components.http import HomeAssistantView
-from homeassistant.core import Event, HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 
 from .const import DOMAIN, WEBHOOK_SPEAKER
 
@@ -46,7 +46,6 @@ CAMERA_WINDOW = 30.0
 # the puck may be in another room. Kept under CONFIDENT on purpose, so nothing
 # gated on a confident identification opens for it.
 CAMERA_CONFIDENCE = 0.7
-CAMERA_EVENT = f"{DOMAIN}_camera_people"
 
 # The Voice Studio panel drives the voice service's admin API through Home
 # Assistant, so the browser never holds the shared token or talks to a second
@@ -446,16 +445,6 @@ def async_register_webhook(hass: HomeAssistant, runtime) -> None:
             return
         if isinstance(data, dict):
             runtime.speakers.record(data)
-
-    @callback
-    def _camera(event: Event) -> None:
-        # Fired by the local camera app through Home Assistant's own REST
-        # API, so it arrives already authenticated by a long-lived token.
-        people = event.data.get("people")
-        if isinstance(people, list):
-            runtime.speakers.saw(people)
-
-    runtime.unsubscribe.append(hass.bus.async_listen(CAMERA_EVENT, _camera))
 
     webhook.async_register(
         hass,

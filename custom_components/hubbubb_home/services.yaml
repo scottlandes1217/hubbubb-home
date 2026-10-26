@@ -185,3 +185,28 @@ agent_fleet_act:
     id: { selector: { text: } }
     text: { selector: { text: } }
     message: { selector: { text: } }
+mac_screen_sharing:
+  fields:
+    "on":
+      required: true
+      selector: { boolean: }
+gesture_test:
+  fields:
+    gesture:
+      required: true
+      selector:
+        select:
+          options: [thumbs_up, thumbs_down, open_palm, number_1, number_2, number_3]
+    person: { selector: { text: } }
+gestures_get:
+gesture_save:
+camera_state:
+camera_settings:
+camera_pan:
+camera_enroll:
+camera_forget_person:
+camera_items:
+camera_forget_item:
+camera_learn:
+camera_room_reset:
+camera_look:

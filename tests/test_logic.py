@@ -68,6 +68,7 @@ _stub(
 )
 _stub(
     "homeassistant.core",
+    Context=object,
     Event=object,
     HomeAssistant=object,
     CALLBACK_TYPE=object,
@@ -144,6 +145,13 @@ class _Store:
 
 
 _stub("homeassistant.helpers.storage", Store=_Store)
+_stub("homeassistant.helpers.config_validation", SCRIPT_SCHEMA=lambda v: v, boolean=bool)
+_stub(
+    "homeassistant.helpers.script",
+    SCRIPT_MODE_PARALLEL="parallel",
+    Script=object,
+    async_validate_actions_config=None,
+)
 _stub("homeassistant.util")
 _stub(
     "homeassistant.util.dt",
@@ -165,6 +173,7 @@ sys.modules["hubbubb_home"] = _pkg
 from hubbubb_home.memory import Memory  # noqa: E402
 from hubbubb_home.recipes import Recipes, as_lines, recipe_from_html  # noqa: E402
 from hubbubb_home.speakers import SpeakerBook  # noqa: E402
+from hubbubb_home.eyes import gesture_allowed  # noqa: E402
 from hubbubb_home.timers import TimerPool  # noqa: E402
 from hubbubb_home.nightly import FindingsReport, _days  # noqa: E402
 from hubbubb_home.review import ReviewReport, parse_proposals  # noqa: E402
@@ -463,6 +472,24 @@ def test_camera_presence_sits_between_sure_and_unsure_voice():
     # Junk in the event is dropped, not stored.
     book.saw(["", None, 3, "Scott"])
     assert book.in_view[0] == ["Scott"]
+
+
+def test_gesture_runs_only_when_its_settings_allow():
+    volume = {"enabled": True, "repeat": True, "people": [], "actions": [{"action": "x"}]}
+    once = {**volume, "repeat": False}
+    assert gesture_allowed(volume, "Scott", held=False)
+    assert gesture_allowed(volume, None, held=True)  # held repeats step the volume
+    assert not gesture_allowed(once, "Scott", held=True)  # a one-shot fires once
+    assert gesture_allowed(once, "Scott", held=False)
+    # Limited to some people: names match loosely, strangers never.
+    mine = {**once, "people": ["scott"]}
+    assert gesture_allowed(mine, "Scott", held=False)
+    assert not gesture_allowed(mine, "Anna", held=False)
+    assert not gesture_allowed(mine, None, held=False)
+    # Off, empty or unknown does nothing.
+    assert not gesture_allowed({**once, "enabled": False}, "Scott", held=False)
+    assert not gesture_allowed({**once, "actions": []}, "Scott", held=False)
+    assert not gesture_allowed(None, "Scott", held=False)
 
 
 def test_speaker_prompt_line_three_cases():
