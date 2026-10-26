@@ -176,6 +176,22 @@ private struct RoomMap {
         precondition(!GestureGate.isRaised(wrist: CGPoint(x: 0.55, y: 0.45), elbow: CGPoint(x: 0.5, y: 0.47)), "wrist level with or below the elbow: resting")
         precondition(!GestureGate.isRaised(wrist: CGPoint(x: 0.62, y: 0.42), elbow: CGPoint(x: 0.5, y: 0.4)), "forearm flat on a mouse: resting")
         precondition(GestureGate.elbow(for: CGPoint(x: 0.2, y: 0.2), arms: arm) == nil, "a far-off arm is someone else's")
+        // Lying on the couch, head to the left: their up is the picture's left.
+        let lying = CGVector(dx: -1, dy: 0)
+        // Shoulders: sitting up gives straight up; lying head-left gives left.
+        let sitting = Upright.up(leftShoulder: CGPoint(x: 0.4, y: 0.5), rightShoulder: CGPoint(x: 0.6, y: 0.5), nose: CGPoint(x: 0.5, y: 0.6))!
+        precondition(abs(sitting.dx) < 0.01 && sitting.dy > 0.99, "upright shoulders: up is up")
+        let lyingShoulders = Upright.up(leftShoulder: CGPoint(x: 0.5, y: 0.45), rightShoulder: CGPoint(x: 0.5, y: 0.6), nose: CGPoint(x: 0.42, y: 0.52))!
+        precondition(lyingShoulders.dx < -0.99, "lying head-left: up is left")
+        precondition(Upright.point(Upright.picture(CGPoint(x: 0.3, y: 0.7), around: CGPoint(x: 0.5, y: 0.5), up: lying),
+                                   around: CGPoint(x: 0.5, y: 0.5), up: lying).x.distance(to: 0.3).magnitude < 0.0001, "frames round-trip")
+        let wristLying = CGPoint(x: 0.6, y: 0.5)
+        let thumbsUpLying = HandShape.sample("thumbs_up", scale: 0.05, at: wristLying)
+            .mapValues { Upright.picture($0, around: wristLying, up: lying) }
+        let upright = thumbsUpLying.mapValues { Upright.point($0, around: wristLying, up: lying) }
+        precondition(HandShape.classify(upright) == "thumbs_up", "a thumbs-up lying down reads as one")
+        precondition(GestureGate.isRaised(wrist: CGPoint(x: 0.44, y: 0.51), elbow: CGPoint(x: 0.5, y: 0.5), up: lying), "forearm up toward the head, lying down")
+        precondition(!GestureGate.isRaised(wrist: CGPoint(x: 0.5, y: 0.6), elbow: CGPoint(x: 0.5, y: 0.5), up: lying), "an arm resting along the couch is not raised")
         let head = GestureGate.head(face, hair: 0.9, chin: 0.25)
         precondition(head.contains(CGPoint(x: 0.49, y: 0.58)), "a fork at the mouth, just under the chin, is in the head zone")
         precondition(!head.contains(CGPoint(x: 0.6, y: 0.50)), "a thumbs up beside the chest is not")
@@ -242,6 +258,54 @@ private struct ItemBook {
     }
 }
 
+/// A person's own "up" - hips to neck - and points seen in their frame, so
+/// every gesture rule reads the same lying on the couch as sitting up.
+/// Vectors are in aspect-corrected units (x scaled for 16:9).
+private enum Upright {
+    static let vertical = CGVector(dx: 0, dy: 1)
+
+    static func up(neck: CGPoint, root: CGPoint) -> CGVector? {
+        let dx = (neck.x - root.x) * 16 / 9, dy = neck.y - root.y
+        let length = hypot(dx, dy)
+        return length > 0.02 ? CGVector(dx: dx / length, dy: dy / length) : nil
+    }
+
+    /// Up from the shoulders when the hips are hidden (a laptop, a blanket):
+    /// square to the shoulder line, on the side the nose is.
+    static func up(leftShoulder l: CGPoint, rightShoulder r: CGPoint, nose: CGPoint) -> CGVector? {
+        let sx = (r.x - l.x) * 16 / 9, sy = r.y - l.y
+        let length = hypot(sx, sy)
+        guard length > 0.02 else { return nil }
+        var up = CGVector(dx: -sy / length, dy: sx / length)
+        let mid = CGPoint(x: (l.x + r.x) / 2, y: (l.y + r.y) / 2)
+        let toNose = CGVector(dx: (nose.x - mid.x) * 16 / 9, dy: nose.y - mid.y)
+        if up.dx * toNose.dx + up.dy * toNose.dy < 0 { up = CGVector(dx: -up.dx, dy: -up.dy) }
+        return up
+    }
+
+    /// `p` as it would look if the person were upright, turning about `c`.
+    static func point(_ p: CGPoint, around c: CGPoint, up: CGVector) -> CGPoint {
+        let vx = (p.x - c.x) * 16 / 9, vy = p.y - c.y
+        let along = vx * up.dx + vy * up.dy, side = vx * up.dy - vy * up.dx
+        return CGPoint(x: c.x + side * 9 / 16, y: c.y + along)
+    }
+
+    /// The reverse: an upright point back into the picture (for tests).
+    static func picture(_ q: CGPoint, around c: CGPoint, up: CGVector) -> CGPoint {
+        let side = (q.x - c.x) * 16 / 9, along = q.y - c.y
+        return CGPoint(x: c.x + (side * up.dy + along * up.dx) * 9 / 16, y: c.y + (-side * up.dx + along * up.dy))
+    }
+
+    /// A box (a face) in the person's frame, turning about its centre.
+    static func rect(_ r: CGRect, up: CGVector) -> CGRect {
+        let c = CGPoint(x: r.midX, y: r.midY)
+        let corners = [CGPoint(x: r.minX, y: r.minY), CGPoint(x: r.maxX, y: r.minY),
+                       CGPoint(x: r.minX, y: r.maxY), CGPoint(x: r.maxX, y: r.maxY)].map { point($0, around: c, up: up) }
+        let xs = corners.map(\.x), ys = corners.map(\.y)
+        return CGRect(x: xs.min()!, y: ys.min()!, width: xs.max()! - xs.min()!, height: ys.max()! - ys.min()!)
+    }
+}
+
 /// When a hand may gesture at all: raised to chest height or above, judged
 /// against its owner's face (Vision y grows upward; face.minY is the chin).
 /// Hands on a keyboard or in a lap sit well below that, whatever shape they
@@ -256,12 +320,14 @@ private enum GestureGate {
     /// the wrist sits above its elbow. Hands in a lap, on a keyboard or on the
     /// dog rest at or below the elbow - however close to the face the camera's
     /// downward angle makes them look. `margin` is in frame heights.
-    static func isRaised(wrist: CGPoint, elbow: CGPoint, margin: CGFloat = 0.01) -> Bool {
-        // Lifted, not just level: the forearm at least ~25 degrees above
-        // horizontal (x scaled for 16:9). A forearm flat on a mouse or keyboard
-        // can have the wrist a hair above the elbow.
+    static func isRaised(wrist: CGPoint, elbow: CGPoint, up: CGVector = Upright.vertical, margin: CGFloat = 0.01) -> Bool {
+        // Lifted, not just level: the forearm at least ~25 degrees above the
+        // person's horizontal (their "up", not the picture's, so lying down
+        // counts the same). A forearm flat on a mouse can have the wrist a
+        // hair above the elbow.
         let dx = (wrist.x - elbow.x) * 16 / 9, dy = wrist.y - elbow.y
-        return dy > margin && dy / max(0.0001, hypot(dx, dy)) >= 0.42
+        let along = dx * up.dx + dy * up.dy
+        return along > margin && along / max(0.0001, hypot(dx, dy)) >= 0.42
     }
 
     /// The elbow for a hand: the body-pose wrist nearest the hand's wrist (if
@@ -512,9 +578,10 @@ private enum Framing {
 
     /// Where to centre the camera: on the face across, and low enough that the
     /// face sits a third from the top rather than dead centre.
-    static func aim(face: CGRect?, body: CGRect) -> CGPoint {
+    static func aim(face: CGRect?, body: CGRect, up: CGVector = Upright.vertical) -> CGPoint {
         guard let face else { return CGPoint(x: body.midX, y: body.maxY - body.height * 0.3) }
-        return CGPoint(x: face.midX, y: face.midY - 0.17)
+        // Toward their body from the face, whichever way they are lying.
+        return CGPoint(x: face.midX - 0.17 * up.dx * 9 / 16, y: face.midY - 0.17 * up.dy)
     }
 }
 
@@ -1048,6 +1115,8 @@ private struct Track {
     var bodySeen = true
     // Head yaw and pitch in degrees, for diagnosing "looking at the camera".
     var headAngles: (yaw: Double, pitch: Double)?
+    // Their own up (hips to neck), smoothed; the picture's up until seen.
+    var up = Upright.vertical
     var lastSeen: Date
     var visible = true
     var name: String?
@@ -1195,6 +1264,17 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                     return (w.location, e.location)
                 }
             }
+            let torsos: [(neck: CGPoint, up: CGVector)] = (bodyPoseRequest.results ?? []).compactMap { body in
+                func seen(_ joint: VNHumanBodyPoseObservation.JointName) -> CGPoint? {
+                    (try? body.recognizedPoint(joint)).flatMap { $0.confidence > 0.2 ? $0.location : nil }
+                }
+                guard let neck = seen(.neck) else { return nil }
+                // Hips to neck when the hips show; else square to the shoulders.
+                if let root = seen(.root), let up = Upright.up(neck: neck, root: root) { return (neck, up) }
+                if let l = seen(.leftShoulder), let r = seen(.rightShoulder), let nose = seen(.nose),
+                   let up = Upright.up(leftShoulder: l, rightShoulder: r, nose: nose) { return (neck, up) }
+                return nil
+            }
             let animals = (animalRequest.results ?? []).filter { $0.confidence > 0.5 }
             let now = Date()
             updateTracks(
@@ -1214,6 +1294,17 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 tracks[index].headAngles = observation.map {
                     (($0.yaw?.doubleValue ?? .nan) * 180 / .pi, ($0.pitch?.doubleValue ?? .nan) * 180 / .pi)
                 }
+            }
+            // Each person's up, from the torso whose neck is nearest their face.
+            for index in tracks.indices where tracks[index].visible {
+                let anchor = tracks[index].face.map { CGPoint(x: $0.midX, y: $0.midY) }
+                    ?? CGPoint(x: tracks[index].body.midX, y: tracks[index].body.maxY)
+                guard let torso = torsos.min(by: { hypot($0.neck.x - anchor.x, $0.neck.y - anchor.y) < hypot($1.neck.x - anchor.x, $1.neck.y - anchor.y) }),
+                      hypot(torso.neck.x - anchor.x, torso.neck.y - anchor.y) < 0.25 else { continue }
+                let old = tracks[index].up
+                let mixed = CGVector(dx: old.dx * 0.7 + torso.up.dx * 0.3, dy: old.dy * 0.7 + torso.up.dy * 0.3)
+                let length = max(0.0001, hypot(mixed.dx, mixed.dy))
+                tracks[index].up = CGVector(dx: mixed.dx / length, dy: mixed.dy / length)
             }
             let visible = tracks.filter(\.visible)
             identifyFaces(handler, now: now)
@@ -1250,7 +1341,8 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             latestNames = names
             latestAnimals = animalNames
             latestHeads = visible.compactMap { track in
-                track.headAngles.map { ["name": track.name ?? "someone", "yaw": $0.yaw.isNaN ? NSNull() : Int($0.yaw), "pitch": $0.pitch.isNaN ? NSNull() : Int($0.pitch), "looking": track.facing] }
+                track.headAngles.map { ["name": track.name ?? "someone", "yaw": $0.yaw.isNaN ? NSNull() : Int($0.yaw), "pitch": $0.pitch.isNaN ? NSNull() : Int($0.pitch), "looking": track.facing,
+                                        "lean": Int(atan2(track.up.dx, track.up.dy) * 180 / .pi)] }
             }
             settingsLock.unlock()
             reportPresence(names, animals: animalNames, now: now)
@@ -1278,9 +1370,14 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 var raised = (handsByTrack[track.id] ?? []).filter { hand in
                     guard let wrist = try? hand.recognizedPoint(.wrist), wrist.confidence > 0.1 else { return false }
                     if let elbow = GestureGate.elbow(for: wrist.location, arms: arms) {
-                        return GestureGate.isRaised(wrist: wrist.location, elbow: elbow)
+                        return GestureGate.isRaised(wrist: wrist.location, elbow: elbow, up: track.up)
                     }
-                    return GestureGate.isRaised(wrist: wrist.location, face: track.face, body: track.body, reach: reach)
+                    if let face = track.face {
+                        let c = CGPoint(x: face.midX, y: face.midY)
+                        return GestureGate.isRaised(wrist: Upright.point(wrist.location, around: c, up: track.up),
+                                                    face: Upright.rect(face, up: track.up), body: track.body, reach: reach)
+                    }
+                    return GestureGate.isRaised(wrist: wrist.location, face: nil, body: track.body, reach: reach)
                 }
                 if requireLooking && !track.facing && !raised.isEmpty {
                     lookingAway += raised.count
@@ -1288,11 +1385,11 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 }
                 raisedHands += raised.count
                 // Teaching: sample the raised hand instead of acting on it.
-                if let hand = raised.max(by: { $0.confidence < $1.confidence }), let line = teach(hand) {
+                if let hand = raised.max(by: { $0.confidence < $1.confidence }), let line = teach(hand, up: track.up) {
                     messages.append(line)
                     continue
                 }
-                let result = updateGestures(&tracks[index].votes, hands: raised, face: track.face)
+                let result = updateGestures(&tracks[index].votes, hands: raised, face: track.face, up: track.up)
                 if let message = result.message {
                     messages.append(tracks[index].name.map { "\($0): \(message)" } ?? message)
                 }
@@ -1392,7 +1489,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             // same framing seated or standing. Calibration knob: `framingFill`.
             let person = visible[0]
             let fill = CGFloat(UserDefaults.standard.object(forKey: "framingFill") as? Double ?? 0.7)
-            let point = Framing.aim(face: person.face, body: person.body)
+            let point = Framing.aim(face: person.face, body: person.body, up: person.up)
             if person.face != nil || person.bodySeen {
                 easeZoom(to: Framing.zoom(current: current, face: person.face, body: person.bodySeen ? person.body : nil, fill: fill), centeredOn: point)
             }
@@ -1423,14 +1520,14 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     /// One person's gesture state machine: their hands this frame in, a status
     /// line (nil when idle) and at most one fired gesture out.
     private func updateGestures(
-        _ votes: inout GestureVotes, hands: [VNHumanHandPoseObservation], face: CGRect?
+        _ votes: inout GestureVotes, hands: [VNHumanHandPoseObservation], face: CGRect?, up: CGVector = Upright.vertical
     ) -> (message: String?, fired: (id: String, held: Bool)?) {
         // Vision may return a weak duplicate/false hand: use its strongest.
         let primaryHand = hands.max { $0.confidence < $1.confidence }
         let now = Date()
         // Any hand at the head - eating, a scratch, hair - turns gestures off
         // for two seconds; a meal keeps renewing that, so it stays off.
-        if let face, hands.contains(where: { handOverlapsFace($0, faceBounds: face) }) {
+        if let face, hands.contains(where: { handOverlapsFace($0, faceBounds: face, up: up) }) {
             votes = GestureVotes(lastVolumeRepeat: votes.lastVolumeRepeat, pausedUntil: now.addingTimeInterval(1.2))
             return ("Gestures paused: a hand is at a face, mouth or hair.", nil)
         }
@@ -1449,7 +1546,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         let tolerance = (face?.height ?? 0.1) * CGFloat(UserDefaults.standard.object(forKey: "steadiness") as? Double ?? 0.35)
         let steady = votes.wrists.count >= 3 && GestureGate.isSteady(votes.wrists, tolerance: tolerance)
         fingersUnclear = false
-        let rawGesture = steady ? primaryHand.flatMap { classifyGesture($0) } : nil
+        let rawGesture = steady ? primaryHand.flatMap { classifyGesture($0, up: up) } : nil
         if steady, rawGesture == nil, let hand = primaryHand { recordUnrecognized(hand) }
         // Calibration knob: seconds a gesture must be held (about 10 analysed
         // frames a second). A pose a hand only passes through never gets there.
@@ -1848,7 +1945,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         case previewFailed
     }
 
-    private func handOverlapsFace(_ hand: VNHumanHandPoseObservation, faceBounds: CGRect) -> Bool {
+    private func handOverlapsFace(_ hand: VNHumanHandPoseObservation, faceBounds: CGRect, up: CGVector = Upright.vertical) -> Bool {
         let joints: [VNHumanHandPoseObservation.JointName] = [
             .wrist, .thumbCMC, .thumbMP, .thumbIP, .thumbTip,
             .indexMCP, .indexPIP, .indexDIP, .indexTip,
@@ -1856,16 +1953,17 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             .ringMCP, .ringPIP, .ringDIP, .ringTip,
             .littleMCP, .littlePIP, .littleDIP, .littleTip
         ]
+        let c = CGPoint(x: faceBounds.midX, y: faceBounds.midY)
         let points = joints.compactMap { joint -> CGPoint? in
             guard let point = try? hand.recognizedPoint(joint), point.confidence > 0.12 else { return nil }
-            return point.location
+            return Upright.point(point.location, around: c, up: up)  // hair is "above" in their frame
         }
         guard !points.isEmpty else { return false }
         // Calibration knobs, in face heights: `hairReach` above the face box,
         // `chinReach` below it.
         let defaults = UserDefaults.standard
         let head = GestureGate.head(
-            faceBounds,
+            Upright.rect(faceBounds, up: up),
             hair: CGFloat(defaults.object(forKey: "hairReach") as? Double ?? 0.9),
             chin: CGFloat(defaults.object(forKey: "chinReach") as? Double ?? 0.25)
         )
@@ -2293,7 +2391,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         "VNHLKPTIP": "littleTip", "VNHLKPDIP": "littleDIP", "VNHLKPPIP": "littlePIP", "VNHLKPMCP": "littleMCP",
     ]
 
-    private func classifyGesture(_ observation: VNHumanHandPoseObservation) -> String? {
+    private func classifyGesture(_ observation: VNHumanHandPoseObservation, up: CGVector = Upright.vertical) -> String? {
         func point(_ joint: VNHumanHandPoseObservation.JointName) -> VNRecognizedPoint? {
             try? observation.recognizedPoint(joint)
         }
@@ -2327,6 +2425,8 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         for (joint, name) in joints {
             if let found = point(joint), found.confidence > 0.1 { points[name] = found.location }
         }
+        // Judge the hand as if the person were upright (lying down included).
+        if let wrist = points["wrist"] { points = points.mapValues { Upright.point($0, around: wrist, up: up) } }
         // Taught samples first; the rules only speak for gestures nobody taught.
         let limit = UserDefaults.standard.object(forKey: "gestureMatch") as? Double ?? 0.35
         if let taught = templates.match(points, within: limit) { return taught }
@@ -2364,7 +2464,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     }
 
     /// One raised hand while teaching: keep a sample. -> a status line.
-    private func teach(_ hand: VNHumanHandPoseObservation) -> String? {
+    private func teach(_ hand: VNHumanHandPoseObservation, up: CGVector = Upright.vertical) -> String? {
         settingsLock.lock()
         let gesture = teaching
         settingsLock.unlock()
@@ -2375,6 +2475,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 points[Self.jointNames[joint.rawValue.rawValue] ?? joint.rawValue.rawValue] = point.location
             }
         }
+        if let wrist = points["wrist"] { points = points.mapValues { Upright.point($0, around: wrist, up: up) } }
         guard let vector = HandVector.make(points) else { return "Teaching \(gestureTitle(gesture)): show your whole hand to the camera." }
         settingsLock.lock()
         teachSamples.append(vector)
