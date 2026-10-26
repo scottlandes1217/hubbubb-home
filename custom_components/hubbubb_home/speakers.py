@@ -24,7 +24,7 @@ import aiohttp
 from aiohttp import web
 from homeassistant.components import webhook
 from homeassistant.components.http import HomeAssistantView
-from homeassistant.core import HomeAssistant
+from homeassistant.core import Event, HomeAssistant, callback
 
 from .const import DOMAIN, WEBHOOK_SPEAKER
 
@@ -39,6 +39,14 @@ EVENT_WINDOW = 20.0
 OVERRIDE_WINDOW = 300.0
 # Below this, a voice match is a lean, not an identification.
 CONFIDENT = 0.75
+# The local camera app reports who it recognizes in view. That stays current
+# only while it keeps reporting (it repeats every 20 seconds).
+CAMERA_WINDOW = 30.0
+# One known face in view is a good lean, not proof they are the one talking -
+# the puck may be in another room. Kept under CONFIDENT on purpose, so nothing
+# gated on a confident identification opens for it.
+CAMERA_CONFIDENCE = 0.7
+CAMERA_EVENT = f"{DOMAIN}_camera_people"
 
 # The Voice Studio panel drives the voice service's admin API through Home
 # Assistant, so the browser never holds the shared token or talks to a second
@@ -72,6 +80,8 @@ class SpeakerBook:
         # Whoever the house last recognized, however long ago - who an
         # after-the-fact announcement is most likely for.
         self.last_known: str | None = None
+        # (names the camera recognizes in view, when it said so)
+        self.in_view: tuple[list[str], float] = ([], 0.0)
 
     @property
     def configured(self) -> bool:
@@ -91,6 +101,13 @@ class SpeakerBook:
         self.events.append(event)
         if event.get("person"):
             self.last_known = str(event["person"])
+
+    def saw(self, people: list) -> None:
+        """The camera's current list of recognized people in view."""
+        names = [str(p) for p in people if isinstance(p, str) and p.strip()]
+        self.in_view = (names, time.time())
+        if len(names) == 1:
+            self.last_known = names[0]
 
     def set_override(self, person: str) -> None:
         """Someone said who they are; believe them for a while."""
@@ -141,17 +158,29 @@ class SpeakerBook:
     def resolve(
         self, device_id: str | None = None
     ) -> tuple[str | None, float, str | None]:
-        """-> (person or None, confidence 0..1, source: told|voice|device)."""
+        """-> (person or None, confidence 0..1, source:
+        told|voice|camera|device)."""
         now = time.time()
         if self._override and now - self._override[1] < OVERRIDE_WINDOW:
             return self._override[0], 1.0, "told"
         # Only the newest event can describe the current utterance; an older
         # one was somebody's previous sentence, not this one.
+        voice = None
         if self.events:
             event = self.events[-1]
             fresh = now - float(event.get("ts") or 0) <= EVENT_WINDOW
             if fresh and (person := event.get("person")):
-                return str(person), float(event.get("confidence") or 0), "voice"
+                voice = str(person), float(event.get("confidence") or 0), "voice"
+        if voice and voice[1] >= CONFIDENT:
+            return voice
+        # A sure voice beats the camera; the camera beats an unsure voice -
+        # when one known person is in view, a middling voice score naming
+        # someone else is the likelier mistake.
+        seen, at = self.in_view
+        if len(seen) == 1 and now - at <= CAMERA_WINDOW:
+            return seen[0], CAMERA_CONFIDENCE, "camera"
+        if voice:
+            return voice
         if device_id and device_id in self._devices:
             return self._devices[device_id], 0.5, "device"
         return None, 0.0, None
@@ -417,6 +446,16 @@ def async_register_webhook(hass: HomeAssistant, runtime) -> None:
             return
         if isinstance(data, dict):
             runtime.speakers.record(data)
+
+    @callback
+    def _camera(event: Event) -> None:
+        # Fired by the local camera app through Home Assistant's own REST
+        # API, so it arrives already authenticated by a long-lived token.
+        people = event.data.get("people")
+        if isinstance(people, list):
+            runtime.speakers.saw(people)
+
+    runtime.unsubscribe.append(hass.bus.async_listen(CAMERA_EVENT, _camera))
 
     webhook.async_register(
         hass,

@@ -68,6 +68,7 @@ _stub(
 )
 _stub(
     "homeassistant.core",
+    Event=object,
     HomeAssistant=object,
     CALLBACK_TYPE=object,
     callback=lambda f: f,
@@ -428,6 +429,40 @@ def test_speaker_resolution_precedence():
     # Saying who you are beats everything.
     book.set_override("Dana")
     assert book.resolve("puck-bedroom") == ("Dana", 1.0, "told")
+
+
+def test_camera_presence_sits_between_sure_and_unsure_voice():
+    import time as _time
+    from hubbubb_home.speakers import CAMERA_WINDOW
+
+    book = SpeakerBook(None, "", "puck-bedroom: Vega")
+    now = _time.time()
+
+    # One known face in view beats the room default, as a lean.
+    book.saw(["Anna"])
+    assert book.resolve("puck-bedroom") == ("Anna", 0.7, "camera")
+    assert book.last_known == "Anna"
+
+    # It beats an unsure voice naming someone else...
+    book.record({"person": "Scott", "confidence": 0.6, "ts": now - 1})
+    assert book.resolve()[2] == "camera"
+    # ...but never a sure one.
+    book.record({"person": "Scott", "confidence": 0.9, "ts": now - 1})
+    assert book.resolve() == ("Scott", 0.9, "voice")
+
+    # Two people in view says nothing about which one spoke.
+    book.events.clear()
+    book.saw(["Anna", "Scott"])
+    assert book.resolve("puck-bedroom")[2] == "device"
+
+    # A camera that stopped reporting is no evidence.
+    book.saw(["Anna"])
+    book.in_view = (["Anna"], now - CAMERA_WINDOW - 1)
+    assert book.resolve() == (None, 0.0, None)
+
+    # Junk in the event is dropped, not stored.
+    book.saw(["", None, 3, "Scott"])
+    assert book.in_view[0] == ["Scott"]
 
 
 def test_speaker_prompt_line_three_cases():

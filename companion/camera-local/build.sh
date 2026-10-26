@@ -32,6 +32,7 @@ xcrun swiftc -O \
   -framework AVFoundation \
   -framework Vision \
   -framework Security \
+  -framework Network \
   "$ROOT/Sources/HubbubbLocalCamera.swift" \
   -o "$CONTENTS/MacOS/HubbubbLocalCamera"
 

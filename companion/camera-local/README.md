@@ -58,3 +58,23 @@ Controller before launching so it releases the camera controls.
 
 This is a capture and local-inference prototype, not yet a virtual webcam.
 
+
+## People, animals and Jarvis
+
+- Each analyzed frame finds people (body and face), animals and up to six
+  hands. A face inside an animal box is ignored, so the camera follows people,
+  never the dog. One person is framed by face; several are framed as a group.
+- Hands are assigned to the nearest person and each person votes on their own
+  gestures, so anyone in the room can gesture without mixing with someone else.
+- **Enroll a person…** stores ~20 face feature prints in
+  `~/Library/Application Support/Hubbubb Local Camera/faces.archive`. The
+  preview labels each face with its nearest match and distance; tune with
+  `defaults write home.jarvis.local-camera faceMatchThreshold 0.5`.
+- Who is recognized in view is sent to Home Assistant as the
+  `hubbubb_home_camera_people` event (same HA token as the TV actions).
+  Jarvis uses it to guess who is speaking when voice ID is unsure.
+- Port 8791 serves `GET /people` and `POST /look {"question"}` to Jarvis's
+  `look_around` tool, authorized with the companion token
+  (`~/.claude/hooks/.voice-token`). A look asks the local Ollama vision model
+  (`visionModel` default), panning to `lookPanOffsets` (default ±0.35 of the
+  pan range around the current view) if needed, then returns to where it was.

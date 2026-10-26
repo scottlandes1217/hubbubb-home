@@ -22,6 +22,8 @@ _LOGGER = logging.getLogger(__name__)
 
 _TIMEOUT = aiohttp.ClientTimeout(total=90)
 SEARCH_PORT = 8888
+# The local camera app, on the same Mac as the companion.
+CAMERA_PORT = 8791
 PAGES_READ = 2
 
 
@@ -175,6 +177,38 @@ class CompanionClient:
             if text:
                 result["page_text"] = text
         return results
+
+    async def async_look(self, question: str) -> dict:
+        """Ask the camera app what it sees; it pans to search if it must.
+
+        Same pattern as web search: it runs beside the companion, so its
+        address follows the companion URL and it takes the companion's token.
+        The frames stay on that Mac - its local vision model answers in words.
+        A search can pan through several views, each a model call, so the
+        timeout is long.
+        """
+        if not self._url:
+            raise CompanionError(NOT_CONFIGURED)
+        url = f"http://{urlsplit(self._url).hostname}:{CAMERA_PORT}/look"
+        headers = {"Authorization": f"Bearer {self._token}"} if self._token else {}
+        try:
+            async with self._session.post(
+                url,
+                json={"question": question},
+                headers=headers,
+                timeout=aiohttp.ClientTimeout(total=150),
+            ) as resp:
+                data = await resp.json(content_type=None)
+                if resp.status >= 400:
+                    raise CompanionError(
+                        f"camera returned {resp.status}: {(data or {}).get('detail', '')}"
+                    )
+                return data if isinstance(data, dict) else {}
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as err:
+            raise CompanionError(
+                f"the camera app is not answering ({err or 'timed out'}) - "
+                "is Hubbubb Local Camera running on the Mac?"
+            ) from err
 
     async def _page_text(self, url: str, query: str) -> str:
         html = await self.async_html(url)

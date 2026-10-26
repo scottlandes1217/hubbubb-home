@@ -64,6 +64,7 @@ def agent_tools(runtime) -> list[llm.Tool]:
         tools.append(EscalateTool(runtime))
         tools.append(UseComputerTool(runtime))
         tools.append(WebSearchTool(runtime))
+        tools.append(LookTool(runtime))
     if runtime.speakers.configured:
         tools.append(TrainWakeWordTool(runtime))
     return tools
@@ -688,6 +689,34 @@ class WebSearchTool(_RuntimeTool):
         except CompanionError as err:
             return {"error": str(err)}
         return {"results": results, "found": len(results)}
+
+
+class LookTool(_RuntimeTool):
+    name = "look_around"
+    description = (
+        "Look through the camera on the Mac to find something or someone in "
+        "that room, or to say what is there: 'where are my keys', 'is the "
+        "dog on the couch', 'who is in the living room'. It turns the camera "
+        "to search when the thing is not in view, and answers in words, with "
+        "the people it recognizes and any animals it sees. It only sees the "
+        "room that camera is in, and a search can take up to a minute. "
+        "Relay its answer; never describe anything it did not report."
+    )
+    parameters = vol.Schema(
+        {vol.Required("question"): vol.All(str, vol.Length(min=2, max=300))}
+    )
+
+    async def async_call(
+        self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context
+    ) -> JsonObjectType:
+        # No guest gate, as with camera_activity: anyone asking is standing in
+        # the house, and this only ever answers in words about one room.
+        try:
+            return await self._runtime.companion.async_look(
+                tool_input.tool_args["question"]
+            )
+        except CompanionError as err:
+            return {"error": str(err)}
 
 
 class TrainWakeWordTool(_RuntimeTool):

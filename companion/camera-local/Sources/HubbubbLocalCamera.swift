@@ -2,6 +2,7 @@ import AppKit
 import AVFoundation
 import Vision
 import Security
+import Network
 
 private let appTitle = "Hubbubb Local Camera"
 
@@ -20,6 +21,11 @@ private func hubbubbLinkCameraPanStep(_ direction: Int32) -> Int32
 private func hubbubbLinkCameraSearchStep(_ direction: Int32) -> Int32
 @_silgen_name("HubbubbLinkCameraSearchBegin")
 private func hubbubbLinkCameraSearchBegin() -> Int32
+
+@_silgen_name("HubbubbLinkCameraPanTo")
+private func hubbubbLinkCameraPanTo(_ fraction: Float) -> Int32
+@_silgen_name("HubbubbLinkCameraPanFraction")
+private func hubbubbLinkCameraPanFraction() -> Float
 
 @_silgen_name("HubbubbLinkCameraFollowFace")
 private func hubbubbLinkCameraFollowFace(_ centerX: Float, _ centerY: Float) -> Int32
@@ -114,6 +120,7 @@ private final class CameraViewController: NSViewController {
     private var configured = false
     private var didRequestCamera = false
     private var processor: LocalVisionProcessor?
+    private var lookServer: LookServer?
     private var pendingTVButtonSteps = 0
     private var tvVolumeActionInFlight = false
 
@@ -233,7 +240,12 @@ private final class CameraViewController: NSViewController {
         zoomLabel.alignment = .right
         panel.addSubview(zoomLabel)
 
-        let centerButton = NSButton(title: "Reset camera zoom to 1×", target: self, action: #selector(recenterFraming))
+        let enrollButton = NSButton(title: "Enroll a person…", target: self, action: #selector(enrollPerson))
+        enrollButton.bezelStyle = .rounded
+        enrollButton.tag = 108
+        panel.addSubview(enrollButton)
+
+        let centerButton = NSButton(title: "Zoom to 1×", target: self, action: #selector(recenterFraming))
         centerButton.bezelStyle = .rounded
         centerButton.tag = 103
         panel.addSubview(centerButton)
@@ -296,7 +308,8 @@ private final class CameraViewController: NSViewController {
         frame(102, NSRect(x: 18, y: height - 211, width: 180, height: 20))
         zoomSlider.frame = NSRect(x: 14, y: height - 242, width: 238, height: 24)
         zoomLabel.frame = NSRect(x: 258, y: height - 242, width: 56, height: 24)
-        frame(103, NSRect(x: 18, y: height - 282, width: 290, height: 30))
+        frame(103, NSRect(x: 18, y: height - 282, width: 120, height: 30))
+        frame(108, NSRect(x: 144, y: height - 282, width: 164, height: 30))
         frame(104, NSRect(x: 18, y: height - 312, width: 300, height: 22))
         let scrollFrame = NSRect(x: 10, y: 132, width: 320, height: max(140, height - 472))
         gestureScrollView.frame = scrollFrame
@@ -364,6 +377,49 @@ private final class CameraViewController: NSViewController {
         framingCheckbox.state = .off
         processor?.updateSettings(autoZoom: false, zoomFactor: 1.0, autoFollow: localFollowingEnabled)
         setStatus("Camera lens zoom reset to 1×. The preview is the full camera feed.")
+    }
+
+    @objc private func enrollPerson() {
+        guard let processor else {
+            controlFeedbackLabel.stringValue = "Wait for the camera to connect before enrolling."
+            return
+        }
+        let nameField = NSTextField(string: "")
+        nameField.placeholderString = "Name, as Jarvis should say it"
+        nameField.frame = NSRect(x: 0, y: 0, width: 300, height: 24)
+        let alert = NSAlert()
+        alert.messageText = "Enroll a person"
+        let known = processor.enrolledNames
+        alert.informativeText = "Stand alone in front of the camera, then press Start and slowly turn your head. "
+            + "Face samples stay on this Mac. Enrolling a name again replaces it."
+            + (known.isEmpty ? "" : "\nAlready enrolled: \(known.joined(separator: ", ")).")
+        alert.accessoryView = nameField
+        alert.addButton(withTitle: "Start")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = nameField
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, name.count <= 40 else {
+            controlFeedbackLabel.stringValue = "Enter a name to enroll."
+            return
+        }
+        processor.beginEnrollment(name: name)
+        controlFeedbackLabel.stringValue = "Enrolling \(name). Follow the prompt on the preview."
+    }
+
+    /// Who the camera recognizes, for Jarvis's "who is speaking" guess.
+    /// Sent as a Home Assistant event with the same local token as the TV actions.
+    private func postPresence(_ people: [String]) {
+        let defaults = UserDefaults.standard
+        guard let base = defaults.string(forKey: "haBaseURL"),
+              let token = loadToken(), !token.isEmpty,
+              let url = URL(string: "\(base)/api/events/hubbubb_home_camera_people") else { return }
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: ["people": people])
+        URLSession.shared.dataTask(with: request).resume()
     }
 
     @objc private func testGesture(_ sender: NSButton) {
@@ -996,6 +1052,9 @@ private final class CameraViewController: NSViewController {
                             }
                         }
                     },
+                    presence: { [weak self] people in
+                        DispatchQueue.main.async { self?.postPresence(people) }
+                    },
                     status: { [weak self] image, message, gesture in
                     DispatchQueue.main.async {
                         if let image {
@@ -1009,6 +1068,7 @@ private final class CameraViewController: NSViewController {
                     }
                 )
                 self.processor = processor
+                self.lookServer = LookServer(processor: processor)
                 output.setSampleBufferDelegate(processor, queue: DispatchQueue(label: "com.hubbubb.camera.vision"))
                 if self.session.canAddOutput(output) {
                     self.session.addOutput(output)
@@ -1051,17 +1111,77 @@ private final class CameraViewController: NSViewController {
     }
 }
 
+/// One hand-gesture vote buffer. Each person in view gets their own, so two
+/// people's hands never vote in the same pool.
+private struct GestureVotes {
+    var recent: [String?] = []
+    var latched: String?
+    var missed = 0
+    var lastVolumeRepeat = Date.distantPast
+    var twoPalmHold = 0
+    var twoPalmMiss = 0
+    var twoPalmLatched = false
+}
+
+/// A person followed across frames: matched frame to frame by position, so
+/// their name and gesture votes survive a blink or a turned head.
+private extension CGRect {
+    var area: CGFloat { width * height }
+}
+
+private struct Track {
+    let id: Int
+    var body: CGRect
+    var face: CGRect?
+    var lastSeen: Date
+    var visible = true
+    var name: String?
+    var nearest: (name: String, distance: Float)?
+    var nameMisses = 0
+    var lastIdentified = Date.distantPast
+    var votes = GestureVotes()
+
+    /// Where to point the camera: the face, else the top of the body box.
+    var aim: CGRect {
+        face ?? CGRect(x: body.minX, y: body.maxY - body.height * 0.3, width: body.width, height: body.height * 0.3)
+    }
+}
+
 private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSampleBufferDelegate {
     private let handRequest = VNDetectHumanHandPoseRequest()
     private let faceRequest = VNDetectFaceRectanglesRequest()
+    private let humanRequest = VNDetectHumanRectanglesRequest()
+    private let animalRequest = VNRecognizeAnimalsRequest()
     private let context = CIContext(options: [.useSoftwareRenderer: false])
     private let status: (CGImage?, String, String?) -> Void
     private let zoomUpdate: (CGFloat?, String?) -> Void
+    private let presence: ([String]) -> Void
     private var frameNumber = 0
-    private var recentGestureFrames: [String?] = []
-    private var latchedGesture: String?
-    private var missedGestureFrames = 0
+    private var tracks: [Track] = []
+    private var nextTrackID = 1
+    // Hands Vision found but could not tie to anyone (body out of frame).
+    private var looseVotes = GestureVotes()
     private var lastStatus = ""
+    // Enrolled faces: name -> feature prints of that face.
+    private var gallery: [String: [VNFeaturePrintObservation]] = [:]
+    private var enrollName: String?
+    private var enrollSamples: [VNFeaturePrintObservation] = []
+    private let enrollTarget = 20
+    // Feature-print distance under which a face counts as an enrolled person.
+    // Calibration knob: the overlay shows each face's nearest distance; tune with
+    // `defaults write home.jarvis.local-camera faceMatchThreshold 0.5`.
+    // ponytail: generic image feature prints, not a face-ID model; swap in a
+    // Core ML face embedding if two people keep getting confused.
+    private let faceMatchThreshold = Float(UserDefaults.standard.object(forKey: "faceMatchThreshold") as? Double ?? 0.6)
+    private var lastPresence: [String] = []
+    private var lastPresenceSent = Date.distantPast
+    // What the most recent frame held, for /look and /people (under settingsLock).
+    private var latestFrame: CGImage?
+    private var latestNames: [String] = []
+    private var latestAnimals: [String] = []
+    private var followPausedUntil = Date.distantPast
+    private let lookQueue = DispatchQueue(label: "com.hubbubb.camera.look")
+    private var looking = false
     private let settingsLock = NSLock()
     private var autoZoomEnabled = true
     private var autoFollowEnabled = false
@@ -1075,20 +1195,18 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     private var searchDirection: Int32 = 1
     private var searchSuggestedDirection: Int32 = 1
     private var searchNeedsBegin = true
-    private var lastVolumeRepeat = Date.distantPast
     // Seconds between volume steps while thumbs up/down is held; lower = faster ramp.
     private let volumeRepeatInterval: TimeInterval = 0.35
-    private var twoPalmHoldFrames = 0
-    private var twoPalmLatched = false
-    private var twoPalmMissFrames = 0
 
     init(
         zoomRange: (Int, Int, Int, Int)?,
         zoomUpdate: @escaping (CGFloat?, String?) -> Void,
+        presence: @escaping ([String]) -> Void,
         status: @escaping (CGImage?, String, String?) -> Void
     ) {
         self.status = status
         self.zoomUpdate = zoomUpdate
+        self.presence = presence
         if let (minimum, maximum, step, current) = zoomRange, maximum > minimum {
             self.zoomRange = (minimum, maximum, max(1, step))
             self.currentZoomFactor = 1 + CGFloat(current - minimum) / CGFloat(maximum - minimum) * 3
@@ -1096,8 +1214,10 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             self.zoomRange = nil
             self.currentZoomFactor = 1
         }
-        handRequest.maximumHandCount = 2
+        // Room for everyone's hands, not just one person's pair.
+        handRequest.maximumHandCount = 6
         super.init()
+        gallery = Self.loadGallery()
     }
 
     func updateSettings(autoZoom: Bool, zoomFactor: CGFloat, autoFollow: Bool) {
@@ -1118,143 +1238,376 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
               let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
 
         do {
-            try VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up).perform([faceRequest])
-            let face = (faceRequest.results ?? []).max { $0.boundingBox.width * $0.boundingBox.height < $1.boundingBox.width * $1.boundingBox.height }
-            if let face {
-                let reacquired = faceLostSince != nil
-                if reacquired {
+            let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
+            handRequest.regionOfInterest = CGRect(x: 0, y: 0, width: 1, height: 1)
+            try handler.perform([faceRequest, humanRequest, animalRequest, handRequest])
+            let animals = (animalRequest.results ?? []).filter { $0.confidence > 0.5 }
+            let now = Date()
+            updateTracks(
+                humans: (humanRequest.results ?? []).map(\.boundingBox),
+                faces: (faceRequest.results ?? []).map(\.boundingBox),
+                animals: animals.map(\.boundingBox),
+                now: now
+            )
+            let visible = tracks.filter(\.visible)
+            identifyFaces(handler, now: now)
+            let enrollMessage = enroll(handler, visible: tracks.filter(\.visible))
+
+            if visible.isEmpty {
+                recoverLostFace()
+            } else {
+                if faceLostSince != nil {
                     smoothedFaceCenter = nil
                     ptzQueue.async { [weak self] in self?.searchNeedsBegin = true }
                 }
                 faceLostSince = nil
-                let horizontalOffset = face.boundingBox.midX - 0.5
-                if abs(horizontalOffset) > 0.05 {
-                    searchSuggestedDirection = horizontalOffset > 0 ? 1 : -1
-                }
-                adjustHardwareZoom(forFace: face.boundingBox)
-                adjustGimbal(forFace: face.boundingBox)
-            } else {
-                recoverLostFace()
+                frame(visible)
             }
+
             let sourceImage = CIImage(cvPixelBuffer: pixelBuffer)
             guard let fullFrame = context.createCGImage(sourceImage, from: sourceImage.extent) else {
                 throw CameraVisionError.previewFailed
             }
-            handRequest.regionOfInterest = CGRect(x: 0, y: 0, width: 1, height: 1)
-            try VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up).perform([handRequest])
-            let detectedHands = handRequest.results ?? []
-            // Vision may return a weak duplicate/false hand. Use its strongest
-            // observation for one-hand actions, while keeping both for the
-            // explicit two-open-palms gesture.
-            let primaryHand = detectedHands.max { $0.confidence < $1.confidence }
-            if let face,
-               let primaryHand,
-               handOverlapsFace(primaryHand, faceBounds: face.boundingBox) {
-                recentGestureFrames.removeAll(keepingCapacity: true)
-                latchedGesture = nil
-                missedGestureFrames = 0
-                twoPalmHoldFrames = 0
-                twoPalmMissFrames = 0
-                twoPalmLatched = false
-                lastStatus = "Gesture paused while your hand is touching your face. Move it away to resume."
-                status(fullFrame, lastStatus, nil)
-                return
+            let names = Array(Set(visible.compactMap(\.name))).sorted()
+            let animalNames = animals.compactMap { $0.labels.first?.identifier.lowercased() }
+            settingsLock.lock()
+            latestFrame = fullFrame
+            latestNames = names
+            latestAnimals = animalNames
+            settingsLock.unlock()
+            reportPresence(names, now: now)
+
+            // Gestures, per person: each visible track votes with its own hands.
+            let hands = handRequest.results ?? []
+            var handsByTrack: [Int: [VNHumanHandPoseObservation]] = [:]
+            var looseHands: [VNHumanHandPoseObservation] = []
+            for hand in hands {
+                if let owner = owner(of: hand) { handsByTrack[owner, default: []].append(hand) } else { looseHands.append(hand) }
             }
-            let openPalmCount = detectedHands.filter(isOpenPalmPose).count
-            if detectedHands.count >= 2 && openPalmCount >= 2 {
-                twoPalmHoldFrames += 1
-                twoPalmMissFrames = 0
-                if twoPalmHoldFrames >= 4 && !twoPalmLatched {
-                    twoPalmLatched = true
-                    recentGestureFrames.removeAll(keepingCapacity: true)
-                    lastStatus = "Both palms recognized. Switching the Sync Box to the Mac display and enabling the extended screen."
-                    status(fullFrame, lastStatus, "two_palms")
-                } else if twoPalmLatched {
-                    lastStatus = "Both palms recognized. Display action is running."
-                    status(fullFrame, lastStatus, nil)
-                } else {
-                    lastStatus = "Hold both open palms steady: \(min(twoPalmHoldFrames, 4))/4 frames."
-                    status(fullFrame, lastStatus, nil)
+            var messages: [String] = []
+            var fired: [String] = []
+            for index in tracks.indices where tracks[index].visible {
+                let result = updateGestures(&tracks[index].votes, hands: handsByTrack[tracks[index].id] ?? [], face: tracks[index].face)
+                if let message = result.message {
+                    messages.append(tracks[index].name.map { "\($0): \(message)" } ?? message)
                 }
-                return
+                if let gesture = result.fired {
+                    fired.append(gesture)
+                    // Whoever gestures has the room's attention: keep them in frame.
+                    tracks[index].lastSeen = now
+                }
             }
-            if twoPalmHoldFrames > 0 || twoPalmLatched {
-                twoPalmMissFrames += 1
-                if twoPalmMissFrames <= 4 {
-                    lastStatus = "Keep both palms in view…"
-                    status(fullFrame, lastStatus, nil)
-                    return
-                }
-                twoPalmHoldFrames = 0
-                twoPalmMissFrames = 0
-                twoPalmLatched = false
-            }
-            let rawGesture = primaryHand.flatMap { classifyGesture($0) }
-            let handsFound = detectedHands.count
-            recentGestureFrames.append(rawGesture)
-            if recentGestureFrames.count > 8 { recentGestureFrames.removeFirst() }
-            // Vote across recent frames so a weak duplicate hand or one noisy
-            // finger landmark cannot flip a held pose between 1/open/2 fingers.
-            let gestureVotes = recentGestureFrames.compactMap { $0 }.reduce(into: [String: Int]()) { counts, id in
-                counts[id, default: 0] += 1
-            }
-            let maximumGestureVotes = gestureVotes.values.max() ?? 0
-            let leadingGesture = rawGesture.flatMap { gestureVotes[$0] == maximumGestureVotes ? $0 : nil }
-                ?? latchedGesture.flatMap { gestureVotes[$0] == maximumGestureVotes ? $0 : nil }
-                ?? gestureVotes.filter { $0.value == maximumGestureVotes }.keys.sorted().first
-            let detectedGesture = leadingGesture
-            let gestureHits = leadingGesture.flatMap { gestureVotes[$0] } ?? 0
-            if let detectedGesture {
-                let requiredHits = 5
-                let gestureProgress = min(gestureHits, requiredHits)
-                missedGestureFrames = 0
-                if let latchedGesture, latchedGesture != detectedGesture {
-                    self.latchedGesture = nil
-                }
-                let isVolume = detectedGesture == "thumbs_up" || detectedGesture == "thumbs_down"
-                if gestureHits >= requiredHits && latchedGesture != detectedGesture {
-                    latchedGesture = detectedGesture
-                    lastVolumeRepeat = Date()
-                    lastStatus = "\(gestureTitle(detectedGesture)) recognized. Running its assigned action."
-                    status(fullFrame, lastStatus, detectedGesture)
-                } else if isVolume, latchedGesture == detectedGesture, rawGesture == detectedGesture,
-                          Date().timeIntervalSince(lastVolumeRepeat) > volumeRepeatInterval {
-                    // Held thumbs keep stepping the volume: the longer the hold, the bigger the change.
-                    lastVolumeRepeat = Date()
-                    lastStatus = "\(gestureTitle(detectedGesture)) held. Stepping TV volume; drop your hand to stop."
-                    status(fullFrame, lastStatus, detectedGesture)
-                } else if let latchedGesture {
-                    lastStatus = "\(gestureTitle(latchedGesture)) recognized. Running its assigned action."
-                    status(fullFrame, lastStatus, nil)
-                } else {
-                    lastStatus = "\(gestureTitle(detectedGesture)): \(gestureProgress)/\(requiredHits) frames. Keep holding…"
-                    status(fullFrame, lastStatus, nil)
-                }
-            } else {
-                missedGestureFrames += 1
-                if missedGestureFrames >= 8 {
-                    latchedGesture = nil
-                }
-                let previousGesture = recentGestureFrames.compactMap { $0 }.last
-                let previousHits = previousGesture.map { g in recentGestureFrames.filter { $0 == g }.count } ?? 0
-                let requiredHits = 5
-                let message = previousHits > 0 && missedGestureFrames < 8
-                    ? "\(gestureTitle(previousGesture ?? "")): \(min(previousHits, requiredHits))/\(requiredHits) frames. Keep holding…"
-                    : (face == nil
-                    ? "No face found. Move into view; preview and gesture analysis stay local."
-                    : (handsFound == 0
-                        ? "Face framed, but no hand found. Raise one hand into the preview."
-                        : "Hand detected. Hold up 1, 2, or 3 fingers to choose an HDMI input, or hold thumbs up/down for volume."))
-                lastStatus = message
-                let zoomMessage = face == nil ? message : "Face detected. Using camera zoom; showing the full feed. " + message
-                status(fullFrame, zoomMessage, nil)
-            }
+            let loose = updateGestures(&looseVotes, hands: looseHands, face: nil)
+            if let message = loose.message { messages.append(message) }
+            if let gesture = loose.fired { fired.append(gesture) }
+
+            let people = visible.map { $0.name ?? "someone" }
+            let idle = visible.isEmpty
+                ? "No one in view. Preview and gesture analysis stay local."
+                : (hands.isEmpty
+                    ? "\(people.joined(separator: ", ")) in view. Raise a hand to gesture."
+                    : "Hand detected. Hold up 1, 2, or 3 fingers to choose an HDMI input, or hold thumbs up/down for volume.")
+            lastStatus = enrollMessage ?? messages.first ?? idle
+            status(annotate(fullFrame, animals: animals), lastStatus, nil)
+            for gesture in fired { status(nil, lastStatus, gesture) }
         } catch {
             if lastStatus != "Local Vision could not analyze this frame." {
                 lastStatus = "Local Vision could not analyze this frame."
                 status(nil, lastStatus, nil)
             }
         }
+    }
+
+    /// Match this frame's people to the tracks from earlier frames.
+    private func updateTracks(humans: [CGRect], faces: [CGRect], animals: [CGRect], now: Date) {
+        func center(_ r: CGRect) -> CGPoint { CGPoint(x: r.midX, y: r.midY) }
+        func inside(_ r: CGRect, _ boxes: [CGRect]) -> Bool { boxes.contains { $0.contains(center(r)) } }
+        // A face inside a dog is the dog's. A face inside a person (holding the
+        // dog) is still the person's.
+        let faces = faces.filter { !inside($0, animals) || inside($0, humans) }
+        let bodies = humans.filter { body in
+            faces.contains { body.contains(center($0)) }
+                || !animals.contains { $0.intersection(body).area > body.area * 0.5 }
+        }
+        var people: [(body: CGRect, face: CGRect?)] = bodies.map { body in
+            (body, faces.filter { body.contains(center($0)) }.max { $0.area < $1.area })
+        }
+        // A face with no body box (close to the lens, body cut off) is a person too.
+        for face in faces where !people.contains(where: { $0.face == face }) {
+            people.append((face.insetBy(dx: -face.width * 0.5, dy: 0).union(face.offsetBy(dx: 0, dy: -face.height * 2)), face))
+        }
+
+        var matched = Set<Int>()
+        for person in people {
+            let candidates = tracks.indices.filter { !matched.contains($0) }
+            let best = candidates.min { hypot(center(tracks[$0].body).x - center(person.body).x, center(tracks[$0].body).y - center(person.body).y)
+                < hypot(center(tracks[$1].body).x - center(person.body).x, center(tracks[$1].body).y - center(person.body).y) }
+            if let best, hypot(center(tracks[best].body).x - center(person.body).x, center(tracks[best].body).y - center(person.body).y) < 0.25 {
+                tracks[best].body = person.body
+                tracks[best].face = person.face
+                tracks[best].lastSeen = now
+                matched.insert(best)
+            } else {
+                tracks.append(Track(id: nextTrackID, body: person.body, face: person.face, lastSeen: now))
+                nextTrackID += 1
+                matched.insert(tracks.count - 1)
+            }
+        }
+        for index in tracks.indices { tracks[index].visible = matched.contains(index) }
+        // Brief dropouts keep the track (and its name and votes); then it's gone.
+        tracks.removeAll { !$0.visible && now.timeIntervalSince($0.lastSeen) > 1.5 }
+    }
+
+    /// Point the camera at whoever is in view: one person's face, or the group.
+    private func frame(_ visible: [Track]) {
+        let aim = visible.map(\.aim).reduce(visible[0].aim) { $0.union($1) }
+        let horizontalOffset = aim.midX - 0.5
+        if abs(horizontalOffset) > 0.05 {
+            searchSuggestedDirection = horizontalOffset > 0 ? 1 : -1
+        }
+        if visible.count == 1, let face = visible[0].face {
+            adjustHardwareZoom(forFace: face)
+        } else if visible.count > 1 {
+            // Fit everyone: the group's bodies should span about 80% of the frame.
+            let group = visible.map(\.body).reduce(visible[0].body) { $0.union($1) }
+            adjustHardwareZoom(toFit: group)
+        }
+        adjustGimbal(forFace: aim)
+    }
+
+    /// The visible track a hand belongs to: the nearest body, if it's close.
+    private func owner(of hand: VNHumanHandPoseObservation) -> Int? {
+        guard let wrist = try? hand.recognizedPoint(.wrist), wrist.confidence > 0.1 else { return nil }
+        let point = wrist.location
+        let scored = tracks.filter(\.visible).map { track -> (Int, CGFloat) in
+            // Arms reach past the shoulders; a wrist beside the body is still theirs.
+            let reach = track.body.insetBy(dx: -track.body.width * 0.5, dy: -track.body.height * 0.2)
+            let dx = max(reach.minX - point.x, 0, point.x - reach.maxX)
+            let dy = max(reach.minY - point.y, 0, point.y - reach.maxY)
+            return (track.id, hypot(dx, dy))
+        }
+        guard let best = scored.min(by: { $0.1 < $1.1 }), best.1 < 0.15 else { return nil }
+        return best.0
+    }
+
+    /// One person's gesture state machine: their hands this frame in, a status
+    /// line (nil when idle) and at most one fired gesture out.
+    private func updateGestures(
+        _ votes: inout GestureVotes, hands: [VNHumanHandPoseObservation], face: CGRect?
+    ) -> (message: String?, fired: String?) {
+        // Vision may return a weak duplicate/false hand. Use its strongest
+        // observation for one-hand actions, while keeping both for the
+        // explicit two-open-palms gesture.
+        let primaryHand = hands.max { $0.confidence < $1.confidence }
+        if let face, let primaryHand, handOverlapsFace(primaryHand, faceBounds: face) {
+            votes = GestureVotes(lastVolumeRepeat: votes.lastVolumeRepeat)
+            return ("Gesture paused while a hand is touching a face. Move it away to resume.", nil)
+        }
+        if hands.count >= 2 && hands.filter(isOpenPalmPose).count >= 2 {
+            votes.twoPalmHold += 1
+            votes.twoPalmMiss = 0
+            if votes.twoPalmHold >= 4 && !votes.twoPalmLatched {
+                votes.twoPalmLatched = true
+                votes.recent.removeAll(keepingCapacity: true)
+                return ("Both palms recognized. Switching the Sync Box to the Mac display and enabling the extended screen.", "two_palms")
+            }
+            if votes.twoPalmLatched { return ("Both palms recognized. Display action is running.", nil) }
+            return ("Hold both open palms steady: \(min(votes.twoPalmHold, 4))/4 frames.", nil)
+        }
+        if votes.twoPalmHold > 0 || votes.twoPalmLatched {
+            votes.twoPalmMiss += 1
+            if votes.twoPalmMiss <= 4 { return ("Keep both palms in view…", nil) }
+            votes.twoPalmHold = 0
+            votes.twoPalmMiss = 0
+            votes.twoPalmLatched = false
+        }
+        let rawGesture = primaryHand.flatMap { classifyGesture($0) }
+        votes.recent.append(rawGesture)
+        if votes.recent.count > 8 { votes.recent.removeFirst() }
+        // Vote across recent frames so a weak duplicate hand or one noisy
+        // finger landmark cannot flip a held pose between 1/open/2 fingers.
+        let gestureVotes = votes.recent.compactMap { $0 }.reduce(into: [String: Int]()) { counts, id in
+            counts[id, default: 0] += 1
+        }
+        let maximumGestureVotes = gestureVotes.values.max() ?? 0
+        let latched = votes.latched
+        let leadingGesture = rawGesture.flatMap { gestureVotes[$0] == maximumGestureVotes ? $0 : nil }
+            ?? latched.flatMap { gestureVotes[$0] == maximumGestureVotes ? $0 : nil }
+            ?? gestureVotes.filter { $0.value == maximumGestureVotes }.keys.sorted().first
+        let requiredHits = 5
+        guard let detectedGesture = leadingGesture else {
+            votes.missed += 1
+            if votes.missed >= 8 { votes.latched = nil }
+            let previousGesture = votes.recent.compactMap { $0 }.last
+            let previousHits = previousGesture.map { g in votes.recent.filter { $0 == g }.count } ?? 0
+            guard previousHits > 0 && votes.missed < 8, let previousGesture else { return (nil, nil) }
+            return ("\(gestureTitle(previousGesture)): \(min(previousHits, requiredHits))/\(requiredHits) frames. Keep holding…", nil)
+        }
+        let gestureHits = gestureVotes[detectedGesture] ?? 0
+        votes.missed = 0
+        if let latched = votes.latched, latched != detectedGesture { votes.latched = nil }
+        let isVolume = detectedGesture == "thumbs_up" || detectedGesture == "thumbs_down"
+        if gestureHits >= requiredHits && votes.latched != detectedGesture {
+            votes.latched = detectedGesture
+            votes.lastVolumeRepeat = Date()
+            return ("\(gestureTitle(detectedGesture)) recognized. Running its assigned action.", detectedGesture)
+        }
+        if isVolume, votes.latched == detectedGesture, rawGesture == detectedGesture,
+           Date().timeIntervalSince(votes.lastVolumeRepeat) > volumeRepeatInterval {
+            // Held thumbs keep stepping the volume: the longer the hold, the bigger the change.
+            votes.lastVolumeRepeat = Date()
+            return ("\(gestureTitle(detectedGesture)) held. Stepping TV volume; drop your hand to stop.", detectedGesture)
+        }
+        if let latched = votes.latched {
+            return ("\(gestureTitle(latched)) recognized. Running its assigned action.", nil)
+        }
+        return ("\(gestureTitle(detectedGesture)): \(min(gestureHits, requiredHits))/\(requiredHits) frames. Keep holding…", nil)
+    }
+
+    // MARK: - Who is who
+
+    private static var galleryURL: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        return base.appendingPathComponent("Hubbubb Local Camera/faces.archive")
+    }
+
+    private static func loadGallery() -> [String: [VNFeaturePrintObservation]] {
+        guard let data = try? Data(contentsOf: galleryURL),
+              let stored = try? NSKeyedUnarchiver.unarchivedObject(
+                ofClasses: [NSDictionary.self, NSArray.self, NSString.self, VNFeaturePrintObservation.self], from: data
+              ) as? [String: [VNFeaturePrintObservation]] else { return [:] }
+        return stored
+    }
+
+    private func saveGallery() {
+        let url = Self.galleryURL
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let data = try? NSKeyedArchiver.archivedData(withRootObject: gallery as NSDictionary, requiringSecureCoding: true) {
+            try? data.write(to: url, options: .completeFileProtection)
+        }
+    }
+
+    /// Start collecting face samples for `name` from whoever is alone in view.
+    /// Enrolling an existing name replaces their samples.
+    func beginEnrollment(name: String) {
+        settingsLock.lock()
+        enrollName = name
+        settingsLock.unlock()
+    }
+
+    var enrolledNames: [String] {
+        settingsLock.lock()
+        defer { settingsLock.unlock() }
+        return gallery.keys.sorted()
+    }
+
+    private func featurePrint(_ handler: VNImageRequestHandler, face: CGRect) -> VNFeaturePrintObservation? {
+        let request = VNGenerateImageFeaturePrintRequest()
+        request.imageCropAndScaleOption = .scaleFill
+        request.regionOfInterest = face.insetBy(dx: -face.width * 0.15, dy: -face.height * 0.15)
+            .intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        try? handler.perform([request])
+        return request.results?.first
+    }
+
+    /// Returns a status line while enrolling, nil otherwise.
+    private func enroll(_ handler: VNImageRequestHandler, visible: [Track]) -> String? {
+        settingsLock.lock()
+        let name = enrollName
+        settingsLock.unlock()
+        guard let name else { return nil }
+        let faces = visible.compactMap(\.face)
+        guard faces.count == 1, let face = faces.first, face.height > 0.06 else {
+            return "Enrolling \(name): only \(name)'s face should be in view, close enough to see clearly."
+        }
+        if frameNumber.isMultiple(of: 6), let print = featurePrint(handler, face: face) {
+            enrollSamples.append(print)
+        }
+        guard enrollSamples.count >= enrollTarget else {
+            return "Enrolling \(name): \(enrollSamples.count)/\(enrollTarget). Turn your head a little left, right, up and down."
+        }
+        settingsLock.lock()
+        gallery[name] = enrollSamples
+        enrollName = nil
+        settingsLock.unlock()
+        enrollSamples = []
+        saveGallery()
+        for index in tracks.indices where tracks[index].visible { tracks[index].name = name }
+        return "Enrolled \(name). The camera will recognize them from now on."
+    }
+
+    /// Re-check one face per frame: unnamed faces often, named ones now and then.
+    private func identifyFaces(_ handler: VNImageRequestHandler, now: Date) {
+        guard !gallery.isEmpty else { return }
+        let due = tracks.indices.filter { index in
+            guard tracks[index].visible, let face = tracks[index].face, face.height > 0.05 else { return false }
+            let age = now.timeIntervalSince(tracks[index].lastIdentified)
+            return age > (tracks[index].name == nil ? 0.3 : 2.0)
+        }
+        guard let index = due.min(by: { tracks[$0].lastIdentified < tracks[$1].lastIdentified }),
+              let face = tracks[index].face,
+              let print = featurePrint(handler, face: face) else { return }
+        tracks[index].lastIdentified = now
+        let ranked = gallery.compactMap { name, samples -> (name: String, distance: Float)? in
+            let distances = samples.compactMap { sample -> Float? in
+                var distance: Float = 0
+                return (try? print.computeDistance(&distance, to: sample)) != nil ? distance : nil
+            }
+            return distances.min().map { (name, $0) }
+        }.sorted { $0.distance < $1.distance }
+        tracks[index].nearest = ranked.first
+        // Too close between two enrolled people is a guess, not a match.
+        let clear = ranked.count < 2 || ranked[1].distance - ranked[0].distance > 0.03
+        if let best = ranked.first, best.distance < faceMatchThreshold, clear {
+            tracks[index].name = best.name
+            tracks[index].nameMisses = 0
+        } else {
+            tracks[index].nameMisses += 1
+            if tracks[index].nameMisses >= 3 { tracks[index].name = nil }
+        }
+    }
+
+    /// Tell Home Assistant who is in view when that changes, and every 20 s
+    /// so it knows the answer is still current.
+    private func reportPresence(_ names: [String], now: Date) {
+        guard !gallery.isEmpty,
+              names != lastPresence || now.timeIntervalSince(lastPresenceSent) > 20 else { return }
+        lastPresence = names
+        lastPresenceSent = now
+        presence(names)
+    }
+
+    /// The preview, half size, with people and animals boxed and labeled.
+    private func annotate(_ image: CGImage, animals: [VNRecognizedObjectObservation]) -> CGImage {
+        let width = min(image.width, 1920)
+        let height = image.height * width / image.width
+        guard let canvas = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+                                     space: CGColorSpaceCreateDeviceRGB(),
+                                     bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue) else { return image }
+        let size = CGSize(width: width, height: height)
+        canvas.draw(image, in: CGRect(origin: .zero, size: size))
+        func box(_ r: CGRect, _ color: NSColor, _ label: String) {
+            let rect = VNImageRectForNormalizedRect(r, width, height)
+            canvas.setStrokeColor(color.cgColor)
+            canvas.setLineWidth(4)
+            canvas.stroke(rect)
+            let text = NSAttributedString(string: " \(label) ", attributes: [
+                .font: NSFont.systemFont(ofSize: 26, weight: .bold),
+                .foregroundColor: NSColor.white,
+                .backgroundColor: color
+            ])
+            canvas.textPosition = CGPoint(x: rect.minX, y: min(rect.maxY + 8, size.height - 30))
+            CTLineDraw(CTLineCreateWithAttributedString(text), canvas)
+        }
+        for track in tracks where track.visible {
+            var label = track.name ?? "Person"
+            if let nearest = track.nearest { label += String(format: "  (%@ %.2f)", nearest.name, nearest.distance) }
+            box(track.face ?? track.body, track.name == nil ? .systemGreen : .systemBlue, label)
+        }
+        for animal in animals {
+            box(animal.boundingBox, .systemOrange, animal.labels.first?.identifier ?? "Animal")
+        }
+        return canvas.makeImage() ?? image
     }
 
     private enum CameraVisionError: Error {
@@ -1296,19 +1649,27 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     }
 
     private func adjustHardwareZoom(forFace face: CGRect) {
-        let faceHeight = face.height
-        guard zoomRange != nil, faceHeight > 0.04 else { return }
+        zoomToward(face, size: face.height, goal: 0.40)
+    }
+
+    private func adjustHardwareZoom(toFit group: CGRect) {
+        zoomToward(group, size: max(group.width, group.height), goal: 0.80)
+    }
+
+    /// Ease the lens so `size` (a fraction of the frame) approaches `goal`.
+    private func zoomToward(_ box: CGRect, size: CGFloat, goal: CGFloat) {
+        guard zoomRange != nil, size > 0.04 else { return }
         let now = Date()
         guard now.timeIntervalSince(lastAutoZoomUpdate) > 0.20 else { return }
         lastAutoZoomUpdate = now
         settingsLock.lock()
-        let enabled = autoZoomEnabled
+        let enabled = autoZoomEnabled && now > followPausedUntil
         let current = currentZoomFactor
         settingsLock.unlock()
         guard enabled else { return }
-        // Let the gimbal center an off-axis face before tightening the view.
-        guard abs(face.midX - 0.5) < 0.10, abs(face.midY - 0.5) < 0.12 else { return }
-        let target = min(4, max(1, current * (0.40 / faceHeight)))
+        // Let the gimbal center an off-axis subject before tightening the view.
+        guard abs(box.midX - 0.5) < 0.10, abs(box.midY - 0.5) < 0.12 else { return }
+        let target = min(4, max(1, current * (goal / size)))
         let smoothed = current + (target - current) * 0.12
         guard abs(smoothed - current) > 0.04 else { return }
         applyHardwareZoom(smoothed)
@@ -1319,11 +1680,13 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         if faceLostSince == nil { faceLostSince = now }
         let lostFor = now.timeIntervalSince(faceLostSince ?? now)
         settingsLock.lock()
-        let following = autoFollowEnabled
+        let following = autoFollowEnabled && now > followPausedUntil
         let autoZoom = autoZoomEnabled
         let current = currentZoomFactor
         settingsLock.unlock()
-        guard following, lostFor > 0.45 else { return }
+        // An empty room is not a reason to pan forever: give up after 20 s and
+        // wait for someone to walk into view.
+        guard following, lostFor > 0.45, lostFor < 20 else { return }
 
         // Widen in small steps first; this usually reacquires someone who simply
         // stepped outside the tightly zoomed face box without moving the gimbal.
@@ -1351,11 +1714,11 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     }
 
     private func adjustGimbal(forFace face: CGRect) {
+        let now = Date()
         settingsLock.lock()
-        let enabled = autoFollowEnabled
+        let enabled = autoFollowEnabled && now > followPausedUntil
         settingsLock.unlock()
         guard enabled else { return }
-        let now = Date()
         guard now.timeIntervalSince(lastAutoFollowUpdate) > 0.20 else { return }
         lastAutoFollowUpdate = now
         let measuredCenter = CGPoint(x: face.midX, y: face.midY)
@@ -1376,6 +1739,112 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         ptzQueue.async {
             _ = hubbubbLinkCameraFollowFace(centerX, centerY)
         }
+    }
+
+    // MARK: - Looking for things
+
+    /// Who and what the camera sees right now.
+    func inView() -> [String: Any] {
+        settingsLock.lock()
+        defer { settingsLock.unlock() }
+        return ["people": latestNames, "animals": latestAnimals]
+    }
+
+    /// Answer a question about the room from the camera, panning to search when
+    /// the current view doesn't answer it. Frames go only to the vision model
+    /// on this Mac. Blocks; call off the main thread.
+    func look(question: String) -> [String: Any] {
+        lookQueue.sync {
+            settingsLock.lock()
+            followPausedUntil = .distantFuture
+            settingsLock.unlock()
+            let start = hubbubbLinkCameraPanFraction()
+            applyHardwareZoom(1)
+            Thread.sleep(forTimeInterval: 1.0)
+            // Calibration knob: where else to look, as offsets from where the camera
+            // already points (it faces into the room), in fractions of the pan
+            // range; 0.35 is about 47° on the Link 2.
+            let offsets = UserDefaults.standard.array(forKey: "lookPanOffsets") as? [Double] ?? [-0.35, 0.35]
+            let positions = offsets.map { max(-1, min(1, Double(start) + $0)) }
+            var seen: [String] = []
+            var result: [String: Any] = [:]
+            for position in [nil] + positions.map(Optional.some) {
+                if let position {
+                    ptzQueue.sync { _ = hubbubbLinkCameraPanTo(Float(position)) }
+                    Thread.sleep(forTimeInterval: 1.8)  // let the gimbal settle and new frames arrive
+                }
+                guard let image = latestJPEG() else {
+                    result = ["error": "The camera has no picture right now."]
+                    break
+                }
+                let visible = inView()
+                guard let reply = askVisionModel(question, image: image, visible: visible) else {
+                    result = ["error": "The vision model on the Mac did not answer."]
+                    break
+                }
+                result = reply.merging(visible) { current, _ in current }
+                if reply["found"] as? Bool == true { break }
+                if let answer = reply["answer"] as? String { seen.append(answer) }
+            }
+            // Always point back where it was: the answer is in words, and a model
+            // that misread a soundbar as a bicycle should not leave the camera on it.
+            ptzQueue.sync { _ = hubbubbLinkCameraPanTo(start) }
+            if result["found"] as? Bool != true, !seen.isEmpty { result["looked_at"] = seen }
+            settingsLock.lock()
+            followPausedUntil = Date()
+            settingsLock.unlock()
+            return result
+        }
+    }
+
+    private func latestJPEG() -> Data? {
+        settingsLock.lock()
+        let frame = latestFrame
+        settingsLock.unlock()
+        guard let frame else { return nil }
+        let scale = min(1, 1280 / CGFloat(frame.width))
+        let image = CIImage(cgImage: frame).transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        return context.jpegRepresentation(of: image, colorSpace: CGColorSpaceCreateDeviceRGB(),
+                                          options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.8])
+    }
+
+    /// One question, one image, to Ollama on this Mac. -> {"found", "answer"} or nil.
+    private func askVisionModel(_ question: String, image: Data, visible: [String: Any]) -> [String: Any]? {
+        // The house model is multimodal, so no second model has to load.
+        let model = UserDefaults.standard.string(forKey: "visionModel") ?? "huihui_ai/Qwen3.6-abliterated:35b-a3b"
+        let people = (visible["people"] as? [String]).flatMap { $0.isEmpty ? nil : $0.joined(separator: ", ") } ?? "nobody recognized"
+        let prompt = """
+        You are the eyes of a home assistant, looking through a camera in the user's home.
+        Question: \(question)
+        People recognized in view by face recognition (trust these names): \(people).
+        Reply with JSON only: {"seen": "...", "found": true or false, "answer": "..."}.
+        First fill "seen": list the main things actually in the image. Then "found": true only if something \
+        in "seen" clearly is what the question asks about, or the question is about what is in view. If you \
+        are not sure, found is false - never guess. "answer" is one or two short spoken sentences; say where \
+        things are relative to furniture or other objects. If it is not visible, say briefly what you see instead.
+        """
+        guard let url = URL(string: "http://127.0.0.1:11434/api/chat") else { return nil }
+        var request = URLRequest(url: url, timeoutInterval: 90)
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: [
+            "model": model, "stream": false, "think": false, "format": "json",
+            "messages": [["role": "user", "content": prompt, "images": [image.base64EncodedString()]]]
+        ])
+        let done = DispatchSemaphore(value: 0)
+        var content: String?
+        URLSession.shared.dataTask(with: request) { data, _, _ in
+            let reply = data.flatMap { try? JSONSerialization.jsonObject(with: $0) } as? [String: Any]
+            content = (reply?["message"] as? [String: Any])?["content"] as? String
+            done.signal()
+        }.resume()
+        done.wait()
+        guard let content else { return nil }
+        if let parsed = (try? JSONSerialization.jsonObject(with: Data(content.utf8))) as? [String: Any],
+           parsed["answer"] is String {
+            return ["found": parsed["found"] as? Bool ?? false, "answer": parsed["answer"] as Any]
+        }
+        return ["found": false, "answer": content]
     }
 
     private func gestureTitle(_ id: String) -> String {
@@ -1483,3 +1952,86 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     }
 }
 
+
+/// Jarvis's way in: Home Assistant asks the camera questions over the LAN.
+///   GET  /people  -> {"people": [...], "animals": [...]}
+///   POST /look    {"question": "..."} -> {"found", "answer", "people", ...}
+/// Every request needs the companion's token (same Mac, same file), so no
+/// second secret has to be set up. Answers are words; frames never leave.
+private final class LookServer {
+    static let port: UInt16 = 8791
+    private let listener: NWListener
+    private let token: String
+    private let processor: LocalVisionProcessor
+    private let queue = DispatchQueue(label: "com.hubbubb.camera.server", attributes: .concurrent)
+
+    init?(processor: LocalVisionProcessor) {
+        let path = NSString(string: "~/.claude/hooks/.voice-token").expandingTildeInPath
+        guard let token = try? String(contentsOfFile: path, encoding: .utf8)
+                .trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty,
+              let port = NWEndpoint.Port(rawValue: Self.port),
+              let listener = try? NWListener(using: .tcp, on: port) else { return nil }
+        self.token = token
+        self.processor = processor
+        self.listener = listener
+        listener.newConnectionHandler = { [weak self] connection in self?.serve(connection) }
+        listener.start(queue: queue)
+    }
+
+    private func serve(_ connection: NWConnection) {
+        connection.start(queue: queue)
+        receive(connection, buffer: Data())
+    }
+
+    private func receive(_ connection: NWConnection, buffer: Data) {
+        connection.receive(minimumIncompleteLength: 1, maximumLength: 65536) { [weak self] data, _, complete, error in
+            guard let self else { return }
+            var buffer = buffer
+            if let data { buffer.append(data) }
+            guard buffer.count < 65536, error == nil else { return connection.cancel() }
+            guard let split = buffer.range(of: Data("\r\n\r\n".utf8)) else {
+                return complete ? connection.cancel() : self.receive(connection, buffer: buffer)
+            }
+            let head = String(decoding: buffer[..<split.lowerBound], as: UTF8.self)
+            let lines = head.components(separatedBy: "\r\n")
+            var headers: [String: String] = [:]
+            for line in lines.dropFirst() {
+                let parts = line.split(separator: ":", maxSplits: 1)
+                if parts.count == 2 { headers[parts[0].lowercased()] = parts[1].trimmingCharacters(in: .whitespaces) }
+            }
+            let body = buffer[split.upperBound...]
+            if let length = Int(headers["content-length"] ?? "0"), body.count < length, !complete {
+                return self.receive(connection, buffer: buffer)
+            }
+            let request = lines.first?.split(separator: " ").map(String.init) ?? []
+            let (status, reply) = self.handle(request, headers: headers, body: Data(body))
+            let json = (try? JSONSerialization.data(withJSONObject: reply)) ?? Data("{}".utf8)
+            let response = "HTTP/1.1 \(status)\r\nContent-Type: application/json\r\nContent-Length: \(json.count)\r\nConnection: close\r\n\r\n"
+            connection.send(content: Data(response.utf8) + json, completion: .contentProcessed { _ in connection.cancel() })
+        }
+    }
+
+    private func handle(_ request: [String], headers: [String: String], body: Data) -> (String, Any) {
+        guard Self.sameSecret(headers["authorization"] ?? "", "Bearer \(token)") else {
+            return ("401 Unauthorized", ["ok": false, "detail": "missing or wrong token"])
+        }
+        switch (request.first, request.dropFirst().first) {
+        case ("GET", "/people"):
+            return ("200 OK", processor.inView())
+        case ("POST", "/look"):
+            let question = ((try? JSONSerialization.jsonObject(with: body)) as? [String: Any])?["question"] as? String
+            guard let question, !question.isEmpty, question.count <= 300 else {
+                return ("400 Bad Request", ["ok": false, "detail": "send {\"question\": \"...\"}"])
+            }
+            return ("200 OK", processor.look(question: question))
+        default:
+            return ("404 Not Found", ["ok": false, "detail": "no such path"])
+        }
+    }
+
+    private static func sameSecret(_ a: String, _ b: String) -> Bool {
+        let x = Array(a.utf8), y = Array(b.utf8)
+        guard x.count == y.count else { return false }
+        return zip(x, y).reduce(0) { $0 | ($1.0 ^ $1.1) } == 0
+    }
+}

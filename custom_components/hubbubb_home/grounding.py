@@ -33,7 +33,7 @@ _LOGGER = logging.getLogger(__name__)
 READ_ONLY = {
     "GetLiveContext", "GetDateTime", "recall", "find_recipe", "read_list",
     "timer_status", "house_findings", "camera_activity", "calculate",
-    "date_info", "web_search",
+    "date_info", "web_search", "look_around",
 }
 
 # ponytail: phrase heuristic for "it's done". It misses a claim worded some

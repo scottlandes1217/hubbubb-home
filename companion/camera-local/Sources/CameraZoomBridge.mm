@@ -18,6 +18,8 @@ bool trackingModeAvailable = false;
 int cachedTrackingState = 0;
 long searchCenterPan = 0;
 bool searchCenterValid = false;
+constexpr long initialSearchRadius = 5L * 3600L;
+long searchRadius = initialSearchRadius;
 }
 
 extern "C" int HubbubbLinkCameraZoomInitialize(long *minimum, long *maximum, long *step, long *current) {
@@ -69,11 +71,14 @@ extern "C" int HubbubbLinkCameraSearchBegin() {
     if (!cameraController || !cameraController->GetPanTiltAbsoluteRange(panRange, tiltRange)) return 0;
     searchCenterPan = panRange.cur;
     searchCenterValid = true;
+    searchRadius = initialSearchRadius;
     return 1;
 }
 
-// Search locally around the pan position where the face disappeared. Returns
-// the direction to use next; it reverses at the local search window edges.
+// Search around the pan position where the person disappeared. Returns the
+// direction to use next; it reverses at the window edges and doubles the
+// window each time, so a search that started on the wrong thing (a dog's
+// face) widens to the whole room instead of circling it forever.
 extern "C" int HubbubbLinkCameraSearchStep(int direction) {
     std::lock_guard<std::mutex> lock(cameraMutex);
     if (!cameraController || (direction != -1 && direction != 1)) return 0;
@@ -83,12 +88,33 @@ extern "C" int HubbubbLinkCameraSearchStep(int direction) {
         searchCenterPan = panRange.cur;
         searchCenterValid = true;
     }
-    constexpr long searchRadius = 5L * 3600L; // keep recovery within 5 degrees of last sighting
     const long low = std::max(panRange.min, searchCenterPan - searchRadius);
     const long high = std::min(panRange.max, searchCenterPan + searchRadius);
     const long targetPan = std::clamp(panRange.cur + direction * step, low, high);
-    if (targetPan == panRange.cur) return -direction;
+    if (targetPan == panRange.cur) {
+        searchRadius = std::min(searchRadius * 2, panRange.max - panRange.min);
+        return -direction;
+    }
     return cameraController->SetPanTiltAbsolute(targetPan, tiltRange.cur) ? direction : 0;
+}
+
+// Pan to a fraction of the full range: -1 far left, 0 center, 1 far right.
+extern "C" int HubbubbLinkCameraPanTo(float fraction) {
+    std::lock_guard<std::mutex> lock(cameraMutex);
+    if (!cameraController || !cameraController->GetPanTiltAbsoluteRange(panRange, tiltRange)) return 0;
+    const long middle = (panRange.min + panRange.max) / 2;
+    const long half = (panRange.max - panRange.min) / 2;
+    const long target = std::clamp(middle + std::lround(std::clamp(fraction, -1.0f, 1.0f) * half),
+                                   panRange.min, panRange.max);
+    return cameraController->SetPanTiltAbsolute(target, tiltRange.cur) ? 1 : 0;
+}
+
+// Where the camera points now, on the same -1...1 scale; 0 if unknown.
+extern "C" float HubbubbLinkCameraPanFraction() {
+    std::lock_guard<std::mutex> lock(cameraMutex);
+    if (!cameraController || !cameraController->GetPanTiltAbsoluteRange(panRange, tiltRange)) return 0;
+    const long half = std::max(1L, (panRange.max - panRange.min) / 2);
+    return static_cast<float>(panRange.cur - (panRange.min + panRange.max) / 2) / half;
 }
 
 extern "C" int HubbubbLinkCameraFollowFace(float centerX, float centerY) {
