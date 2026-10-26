@@ -66,6 +66,10 @@ This is a capture and local-inference prototype, not yet a virtual webcam.
   never the dog. One person is framed by face; several are framed as a group.
 - Hands are assigned to the nearest person and each person votes on their own
   gestures, so anyone in the room can gesture without mixing with someone else.
+- A hand only gestures when raised: its wrist no more than `gestureReach`
+  (1.5) face heights below the chin, or in the top half of the body box when
+  no face is visible. Hands on a keyboard or in a lap are ignored, as are
+  hands not attached to anyone in view.
 - **Enroll a person…** stores ~20 face feature prints in
   `~/Library/Application Support/Hubbubb Local Camera/faces.archive`. The
   preview labels each face with its nearest match and distance; tune with

@@ -98,6 +98,12 @@ private struct RoomMap {
         precondition(book.match("Where are my AirPods?")?.name == "AirPods case", "plural and partial names match")
         precondition(book.match("have you seen my key")?.name == "car keys", "singular matches plural")
         precondition(book.match("what's on the whiteboard") == nil, "unrelated questions match nothing")
+        // Seated with a laptop: face 0.10 tall with the chin at y 0.60.
+        let face = CGRect(x: 0.45, y: 0.60, width: 0.08, height: 0.10)
+        let body = CGRect(x: 0.35, y: 0.20, width: 0.30, height: 0.50)
+        precondition(GestureGate.isRaised(wrist: CGPoint(x: 0.6, y: 0.50), face: face, body: body, reach: 1.5), "thumbs up at chest counts")
+        precondition(!GestureGate.isRaised(wrist: CGPoint(x: 0.5, y: 0.30), face: face, body: body, reach: 1.5), "hands on the keyboard never count")
+        precondition(!GestureGate.isRaised(wrist: CGPoint(x: 0.5, y: 0.40), face: nil, body: body, reach: 1.5), "no face: lower body half never counts")
         print("RoomMap self-test passed")
     }
 }
@@ -148,6 +154,17 @@ private struct ItemBook {
             (item, Self.words(item.name).filter { $0.count >= 3 && asked.contains($0) }.count)
         }
         return scored.filter { $0.1 > 0 }.max { $0.1 < $1.1 }?.0
+    }
+}
+
+/// When a hand may gesture at all: raised to chest height or above, judged
+/// against its owner's face (Vision y grows upward; face.minY is the chin).
+/// Hands on a keyboard or in a lap sit well below that, whatever shape they
+/// make. With no face in view, the top half of the upper-body box stands in.
+private enum GestureGate {
+    static func isRaised(wrist: CGPoint, face: CGRect?, body: CGRect, reach: CGFloat) -> Bool {
+        if let face { return wrist.y >= face.minY - face.height * reach }
+        return wrist.y >= body.midY
     }
 }
 
@@ -263,8 +280,7 @@ private final class CameraViewController: NSViewController {
         ("thumbs_down", "Thumbs down", "TV volume down (hold for more)"),
         ("number_1", "One finger", "Apple TV HDMI input"),
         ("number_2", "Two fingers", "Mac Main Display HDMI input"),
-        ("number_3", "Three fingers", "Mac Second Display + start screen sharing"),
-        ("two_palms", "Both palms", "Toggle TV extended display")
+        ("number_3", "Three fingers", "Mac Second Display + start screen sharing")
     ]
     private var configured = false
     private var didRequestCamera = false
@@ -425,7 +441,7 @@ private final class CameraViewController: NSViewController {
             gestureContentView.addSubview(button)
             testButtons.append(button)
         }
-        let note = panelLabel("Hold 1 for Apple TV, 2 for Mac Main Display, or 3 for Mac Second Display and screen sharing. Hold thumbs up or down for TV volume. One open palm presses Apple TV center/select; both palms toggle the TV display. Keep hands away from your face.", size: 11, weight: .regular)
+        let note = panelLabel("Hold 1 for Apple TV, 2 for Mac Main Display, or 3 for Mac Second Display and screen sharing. Hold thumbs up or down for TV volume. One open palm presses Apple TV center/select. Raise your hand to chest height; hands lower down (typing) are ignored.", size: 11, weight: .regular)
         note.textColor = NSColor(calibratedWhite: 0.72, alpha: 1)
         note.lineBreakMode = .byWordWrapping
         note.maximumNumberOfLines = 3
@@ -586,10 +602,6 @@ private final class CameraViewController: NSViewController {
         if gesture == "number_1" || gesture == "number_2" || gesture == "number_3" {
             let input = gesture == "number_1" ? "Apple TV" : (gesture == "number_2" ? "Mac Main Display" : "Mac Second Display")
             selectCameraInput(input, startScreenSharing: gesture == "number_3")
-            return
-        }
-        if gesture == "two_palms" {
-            toggleMacTVExtension()
             return
         }
         if gesture == "open_palm" {
@@ -799,74 +811,6 @@ private final class CameraViewController: NSViewController {
         }
     }
 
-    private func toggleMacTVExtension() {
-        let defaults = UserDefaults.standard
-        let base = defaults.string(forKey: "haBaseURL")
-        let token = loadToken()
-        guard let base, let token, !token.isEmpty else {
-            controlFeedbackLabel.stringValue = "Set up the local Home Assistant connection before toggling the Mac TV display."
-            return
-        }
-        guard let stateURL = URL(string: "\(base)/api/states/select.living_room_sync_box_hdmi_input") else { return }
-        var request = URLRequest(url: stateURL)
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                guard error == nil,
-                      let response = response as? HTTPURLResponse,
-                      (200..<300).contains(response.statusCode),
-                      let data,
-                      let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let currentInput = state["state"] as? String else {
-                    self.controlFeedbackLabel.stringValue = "Could not read the Sync Box input; the Mac display was not changed."
-                    return
-                }
-                let macInput = "Mac Second Display"
-                let extendedDisplayIsActive = self.isMacTVDisplayExtended()
-
-                // The selected Sync Box input is authoritative. The old
-                // UserDefaults flag could get out of sync after a failed display
-                // handshake, leaving the gesture stuck in the "turn on" branch.
-                if currentInput == macInput && extendedDisplayIsActive {
-                    let previousInput = defaults.string(forKey: "macTVPreviousSyncInput") ?? "Apple TV"
-                    let layoutChanged = self.configureTVDisplay(extended: false)
-                    self.selectSyncBoxInput(named: previousInput, base: base, token: token) { [weak self] succeeded in
-                        guard let self else { return }
-                        if succeeded {
-                            defaults.set(false, forKey: "macTVExtensionActive")
-                            self.controlFeedbackLabel.stringValue = layoutChanged
-                                ? "TV extension stopped. Sync Box returned to \(previousInput)."
-                                : "Sync Box returned to \(previousInput); macOS did not report a separate TV display to turn off."
-                            self.eventLabel.stringValue = "EVENT FIRED  •  Mac TV extension off"
-                        } else {
-                            self.controlFeedbackLabel.stringValue = "Could not return the Sync Box to \(previousInput); the TV extension may still be active."
-                        }
-                    }
-                    return
-                }
-
-                let previousInput = currentInput == macInput
-                    ? (defaults.string(forKey: "macTVPreviousSyncInput") ?? "Apple TV")
-                    : currentInput
-                if currentInput != macInput {
-                    defaults.set(currentInput, forKey: "macTVPreviousSyncInput")
-                    self.controlFeedbackLabel.stringValue = "Switching the Hue Sync Box from \(currentInput) to Mac Second Display…"
-                    self.selectSyncBoxInput(named: macInput, base: base, token: token) { [weak self] succeeded in
-                        guard let self else { return }
-                        guard succeeded else {
-                            self.controlFeedbackLabel.stringValue = "Could not switch the Hue Sync Box to Mac Second Display."
-                            return
-                        }
-                        self.waitForMacTVDisplay(attempt: 0, previousInput: previousInput, base: base, token: token)
-                    }
-                } else {
-                    self.controlFeedbackLabel.stringValue = "Mac Second Display is selected. Enabling the extended desktop…"
-                    self.waitForMacTVDisplay(attempt: 0, previousInput: previousInput, base: base, token: token)
-                }
-            }
-        }.resume()
-    }
 
     private func waitForMacTVDisplay(attempt: Int, previousInput: String?, base: String, token: String) {
         if configureTVDisplay(extended: true) {
@@ -940,18 +884,6 @@ private final class CameraViewController: NSViewController {
         return configureResult == .success && completionResult == .success
     }
 
-    private func isMacTVDisplayExtended() -> Bool {
-        var displays = [CGDirectDisplayID](repeating: 0, count: 16)
-        var displayCount: UInt32 = 0
-        let result = displays.withUnsafeMutableBufferPointer {
-            CGGetActiveDisplayList(UInt32($0.count), $0.baseAddress, &displayCount)
-        }
-        guard result == .success else { return false }
-        let main = CGMainDisplayID()
-        return displays.prefix(Int(displayCount)).contains {
-            $0 != main && CGDisplayIsBuiltin($0) == 0 && CGDisplayIsInMirrorSet($0) == 0
-        }
-    }
 
     @objc private func configureTVVolume() {
         let defaults = UserDefaults.standard
@@ -1267,9 +1199,6 @@ private struct GestureVotes {
     var latched: String?
     var missed = 0
     var lastVolumeRepeat = Date.distantPast
-    var twoPalmHold = 0
-    var twoPalmMiss = 0
-    var twoPalmLatched = false
 }
 
 /// A person followed across frames: matched frame to frame by position, so
@@ -1308,8 +1237,6 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     private var frameNumber = 0
     private var tracks: [Track] = []
     private var nextTrackID = 1
-    // Hands Vision found but could not tie to anyone (body out of frame).
-    private var looseVotes = GestureVotes()
     private var lastStatus = ""
     // Enrolled faces: name -> feature prints of that face.
     private var gallery: [String: [VNFeaturePrintObservation]] = [:]
@@ -1440,14 +1367,25 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             // Gestures, per person: each visible track votes with its own hands.
             let hands = handRequest.results ?? []
             var handsByTrack: [Int: [VNHumanHandPoseObservation]] = [:]
-            var looseHands: [VNHumanHandPoseObservation] = []
+            // A hand nobody in view owns can't be judged raised or not, so it never gestures.
             for hand in hands {
-                if let owner = owner(of: hand) { handsByTrack[owner, default: []].append(hand) } else { looseHands.append(hand) }
+                if let owner = owner(of: hand) { handsByTrack[owner, default: []].append(hand) }
             }
+            // Calibration knob: how far below the chin a gesturing wrist may be,
+            // in face heights. Lower if typing still triggers; higher if a
+            // relaxed thumbs-up at the chest is missed.
+            let reach = CGFloat(UserDefaults.standard.object(forKey: "gestureReach") as? Double ?? 1.5)
             var messages: [String] = []
             var fired: [String] = []
+            var raisedHands = 0
             for index in tracks.indices where tracks[index].visible {
-                let result = updateGestures(&tracks[index].votes, hands: handsByTrack[tracks[index].id] ?? [], face: tracks[index].face)
+                let track = tracks[index]
+                let raised = (handsByTrack[track.id] ?? []).filter { hand in
+                    guard let wrist = try? hand.recognizedPoint(.wrist), wrist.confidence > 0.1 else { return false }
+                    return GestureGate.isRaised(wrist: wrist.location, face: track.face, body: track.body, reach: reach)
+                }
+                raisedHands += raised.count
+                let result = updateGestures(&tracks[index].votes, hands: raised, face: track.face)
                 if let message = result.message {
                     messages.append(tracks[index].name.map { "\($0): \(message)" } ?? message)
                 }
@@ -1457,15 +1395,14 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                     tracks[index].lastSeen = now
                 }
             }
-            let loose = updateGestures(&looseVotes, hands: looseHands, face: nil)
-            if let message = loose.message { messages.append(message) }
-            if let gesture = loose.fired { fired.append(gesture) }
 
             let people = visible.map { $0.name ?? "someone" }
             let idle = visible.isEmpty
                 ? "No one in view. Preview and gesture analysis stay local."
                 : (hands.isEmpty
                     ? "\(people.joined(separator: ", ")) in view. Raise a hand to gesture."
+                    : raisedHands == 0
+                    ? "Hands are low (typing?), so gestures are ignored. Raise a hand to chest height to gesture."
                     : "Hand detected. Hold up 1, 2, or 3 fingers to choose an HDMI input, or hold thumbs up/down for volume.")
             lastStatus = enrollMessage ?? messages.first ?? idle
             status(annotate(fullFrame, animals: animals), lastStatus, nil)
@@ -1562,31 +1499,11 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     private func updateGestures(
         _ votes: inout GestureVotes, hands: [VNHumanHandPoseObservation], face: CGRect?
     ) -> (message: String?, fired: String?) {
-        // Vision may return a weak duplicate/false hand. Use its strongest
-        // observation for one-hand actions, while keeping both for the
-        // explicit two-open-palms gesture.
+        // Vision may return a weak duplicate/false hand: use its strongest.
         let primaryHand = hands.max { $0.confidence < $1.confidence }
         if let face, let primaryHand, handOverlapsFace(primaryHand, faceBounds: face) {
             votes = GestureVotes(lastVolumeRepeat: votes.lastVolumeRepeat)
             return ("Gesture paused while a hand is touching a face or hair. Move it away to resume.", nil)
-        }
-        if hands.count >= 2 && hands.filter(isOpenPalmPose).count >= 2 {
-            votes.twoPalmHold += 1
-            votes.twoPalmMiss = 0
-            if votes.twoPalmHold >= 4 && !votes.twoPalmLatched {
-                votes.twoPalmLatched = true
-                votes.recent.removeAll(keepingCapacity: true)
-                return ("Both palms recognized. Switching the Sync Box to the Mac display and enabling the extended screen.", "two_palms")
-            }
-            if votes.twoPalmLatched { return ("Both palms recognized. Display action is running.", nil) }
-            return ("Hold both open palms steady: \(min(votes.twoPalmHold, 4))/4 frames.", nil)
-        }
-        if votes.twoPalmHold > 0 || votes.twoPalmLatched {
-            votes.twoPalmMiss += 1
-            if votes.twoPalmMiss <= 4 { return ("Keep both palms in view…", nil) }
-            votes.twoPalmHold = 0
-            votes.twoPalmMiss = 0
-            votes.twoPalmLatched = false
         }
         let rawGesture = primaryHand.flatMap { classifyGesture($0) }
         votes.recent.append(rawGesture)
@@ -2184,33 +2101,10 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         case "number_1": return "One finger"
         case "number_2": return "Two fingers"
         case "number_3": return "Three fingers"
-        case "two_palms": return "Both palms"
         default: return "Gesture"
         }
     }
 
-    private func isOpenPalmPose(_ observation: VNHumanHandPoseObservation) -> Bool {
-        func point(_ joint: VNHumanHandPoseObservation.JointName) -> VNRecognizedPoint? {
-            try? observation.recognizedPoint(joint)
-        }
-        guard let thumb = point(.thumbTip), let indexMCP = point(.indexMCP),
-              let littleMCP = point(.littleMCP),
-              thumb.confidence > 0.12, indexMCP.confidence > 0.12, littleMCP.confidence > 0.12 else { return false }
-        let fingers: [(VNHumanHandPoseObservation.JointName, VNHumanHandPoseObservation.JointName, VNHumanHandPoseObservation.JointName)] = [
-            (.indexTip, .indexPIP, .indexMCP), (.middleTip, .middlePIP, .middleMCP),
-            (.ringTip, .ringPIP, .ringMCP), (.littleTip, .littlePIP, .littleMCP)
-        ]
-        let extendedCount = fingers.reduce(into: 0) { count, joints in
-            guard let tip = point(joints.0), let pip = point(joints.1), let mcp = point(joints.2),
-                  tip.confidence > 0.10, pip.confidence > 0.10, mcp.confidence > 0.10 else { return }
-            let tipToMCP = hypot(tip.location.x - mcp.location.x, tip.location.y - mcp.location.y)
-            let pipToMCP = hypot(pip.location.x - mcp.location.x, pip.location.y - mcp.location.y)
-            if tipToMCP > pipToMCP * 1.45 { count += 1 }
-        }
-        let palmWidth = hypot(indexMCP.location.x - littleMCP.location.x, indexMCP.location.y - littleMCP.location.y)
-        let thumbSpread = hypot(thumb.location.x - indexMCP.location.x, thumb.location.y - indexMCP.location.y)
-        return extendedCount == 4 && palmWidth > 0.025 && thumbSpread > palmWidth * 0.55
-    }
 
     private func classifyGesture(_ observation: VNHumanHandPoseObservation) -> String? {
         func point(_ joint: VNHumanHandPoseObservation.JointName) -> VNRecognizedPoint? {
