@@ -174,6 +174,7 @@ private struct RoomMap {
         precondition(GestureGate.elbow(for: CGPoint(x: 0.61, y: 0.41), arms: arm) != nil, "finds the arm for a hand")
         precondition(GestureGate.isRaised(wrist: CGPoint(x: 0.6, y: 0.4), elbow: CGPoint(x: 0.62, y: 0.3)), "wrist above elbow: raised")
         precondition(!GestureGate.isRaised(wrist: CGPoint(x: 0.55, y: 0.45), elbow: CGPoint(x: 0.5, y: 0.47)), "wrist level with or below the elbow: resting")
+        precondition(!GestureGate.isRaised(wrist: CGPoint(x: 0.62, y: 0.42), elbow: CGPoint(x: 0.5, y: 0.4)), "forearm flat on a mouse: resting")
         precondition(GestureGate.elbow(for: CGPoint(x: 0.2, y: 0.2), arms: arm) == nil, "a far-off arm is someone else's")
         let head = GestureGate.head(face, hair: 0.9, chin: 0.25)
         precondition(head.contains(CGPoint(x: 0.49, y: 0.58)), "a fork at the mouth, just under the chin, is in the head zone")
@@ -256,7 +257,11 @@ private enum GestureGate {
     /// dog rest at or below the elbow - however close to the face the camera's
     /// downward angle makes them look. `margin` is in frame heights.
     static func isRaised(wrist: CGPoint, elbow: CGPoint, margin: CGFloat = 0.01) -> Bool {
-        wrist.y > elbow.y + margin
+        // Lifted, not just level: the forearm at least ~25 degrees above
+        // horizontal (x scaled for 16:9). A forearm flat on a mouse or keyboard
+        // can have the wrist a hair above the elbow.
+        let dx = (wrist.x - elbow.x) * 16 / 9, dy = wrist.y - elbow.y
+        return dy > margin && dy / max(0.0001, hypot(dx, dy)) >= 0.42
     }
 
     /// The elbow for a hand: the body-pose wrist nearest the hand's wrist (if
@@ -345,8 +350,12 @@ private enum HandShape {
         // Tuned on real hands (hands.jsonl): side-on, curled fingers measure up
         // to ~1.6 knuckle-to-tip lengths; straight ones 1.8-2.6, pointing any way.
         let curled = fingers.filter { d($0.0, $0.2) < d($0.1, $0.2) * 1.6 }.count
+        // Straight and pointing up (at least ~30 degrees above horizontal):
+        // fingers spread on a mouse or keyboard point forward or down.
         let extended = fingers.filter { f in
-            d(f.0, f.2) > d(f.1, f.2) * 1.7 && d(f.0, "wrist") > d(f.1, "wrist")
+            guard let tip = p[f.0], let mcp = p[f.2] else { return false }
+            let dx = (tip.x - mcp.x) * 16 / 9, dy = tip.y - mcp.y
+            return d(f.0, f.2) > d(f.1, f.2) * 1.7 && dy / max(0.0001, hypot(dx, dy)) > 0.5
         }.count
         switch extended {
         case 1: return "number_1"
@@ -584,7 +593,7 @@ private final class CameraService {
         "faceMatchThreshold": (0.2...1.2, 0.6),
         "searchDegrees": (10...120, 45),
         "searchTilt": (-60...30, -20),
-        "holdSeconds": (0.3...2.0, 0.8),
+        "holdSeconds": (0.3...2.0, 0.6),
         "handConfidence": (0.1...0.8, 0.25),
         "lookAngle": (10...60, 25),
         "framingFill": (0.4...1.0, 0.7),
@@ -1018,6 +1027,9 @@ private struct GestureVotes {
     var pausedUntil = Date.distantPast
     // The gesturing wrist's recent positions; a gesture has to be held still.
     var wrists: [CGPoint] = []
+    // One gesture at a time: after one fires, a different one waits.
+    var lastFired: String?
+    var quietUntil = Date.distantPast
 }
 
 /// A person followed across frames: matched frame to frame by position, so
@@ -1441,7 +1453,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         if steady, rawGesture == nil, let hand = primaryHand { recordUnrecognized(hand) }
         // Calibration knob: seconds a gesture must be held (about 10 analysed
         // frames a second). A pose a hand only passes through never gets there.
-        let holdSeconds = UserDefaults.standard.object(forKey: "holdSeconds") as? Double ?? 0.8
+        let holdSeconds = UserDefaults.standard.object(forKey: "holdSeconds") as? Double ?? 0.6
         let requiredHits = max(3, Int((holdSeconds * 10).rounded()))
         votes.recent.append(rawGesture)
         if votes.recent.count > requiredHits + 3 { votes.recent.removeFirst(votes.recent.count - requiredHits - 3) }
@@ -1473,7 +1485,14 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         votes.missed = 0
         if let latched = votes.latched, latched != detectedGesture { votes.latched = nil }
         if gestureHits >= requiredHits && votes.latched != detectedGesture {
+            // A hand changing shape passes through other gestures (three
+            // fingers opening into a palm); only the first one counts.
+            if Date() < votes.quietUntil, votes.lastFired != detectedGesture {
+                return ("One gesture at a time - drop your hand, then make the next one.", nil)
+            }
             votes.latched = detectedGesture
+            votes.lastFired = detectedGesture
+            votes.quietUntil = Date().addingTimeInterval(1.5)
             votes.lastVolumeRepeat = Date()
             return ("\(gestureTitle(detectedGesture)) recognized. Running its assigned action.", (detectedGesture, false))
         }
