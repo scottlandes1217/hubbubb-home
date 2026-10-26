@@ -3,8 +3,8 @@ import AVFoundation
 import Vision
 import Security
 import Network
+import ServiceManagement
 
-private let appTitle = "Hubbubb Local Camera"
 
 @_silgen_name("HubbubbLinkCameraZoomInitialize")
 private func hubbubbLinkCameraZoomInitialize(
@@ -225,471 +225,277 @@ private enum HubbubbLocalCameraApp {
             return
         }
         let application = NSApplication.shared
-        application.setActivationPolicy(.regular)
-        let delegate = CameraAppDelegate()
-        application.delegate = delegate
-        application.run()
+        // No window and no Dock icon: Home Assistant is the interface.
+        application.setActivationPolicy(.accessory)
+        let service = CameraService()
+        service.start()
+        withExtendedLifetime(service) { application.run() }
     }
 }
 
-private final class CameraAppDelegate: NSObject, NSApplicationDelegate {
-    private var window: NSWindow?
-
-    func applicationDidFinishLaunching(_ notification: Notification) {
-        installMainMenu()
-        let controller = CameraViewController()
-        controller.preferredContentSize = NSSize(width: 1200, height: 760)
-        let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 1200, height: 760),
-            styleMask: [.titled, .closable, .miniaturizable, .resizable],
-            backing: .buffered,
-            defer: false
-        )
-        window.title = appTitle
-        window.contentViewController = controller
-        window.setContentSize(NSSize(width: 1200, height: 760))
-        window.center()
-        window.minSize = NSSize(width: 960, height: 700)
-        window.makeKeyAndOrderFront(nil)
-        window.orderFrontRegardless()
-        DispatchQueue.main.async { controller.startCameraIfNeeded() }
-        self.window = window
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    private func installMainMenu() {
-        let mainMenu = NSMenu()
-        let appMenuItem = NSMenuItem()
-        let appMenu = NSMenu(title: appTitle)
-        appMenu.addItem(withTitle: "Quit \(appTitle)", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
-        appMenuItem.submenu = appMenu
-        mainMenu.addItem(appMenuItem)
-
-        let editMenuItem = NSMenuItem()
-        let editMenu = NSMenu(title: "Edit")
-        let pasteItem = NSMenuItem(title: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
-        pasteItem.keyEquivalentModifierMask = [.command]
-        editMenu.addItem(pasteItem)
-        editMenuItem.submenu = editMenu
-        mainMenu.addItem(editMenuItem)
-        NSApp.mainMenu = mainMenu
-    }
-
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
-    }
-}
-
-private final class CameraViewController: NSViewController {
+/// The camera as a background service on this Mac. Home Assistant drives it
+/// through CameraServer: settings, live view, people, things, and an event
+/// feed of gestures and who is in view. What a gesture *does* lives in Home
+/// Assistant; this side only sees, and runs the one thing only a Mac can
+/// (Screen Mirroring to the TV).
+private final class CameraService {
     private let session = AVCaptureSession()
     private let sessionQueue = DispatchQueue(label: "com.hubbubb.camera.session")
-    private let previewImage = NSImageView()
-    private let statusLabel = NSTextField(labelWithString: "Requesting camera access…")
-    private let controlFeedbackLabel = NSTextField(labelWithString: "Camera controls are ready.")
-    private let eventLabel = NSTextField(labelWithString: "WAITING FOR A GESTURE  •  local actions")
-    private let panel = NSView()
-    private let gestureScrollView = NSScrollView()
-    private let gestureContentView = NSView()
-    private let framingCheckbox = NSButton(checkboxWithTitle: "Auto-zoom to my face", target: nil, action: nil)
-    private let trackingCheckbox = NSButton(checkboxWithTitle: "AI following", target: nil, action: nil)
-    private let leftPanButton = NSButton(title: "◀", target: nil, action: nil)
-    private let rightPanButton = NSButton(title: "▶", target: nil, action: nil)
-    private let zoomSlider = NSSlider(value: 1.0, minValue: 1.0, maxValue: 4.0, target: nil, action: nil)
-    private let zoomLabel = NSTextField(labelWithString: "1.0×")
-    private var localFollowingEnabled = UserDefaults.standard.object(forKey: "localAIFollowingEnabled") as? Bool ?? true
-    private var gestureRows: [String: NSTextField] = [:]
-    private var testButtons: [NSButton] = []
-    private let programmedGestures: [(id: String, title: String, assignment: String)] = [
-        ("thumbs_up", "Thumbs up", "TV volume up (hold for more)"),
-        ("open_palm", "Open palm", "Apple TV center / select button"),
-        ("thumbs_down", "Thumbs down", "TV volume down (hold for more)"),
-        ("number_1", "One finger", "Apple TV HDMI input"),
-        ("number_2", "Two fingers", "Mac Main Display HDMI input"),
-        ("number_3", "Three fingers", "Mac Second Display + start screen sharing")
-    ]
-    private var configured = false
-    private var didRequestCamera = false
     private var processor: LocalVisionProcessor?
-    private var lookServer: LookServer?
-    private var pendingTVButtonSteps = 0
-    private var tvVolumeActionInFlight = false
+    private var server: CameraServer?
+    private let lock = NSLock()
+    private var status = "Starting the camera…"
+    private let jpegContext = CIContext(options: [.useSoftwareRenderer: false])
+    private var lastFrameSent = Date.distantPast
 
-    init() {
-        super.init(nibName: nil, bundle: nil)
+    // Tuning knobs Home Assistant may set: name -> (allowed range, default).
+    // Each is read where it is used, from these same defaults.
+    private static let knobs: [String: (range: ClosedRange<Double>, value: Double)] = [
+        "followGain": (0.1...1.0, 0.45),
+        "gestureReach": (0.5...3.0, 1.5),
+        "hairReach": (0...2, 0.9),
+        "chinReach": (0...1.5, 0.6),
+        "steadiness": (0.1...1.0, 0.35),
+        "faceMatchThreshold": (0.2...1.2, 0.6),
+        "searchDegrees": (10...120, 45),
+        "searchTilt": (-60...30, -20),
+    ]
+    private var follow: Bool {
+        get { UserDefaults.standard.object(forKey: "localAIFollowingEnabled") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "localAIFollowingEnabled") }
+    }
+    private var autoZoom: Bool {
+        get { UserDefaults.standard.object(forKey: "autoZoomEnabled") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "autoZoomEnabled") }
+    }
+    private var manualZoom: Double {
+        get { UserDefaults.standard.object(forKey: "manualZoom") as? Double ?? 1 }
+        set { UserDefaults.standard.set(newValue, forKey: "manualZoom") }
     }
 
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func loadView() {
-        let root = NSView(frame: NSRect(x: 0, y: 0, width: 1200, height: 760))
-        root.wantsLayer = true
-        root.layer?.backgroundColor = NSColor.black.cgColor
-        view = root
-
-        previewImage.imageScaling = .scaleProportionallyUpOrDown
-        previewImage.imageAlignment = .alignCenter
-        previewImage.wantsLayer = true
-        previewImage.layer?.backgroundColor = NSColor.black.cgColor
-        root.addSubview(previewImage)
-        for button in [leftPanButton, rightPanButton] {
-            button.bezelStyle = .circular
-            button.font = .systemFont(ofSize: 23, weight: .semibold)
-            button.contentTintColor = .white
-            button.wantsLayer = true
-            button.layer?.backgroundColor = NSColor.black.withAlphaComponent(0.55).cgColor
-            root.addSubview(button)
+    func start() {
+        // A background service has no window to open it from: start at login.
+        // macOS shows a one-time "login item added" notice; System Settings →
+        // General → Login Items turns it off.
+        if SMAppService.mainApp.status != .enabled {
+            do { try SMAppService.mainApp.register() } catch { NSLog("Hubbubb camera: could not add a login item: \(error)") }
         }
-        leftPanButton.target = self
-        leftPanButton.action = #selector(panLeft)
-        rightPanButton.target = self
-        rightPanButton.action = #selector(panRight)
-        panel.wantsLayer = true
-        panel.layer?.backgroundColor = NSColor(calibratedWhite: 0.10, alpha: 1).cgColor
-        root.addSubview(panel)
-
-        configureOverlay(statusLabel, fontSize: 15, weight: .semibold)
-        configureOverlay(eventLabel, fontSize: 15, weight: .bold)
-        statusLabel.stringValue = "Local vision is idle. Waiting for the camera…"
-        eventLabel.stringValue = "WAITING FOR A GESTURE  •  local actions"
-        root.addSubview(statusLabel)
-        root.addSubview(eventLabel)
-        buildControlPanel()
-        layoutControlPanel(height: 760)
-    }
-
-    override func viewDidLayout() {
-        super.viewDidLayout()
-        let bounds = view.bounds
-        let panelWidth: CGFloat = 340
-        let previewWidth = bounds.width - panelWidth
-        previewImage.frame = NSRect(x: 0, y: 0, width: previewWidth, height: bounds.height)
-        leftPanButton.frame = NSRect(x: 20, y: (bounds.height - 52) / 2, width: 52, height: 52)
-        rightPanButton.frame = NSRect(x: previewWidth - 72, y: (bounds.height - 52) / 2, width: 52, height: 52)
-        panel.frame = NSRect(x: previewWidth, y: 0, width: panelWidth, height: bounds.height)
-        let margin: CGFloat = 18
-        statusLabel.frame = NSRect(x: margin, y: bounds.height - 50, width: previewWidth - margin * 2, height: 24)
-        eventLabel.frame = NSRect(x: margin, y: 18, width: previewWidth - margin * 2, height: 34)
-        layoutControlPanel(height: bounds.height)
-    }
-
-    override func viewDidAppear() {
-        super.viewDidAppear()
-        DispatchQueue.main.async { [weak self] in
-            self?.startCameraIfNeeded()
+        server = CameraServer { [weak self] method, path, query, body in
+            self?.route(method, path, query, body) ?? .json("503 Service Unavailable", ["ok": false])
+        }
+        if server == nil { NSLog("Hubbubb camera: no companion token or port \(CameraServer.port) busy; Home Assistant cannot connect") }
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            configure()
+        case .notDetermined:
+            AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
+                granted ? self?.configure() : self?.setStatus("Camera access denied. Allow it in System Settings → Privacy & Security → Camera.")
+            }
+        default:
+            setStatus("Camera access is blocked. Allow Hubbubb Local Camera in System Settings → Privacy & Security → Camera.")
         }
     }
 
-    func startCameraIfNeeded() {
-        guard !didRequestCamera else { return }
-        didRequestCamera = true
-        setStatus("Requesting camera access…")
-        requestCameraAccess()
+    private func setStatus(_ text: String) {
+        lock.lock()
+        status = text
+        lock.unlock()
     }
 
-    private func configureOverlay(_ label: NSTextField, fontSize: CGFloat, weight: NSFont.Weight) {
-        label.font = .systemFont(ofSize: fontSize, weight: weight)
-        label.textColor = .white
-        label.backgroundColor = NSColor.black.withAlphaComponent(0.66)
-        label.drawsBackground = true
-        label.isBezeled = false
-        label.isEditable = false
-        label.isSelectable = false
-        label.lineBreakMode = .byTruncatingTail
-    }
-
-    private func buildControlPanel() {
-        let title = panelLabel("CAMERA CONTROLS", size: 16, weight: .bold)
-        title.tag = 100
-        panel.addSubview(title)
-        let caption = panelLabel("Everything here runs on this Mac.", size: 12, weight: .regular)
-        caption.tag = 101
-        panel.addSubview(caption)
-
-        framingCheckbox.state = .on
-        framingCheckbox.font = .systemFont(ofSize: 13, weight: .medium)
-        framingCheckbox.target = self
-        framingCheckbox.action = #selector(toggleAutoZoom)
-        panel.addSubview(framingCheckbox)
-
-        trackingCheckbox.state = localFollowingEnabled ? .on : .off
-        trackingCheckbox.font = .systemFont(ofSize: 13, weight: .medium)
-        trackingCheckbox.target = self
-        trackingCheckbox.action = #selector(toggleTracking)
-        panel.addSubview(trackingCheckbox)
-
-        let zoomTitle = panelLabel("Camera zoom (Link 2)", size: 13, weight: .semibold)
-        zoomTitle.tag = 102
-        panel.addSubview(zoomTitle)
-        zoomSlider.target = self
-        zoomSlider.action = #selector(setManualZoom)
-        panel.addSubview(zoomSlider)
-        zoomLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .medium)
-        zoomLabel.textColor = .white
-        zoomLabel.alignment = .right
-        panel.addSubview(zoomLabel)
-
-        let enrollButton = NSButton(title: "Enroll a person…", target: self, action: #selector(enrollPerson))
-        enrollButton.bezelStyle = .rounded
-        enrollButton.tag = 108
-        panel.addSubview(enrollButton)
-
-        let centerButton = NSButton(title: "Zoom to 1×", target: self, action: #selector(recenterFraming))
-        centerButton.bezelStyle = .rounded
-        centerButton.tag = 103
-        panel.addSubview(centerButton)
-
-        let volumeSetupButton = NSButton(title: "Set up TV volume actions…", target: self, action: #selector(configureTVVolume))
-        volumeSetupButton.bezelStyle = .rounded
-        volumeSetupButton.tag = 107
-        panel.addSubview(volumeSetupButton)
-
-        let gesturesTitle = panelLabel("PROGRAMMED GESTURES", size: 14, weight: .bold)
-        gesturesTitle.tag = 104
-        panel.addSubview(gesturesTitle)
-        gestureScrollView.drawsBackground = false
-        gestureScrollView.hasVerticalScroller = true
-        gestureScrollView.autohidesScrollers = true
-        gestureScrollView.borderType = .noBorder
-        gestureScrollView.documentView = gestureContentView
-        panel.addSubview(gestureScrollView)
-        for (index, gesture) in programmedGestures.enumerated() {
-            let row = panelLabel("\(gesture.title)\n→ \(gesture.assignment)", size: 12, weight: .medium)
-            row.lineBreakMode = .byWordWrapping
-            row.maximumNumberOfLines = 2
-            gestureContentView.addSubview(row)
-            gestureRows[gesture.id] = row
-            let button = NSButton(title: "Test", target: self, action: #selector(testGesture(_:)))
-            button.bezelStyle = .rounded
-            button.tag = index
-            gestureContentView.addSubview(button)
-            testButtons.append(button)
-        }
-        let note = panelLabel("Hold 1 for Apple TV, 2 for Mac Main Display, or 3 for Mac Second Display and screen sharing. Hold thumbs up or down for TV volume. One open palm presses Apple TV center/select. Raise your hand to chest height; hands lower down (typing) are ignored.", size: 11, weight: .regular)
-        note.textColor = NSColor(calibratedWhite: 0.72, alpha: 1)
-        note.lineBreakMode = .byWordWrapping
-        note.maximumNumberOfLines = 3
-        note.tag = 105
-        panel.addSubview(note)
-        controlFeedbackLabel.font = .systemFont(ofSize: 11, weight: .medium)
-        controlFeedbackLabel.textColor = NSColor(calibratedWhite: 0.82, alpha: 1)
-        controlFeedbackLabel.lineBreakMode = .byWordWrapping
-        controlFeedbackLabel.maximumNumberOfLines = 2
-        controlFeedbackLabel.tag = 106
-        panel.addSubview(controlFeedbackLabel)
-    }
-
-    private func panelLabel(_ text: String, size: CGFloat, weight: NSFont.Weight) -> NSTextField {
-        let label = NSTextField(labelWithString: text)
-        label.font = .systemFont(ofSize: size, weight: weight)
-        label.textColor = .white
-        label.lineBreakMode = .byTruncatingTail
-        return label
-    }
-
-    private func layoutControlPanel(height: CGFloat) {
-        func frame(_ tag: Int, _ rect: NSRect) { panel.viewWithTag(tag)?.frame = rect }
-        frame(100, NSRect(x: 18, y: height - 48, width: 300, height: 22))
-        frame(101, NSRect(x: 18, y: height - 70, width: 300, height: 18))
-        framingCheckbox.frame = NSRect(x: 14, y: height - 111, width: 300, height: 24)
-        trackingCheckbox.frame = NSRect(x: 14, y: height - 140, width: 300, height: 24)
-        frame(107, NSRect(x: 18, y: height - 181, width: 290, height: 28))
-        frame(102, NSRect(x: 18, y: height - 211, width: 180, height: 20))
-        zoomSlider.frame = NSRect(x: 14, y: height - 242, width: 238, height: 24)
-        zoomLabel.frame = NSRect(x: 258, y: height - 242, width: 56, height: 24)
-        frame(103, NSRect(x: 18, y: height - 282, width: 120, height: 30))
-        frame(108, NSRect(x: 144, y: height - 282, width: 164, height: 30))
-        frame(104, NSRect(x: 18, y: height - 312, width: 300, height: 22))
-        let scrollFrame = NSRect(x: 10, y: 132, width: 320, height: max(140, height - 472))
-        gestureScrollView.frame = scrollFrame
-        let contentHeight = CGFloat(testButtons.count) * 53 + 12
-        gestureContentView.frame = NSRect(x: 0, y: 0, width: scrollFrame.width - 18, height: contentHeight)
-        for (index, button) in testButtons.enumerated() {
-            let y = contentHeight - 48 - CGFloat(index) * 53
-            gestureRows[programmedGestures[index].id]?.frame = NSRect(x: 8, y: y, width: 210, height: 42)
-            button.frame = NSRect(x: 226, y: y + 6, width: 68, height: 28)
-        }
-        gestureScrollView.contentView.scroll(to: NSPoint(x: 0, y: max(0, contentHeight - scrollFrame.height)))
-        gestureScrollView.reflectScrolledClipView(gestureScrollView.contentView)
-        frame(105, NSRect(x: 18, y: 24, width: 300, height: 58))
-        frame(106, NSRect(x: 18, y: 91, width: 300, height: 34))
-    }
-
-    @objc private func toggleAutoZoom() {
-        processor?.updateSettings(
-            autoZoom: framingCheckbox.state == .on,
-            zoomFactor: CGFloat(zoomSlider.doubleValue),
-            autoFollow: localFollowingEnabled
-        )
-    }
-
-    @objc private func panLeft() { panCamera(direction: -1, description: "left") }
-
-    @objc private func panRight() { panCamera(direction: 1, description: "right") }
-
-    private func panCamera(direction: Int32, description: String) {
+    /// Open the Link 2 and start analysing. Retries every 10 s until the camera
+    /// is plugged in and free: there is no window to say "try again" from.
+    private func configure() {
         sessionQueue.async { [weak self] in
-        let succeeded = hubbubbLinkCameraPanStep(direction) == 1
-            DispatchQueue.main.async {
-                let message = succeeded ? "Panned camera \(description)." : "Could not pan the Link 2 camera."
-                self?.controlFeedbackLabel.stringValue = message
-                self?.setStatus(message)
+            guard let self, self.processor == nil else { return }
+            let discovery = AVCaptureDevice.DiscoverySession(
+                deviceTypes: [.external, .builtInWideAngleCamera, .continuityCamera], mediaType: .video, position: .unspecified)
+            guard let camera = discovery.devices.first(where: { $0.localizedName.localizedCaseInsensitiveContains("Insta360 Link 2") }),
+                  let input = try? AVCaptureDeviceInput(device: camera) else {
+                self.setStatus("Insta360 Link 2 not found or busy. Plug it in by USB and quit Insta360 Link Controller; retrying.")
+                self.sessionQueue.asyncAfter(deadline: .now() + 10) { [weak self] in self?.configure() }
+                return
             }
+            var zoomMinimum = 0, zoomMaximum = 0, zoomStep = 1, currentZoom = 100
+            let zoomSupported = hubbubbLinkCameraZoomInitialize(&zoomMinimum, &zoomMaximum, &zoomStep, &currentZoom) == 1
+            self.session.beginConfiguration()
+            guard self.session.canAddInput(input) else {
+                self.session.commitConfiguration()
+                self.setStatus("Could not open the camera; another app may be using it. Retrying.")
+                self.sessionQueue.asyncAfter(deadline: .now() + 10) { [weak self] in self?.configure() }
+                return
+            }
+            self.session.addInput(input)
+            if self.session.canSetSessionPreset(.hd4K3840x2160) {
+                self.session.sessionPreset = .hd4K3840x2160
+            } else if self.session.canSetSessionPreset(.hd1920x1080) {
+                self.session.sessionPreset = .hd1920x1080
+            }
+            let output = AVCaptureVideoDataOutput()
+            output.alwaysDiscardsLateVideoFrames = true
+            output.videoSettings = [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange]
+            let processor = LocalVisionProcessor(
+                zoomRange: zoomSupported ? (zoomMinimum, zoomMaximum, zoomStep, currentZoom) : nil,
+                preview: { [weak self] image, message in self?.preview(image, message) },
+                gesture: { [weak self] gesture, person, held in
+                    self?.server?.push(["type": "gesture", "gesture": gesture, "person": person ?? NSNull(), "held": held])
+                },
+                presence: { [weak self] people, animals in
+                    self?.server?.push(["type": "presence", "people": people, "animals": animals])
+                }
+            )
+            output.setSampleBufferDelegate(processor, queue: DispatchQueue(label: "com.hubbubb.camera.vision"))
+            if self.session.canAddOutput(output) { self.session.addOutput(output) }
+            self.session.commitConfiguration()
+            self.processor = processor
+            self.applySettings()
+            self.setStatus(zoomSupported ? "Connected to \(camera.localizedName)."
+                : "Connected to \(camera.localizedName), but its zoom and pan controls did not initialize.")
+            self.session.startRunning()
         }
     }
 
-    @objc private func toggleTracking() {
-        localFollowingEnabled.toggle()
-        UserDefaults.standard.set(localFollowingEnabled, forKey: "localAIFollowingEnabled")
-        let enabled = localFollowingEnabled
-        trackingCheckbox.state = enabled ? .on : .off
-        processor?.updateSettings(
-            autoZoom: framingCheckbox.state == .on,
-            zoomFactor: CGFloat(zoomSlider.doubleValue),
-            autoFollow: enabled
-        )
-        let message = enabled
-            ? "Local AI following is on. Vision will steer the camera toward your face."
-            : "Local AI following is off."
-        controlFeedbackLabel.stringValue = message
+    private func applySettings() {
+        processor?.updateSettings(autoZoom: autoZoom, zoomFactor: CGFloat(manualZoom), autoFollow: follow)
+    }
+
+    /// Each analysed frame: remember the status line, and send the annotated
+    /// preview to anyone watching, at most ~8 frames a second, 960 px wide.
+    private func preview(_ image: CGImage?, _ message: String) {
         setStatus(message)
-    }
-
-    @objc private func setManualZoom() {
-        framingCheckbox.state = .off
-        zoomLabel.stringValue = String(format: "%.1f×", zoomSlider.doubleValue)
-        processor?.updateSettings(autoZoom: false, zoomFactor: CGFloat(zoomSlider.doubleValue), autoFollow: localFollowingEnabled)
-    }
-
-    @objc private func recenterFraming() {
-        zoomSlider.doubleValue = 1.0
-        framingCheckbox.state = .off
-        processor?.updateSettings(autoZoom: false, zoomFactor: 1.0, autoFollow: localFollowingEnabled)
-        setStatus("Camera lens zoom reset to 1×. The preview is the full camera feed.")
-    }
-
-    @objc private func enrollPerson() {
-        guard let processor else {
-            controlFeedbackLabel.stringValue = "Wait for the camera to connect before enrolling."
-            return
+        guard let image, let server, server.watching, Date().timeIntervalSince(lastFrameSent) > 0.12 else { return }
+        lastFrameSent = Date()
+        let scale = min(1, 960 / CGFloat(image.width))
+        let small = CIImage(cgImage: image).transformed(by: CGAffineTransform(scaleX: scale, y: scale))
+        if let jpeg = jpegContext.jpegRepresentation(of: small, colorSpace: CGColorSpaceCreateDeviceRGB(),
+                                                     options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.7]) {
+            server.pushFrame(jpeg)
         }
-        let nameField = NSTextField(string: "")
-        nameField.placeholderString = "Name, as Jarvis should say it"
-        nameField.frame = NSRect(x: 0, y: 0, width: 300, height: 24)
-        let alert = NSAlert()
-        alert.messageText = "Enroll a person"
-        let known = processor.enrolledNames
-        alert.informativeText = "Stand alone in front of the camera, then press Start and slowly turn your head. "
-            + "Face samples stay on this Mac. Enrolling a name again replaces it."
-            + (known.isEmpty ? "" : "\nAlready enrolled: \(known.joined(separator: ", ")).")
-        alert.accessoryView = nameField
-        alert.addButton(withTitle: "Start")
-        alert.addButton(withTitle: "Cancel")
-        alert.window.initialFirstResponder = nameField
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let name = nameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !name.isEmpty, name.count <= 40 else {
-            controlFeedbackLabel.stringValue = "Enter a name to enroll."
-            return
-        }
-        processor.beginEnrollment(name: name)
-        controlFeedbackLabel.stringValue = "Enrolling \(name). Follow the prompt on the preview."
     }
 
-    /// Who the camera recognizes, for Jarvis's "who is speaking" guess.
-    /// Sent as a Home Assistant event with the same local token as the TV actions.
-    private func postPresence(_ people: [String]) {
-        let defaults = UserDefaults.standard
-        guard let base = defaults.string(forKey: "haBaseURL"),
-              let token = loadToken(), !token.isEmpty,
-              let url = URL(string: "\(base)/api/events/hubbubb_home_camera_people") else { return }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["people": people])
-        URLSession.shared.dataTask(with: request).resume()
+    private func state() -> [String: Any] {
+        lock.lock()
+        let status = self.status
+        lock.unlock()
+        var settings: [String: Any] = ["follow": follow, "auto_zoom": autoZoom, "zoom": manualZoom]
+        for (key, knob) in Self.knobs {
+            settings[key] = UserDefaults.standard.object(forKey: key) as? Double ?? knob.value
+        }
+        var state: [String: Any] = ["status": status, "connected": processor != nil, "settings": settings,
+                                    "knobs": Self.knobs.mapValues { ["min": $0.range.lowerBound, "max": $0.range.upperBound, "default": $0.value] }]
+        if let processor {
+            state.merge(processor.inView()) { $1 }
+            state["enrolled"] = processor.enrolled()
+            state["enrolling"] = processor.enrolling() ?? NSNull()
+            state["room"] = processor.roomSpan()
+        }
+        return state
     }
 
-    @objc private func testGesture(_ sender: NSButton) {
-        guard programmedGestures.indices.contains(sender.tag) else { return }
-        let gesture = programmedGestures[sender.tag].id
-        handleGesture(gesture)
+    private func updateSettings(_ changes: [String: Any]) -> [String: Any] {
+        if let value = changes["follow"] as? Bool { follow = value }
+        if let value = changes["auto_zoom"] as? Bool { autoZoom = value }
+        if let value = (changes["zoom"] as? NSNumber)?.doubleValue {
+            manualZoom = min(4, max(1, value))
+            autoZoom = false  // a chosen zoom is a manual zoom
+        }
+        for (key, knob) in Self.knobs {
+            guard let value = (changes[key] as? NSNumber)?.doubleValue else { continue }
+            UserDefaults.standard.set(min(knob.range.upperBound, max(knob.range.lowerBound, value)), forKey: key)
+        }
+        applySettings()
+        server?.push(["type": "settings"])
+        return state()
     }
 
-    private func showGestureEvent(_ gesture: String) {
-        print("Hubbubb local gesture event: \(gesture)")
-        eventLabel.stringValue = "EVENT FIRED  •  \(gesture)  •  local demo event"
-    }
-
-    private func handleGesture(_ gesture: String) {
-        if gesture == "number_1" || gesture == "number_2" || gesture == "number_3" {
-            let input = gesture == "number_1" ? "Apple TV" : (gesture == "number_2" ? "Mac Main Display" : "Mac Second Display")
-            selectCameraInput(input, startScreenSharing: gesture == "number_3")
-            return
-        }
-        if gesture == "open_palm" {
-            sendTVSelect()
-            return
-        }
-        guard gesture == "thumbs_up" || gesture == "thumbs_down" else {
-            showGestureEvent(gesture)
-            return
-        }
-        // The vision processor repeats thumbs events while the pose is held,
-        // so each event is one volume step and a longer hold means more volume.
-        sendTVVolumeStep(up: gesture == "thumbs_up")
-    }
-
-    private func selectCameraInput(_ input: String, startScreenSharing: Bool) {
-        let defaults = UserDefaults.standard
-        guard let base = defaults.string(forKey: "haBaseURL"),
-              let token = loadToken(), !token.isEmpty,
-              let stateURL = URL(string: "\(base)/api/states/select.living_room_sync_box_hdmi_input") else {
-            controlFeedbackLabel.stringValue = "Set up the local Home Assistant connection before switching Sync Box inputs."
-            return
-        }
-        var request = URLRequest(url: stateURL)
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        URLSession.shared.dataTask(with: request) { [weak self] data, response, error in
+    private func route(_ method: String, _ path: String, _ query: [String: String], _ body: [String: Any]) -> CameraServer.Reply {
+        func ok(_ value: Any) -> CameraServer.Reply { .json("200 OK", value) }
+        func bad(_ detail: String) -> CameraServer.Reply { .json("400 Bad Request", ["ok": false, "detail": detail]) }
+        let name = (body["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        switch (method, path) {
+        case ("GET", "/state"):
+            return ok(state())
+        case ("GET", "/people"):
+            return ok(processor?.inView() ?? ["people": [], "animals": []])
+        case ("GET", "/snapshot"):
+            return server?.lastFrame.map { .jpeg($0) } ?? .json("503 Service Unavailable", ["ok": false, "detail": "no picture yet"])
+        case ("GET", "/stream"):
+            return .stream
+        case ("GET", "/events"):
+            return .poll(Int(query["after"] ?? "") ?? 0)
+        case ("POST", "/settings"):
+            return ok(updateSettings(body))
+        case ("POST", "/pan"):
+            guard let direction = (body["direction"] as? NSNumber)?.int32Value, direction == 1 || direction == -1 else {
+                return bad("direction is 1 or -1")
+            }
+            return ok(["ok": hubbubbLinkCameraPanStep(direction) == 1])
+        case ("POST", "/enroll"):
+            guard let processor, !name.isEmpty, name.count <= 40 else { return bad("send a name, up to 40 characters") }
+            processor.beginEnrollment(name: name)
+            return ok(["ok": true])
+        case ("POST", "/forget_person"):
+            return ok(["ok": processor?.forget(name: name) ?? false])
+        case ("GET", "/items"):
+            return ok(["items": processor?.items() ?? []])
+        case ("POST", "/forget_item"):
+            return ok(["ok": processor?.forgetItem(name: name) ?? false])
+        case ("POST", "/room_reset"):
+            processor?.resetRoomMap()
+            return ok(["ok": true])
+        case ("POST", "/learn"):
+            guard let processor, !name.isEmpty, name.count <= 60 else { return bad("send {\"name\": \"...\", \"hint\": \"...\"}") }
+            let hint = (body["hint"] as? String).flatMap { $0.isEmpty ? nil : String($0.prefix(200)) }
+                ?? "the thing the person is holding up to the camera"
+            return ok(processor.learn(name: name, hint: hint))
+        case ("POST", "/look"):
+            guard let processor, let question = body["question"] as? String, !question.isEmpty, question.count <= 300 else {
+                return bad("send {\"question\": \"...\"}")
+            }
+            return ok(processor.look(question: question))
+        case ("POST", "/screen_sharing"):
+            guard let on = body["on"] as? Bool else { return bad("send {\"on\": true or false}") }
+            let done = DispatchSemaphore(value: 0)
+            var reply: [String: Any] = [:]
             DispatchQueue.main.async {
-                guard let self else { return }
-                guard error == nil,
-                      let response = response as? HTTPURLResponse,
-                      (200..<300).contains(response.statusCode),
-                      let data,
-                      let state = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                      let attributes = state["attributes"] as? [String: Any],
-                      let options = attributes["options"] as? [String],
-                      options.contains(input) else {
-                    self.controlFeedbackLabel.stringValue = "Could not read the Sync Box HDMI input list from Home Assistant."
-                    return
-                }
-                self.controlFeedbackLabel.stringValue = "Switching Hue Sync Box to \(input)…"
-                self.selectSyncBoxInput(named: input, base: base, token: token) { [weak self] succeeded in
-                    guard let self else { return }
-                    guard succeeded else {
-                        self.controlFeedbackLabel.stringValue = "Home Assistant could not switch the Sync Box to \(input)."
-                        return
-                    }
-                    self.eventLabel.stringValue = "EVENT FIRED  •  Sync Box input: \(input)"
-                    guard startScreenSharing else {
-                        self.controlFeedbackLabel.stringValue = "Hue Sync Box switched to \(input)."
-                        self.stopScreenSharing { [weak self] note in
-                            self?.controlFeedbackLabel.stringValue = "Hue Sync Box switched to \(input)." + note
-                        }
-                        return
-                    }
-                    self.controlFeedbackLabel.stringValue = "Mac Second Display selected. Starting screen sharing…"
-                    self.startScreenSharing { [weak self] success, message in
-                        guard let self else { return }
-                        self.controlFeedbackLabel.stringValue = message
-                        if success { self.eventLabel.stringValue = "EVENT FIRED  •  Mac Second Display + screen sharing" }
-                    }
+                if on {
+                    self.startScreenSharing { success, message in reply = ["ok": success, "detail": message]; done.signal() }
+                } else {
+                    self.stopScreenSharing { note in reply = ["ok": true, "detail": note.trimmingCharacters(in: .whitespaces)]; done.signal() }
                 }
             }
-        }.resume()
+            done.wait()
+            return ok(reply)
+        case ("GET", "/legacy_actions"):
+            return ok(["gestures": legacyActions()])
+        default:
+            return .json("404 Not Found", ["ok": false, "detail": "no such path"])
+        }
+    }
+
+    /// What the old windowed app did for each gesture, as Home Assistant
+    /// actions, so the first Home Assistant setup can import it unchanged.
+    private func legacyActions() -> [String: Any] {
+        var gestures: [String: Any] = [:]
+        let syncBox = "select.living_room_sync_box_hdmi_input"
+        func input(_ option: String, sharing: Bool) -> [String: Any] {
+            ["repeat": false, "actions": [
+                ["action": "select.select_option", "target": ["entity_id": syncBox], "data": ["option": option]],
+                ["action": "hubbubb_home.mac_screen_sharing", "data": ["on": sharing]],
+            ]]
+        }
+        gestures["number_1"] = input("Apple TV", sharing: false)
+        gestures["number_2"] = input("Mac Main Display", sharing: false)
+        gestures["number_3"] = input("Mac Second Display", sharing: true)
+        if let tv = UserDefaults.standard.string(forKey: "haMediaPlayer"), tv.hasPrefix("media_player."), tv.count > 13 {
+            gestures["thumbs_up"] = ["repeat": true, "actions": [["action": "media_player.volume_up", "target": ["entity_id": tv]]]]
+            gestures["thumbs_down"] = ["repeat": true, "actions": [["action": "media_player.volume_down", "target": ["entity_id": tv]]]]
+            gestures["open_palm"] = ["repeat": false, "actions": [[
+                "action": "remote.send_command",
+                "target": ["entity_id": "remote." + tv.dropFirst("media_player.".count)],
+                "data": ["command": "select"],
+            ]]]
+        }
+        return gestures
     }
 
     private func startScreenSharing(completion: @escaping (Bool, String) -> Void) {
@@ -775,13 +581,12 @@ private final class CameraViewController: NSViewController {
         """#
         runScreenMirroringScript(script) { detail in
             if let detail {
-                completion(false, "Could not start Samsung Screen Mirroring: \(detail). Allow Hubbubb Local Camera under Privacy & Security → Accessibility and Automation, then try gesture 3 again.")
+                completion(false, "Could not start Samsung Screen Mirroring: \(detail). Allow Hubbubb Local Camera under Privacy & Security → Accessibility and Automation, then try again.")
             } else {
                 completion(true, "Samsung Screen Mirroring was started in extended-display mode.")
             }
         }
     }
-
     private func stopScreenSharing(completion: @escaping (String) -> Void) {
         // Screen Mirroring rows are identified by CoreGraphics display ID ("Display:4").
         guard let samsung = NSScreen.screens.first(where: { $0.localizedName.localizedCaseInsensitiveContains("samsung") }),
@@ -823,8 +628,6 @@ private final class CameraViewController: NSViewController {
             completion(detail.map { " Could not stop Samsung screen sharing: \($0)." } ?? " Samsung screen sharing stopped.")
         }
     }
-
-    /// Runs a UI script off the main thread; completes with nil on success or the error text.
     private func runScreenMirroringScript(_ script: String, completion: @escaping (String?) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             var error: NSDictionary?
@@ -834,388 +637,7 @@ private final class CameraViewController: NSViewController {
                     : error?[NSAppleScript.errorMessage] as? String ?? "macOS blocked the Screen Mirroring controls")
             }
         }
-    }
-
-
-    private func waitForMacTVDisplay(attempt: Int, previousInput: String?, base: String, token: String) {
-        if configureTVDisplay(extended: true) {
-            UserDefaults.standard.set(true, forKey: "macTVExtensionActive")
-            controlFeedbackLabel.stringValue = "Hue Sync Box is on Mac Second Display; Mac TV extended desktop is on."
-            eventLabel.stringValue = "EVENT FIRED  •  Mac TV extension on"
-            return
-        }
-        guard attempt < 12 else {
-            let failure = "Mac Second Display is selected, but macOS does not report a second active display; the extended desktop was not enabled."
-            guard let previousInput else {
-                controlFeedbackLabel.stringValue = failure
-                return
-            }
-            controlFeedbackLabel.stringValue = failure + " Returning the Sync Box to \(previousInput)…"
-            selectSyncBoxInput(named: previousInput, base: base, token: token) { [weak self] succeeded in
-                guard let self else { return }
-                self.controlFeedbackLabel.stringValue = succeeded
-                    ? failure + " Sync Box returned to \(previousInput)."
-                    : failure + " Sync Box could not return to \(previousInput)."
-                UserDefaults.standard.set(false, forKey: "macTVExtensionActive")
-            }
-            return
-        }
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-            self?.waitForMacTVDisplay(attempt: attempt + 1, previousInput: previousInput, base: base, token: token)
-        }
-    }
-
-    private func selectSyncBoxInput(named input: String, base: String, token: String, completion: @escaping (Bool) -> Void) {
-        guard let serviceURL = URL(string: "\(base)/api/services/select/select_option") else {
-            completion(false)
-            return
-        }
-        var request = URLRequest(url: serviceURL)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: [
-            "entity_id": "select.living_room_sync_box_hdmi_input",
-            "option": input
-        ])
-        URLSession.shared.dataTask(with: request) { _, response, error in
-            DispatchQueue.main.async {
-                let succeeded = error == nil && (response as? HTTPURLResponse).map { (200..<300).contains($0.statusCode) } == true
-                completion(succeeded)
-            }
-        }.resume()
-    }
-
-    private func configureTVDisplay(extended: Bool) -> Bool {
-        var displays = [CGDirectDisplayID](repeating: 0, count: 16)
-        var displayCount: UInt32 = 0
-        let listResult = displays.withUnsafeMutableBufferPointer {
-            CGGetActiveDisplayList(UInt32($0.count), $0.baseAddress, &displayCount)
-        }
-        guard listResult == .success else {
-            return false
-        }
-        let active = Array(displays.prefix(Int(displayCount)))
-        let builtIn = active.first(where: { CGDisplayIsBuiltin($0) != 0 })
-        let main = CGMainDisplayID()
-        let external = active.first(where: { $0 != main && CGDisplayIsBuiltin($0) == 0 })
-            ?? active.first(where: { CGDisplayIsBuiltin($0) == 0 && builtIn != nil })
-        guard let external, let master = builtIn ?? active.first(where: { $0 != external }) else { return false }
-        var configuration: CGDisplayConfigRef?
-        guard CGBeginDisplayConfiguration(&configuration) == .success, let configuration else { return false }
-        let targetMaster = extended ? kCGNullDirectDisplay : master
-        let configureResult = CGConfigureDisplayMirrorOfDisplay(configuration, external, targetMaster)
-        let completionResult = CGCompleteDisplayConfiguration(configuration, .forSession)
-        return configureResult == .success && completionResult == .success
-    }
-
-
-    @objc private func configureTVVolume() {
-        let defaults = UserDefaults.standard
-        let hostField = NSTextField(string: defaults.string(forKey: "haBaseURL") ?? "http://homeassistant.local:8123")
-        let entityField = NSTextField(string: defaults.string(forKey: "haMediaPlayer") ?? "media_player.")
-        let tokenField = NSSecureTextField(string: "")
-        let stack = NSStackView(views: [
-            labeledField("Home Assistant URL", hostField),
-            labeledField("TV media_player entity", entityField),
-            labeledField("Long-lived access token", tokenField)
-        ])
-        stack.orientation = .vertical
-        stack.alignment = .leading
-        stack.spacing = 10
-        stack.frame = NSRect(x: 0, y: 0, width: 420, height: 150)
-        let alert = NSAlert()
-        alert.messageText = "Connect TV volume to Home Assistant"
-        alert.informativeText = "Only volume commands go to this local Home Assistant address. Camera video and gesture images stay on this Mac. Use a LAN address or .local host. The token is stored in macOS Keychain."
-        alert.accessoryView = stack
-        alert.addButton(withTitle: "Save")
-        alert.addButton(withTitle: "Cancel")
-        guard alert.runModal() == .alertFirstButtonReturn else { return }
-        let host = URL(string: hostField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines))?.host ?? ""
-        guard let url = URL(string: hostField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)),
-              ["http", "https"].contains(url.scheme ?? ""), isLocalHost(host),
-              entityField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("media_player.") else {
-            controlFeedbackLabel.stringValue = "Enter a local Home Assistant URL and a media_player entity ID."
-            return
-        }
-        defaults.set(url.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/")), forKey: "haBaseURL")
-        defaults.set(entityField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines), forKey: "haMediaPlayer")
-        if !tokenField.stringValue.isEmpty, !storeToken(tokenField.stringValue) {
-            controlFeedbackLabel.stringValue = "Could not save the token to macOS Keychain."
-            return
-        }
-        controlFeedbackLabel.stringValue = "TV volume actions are configured for \(entityField.stringValue)."
-    }
-
-    private func labeledField(_ title: String, _ field: NSTextField) -> NSView {
-        let label = NSTextField(labelWithString: title)
-        let column = NSStackView(views: [label, field])
-        column.orientation = .vertical
-        column.alignment = .leading
-        column.spacing = 3
-        field.widthAnchor.constraint(equalToConstant: 410).isActive = true
-        return column
-    }
-
-    private func isLocalHost(_ host: String) -> Bool {
-        let name = host.lowercased()
-        if name == "localhost" || name.hasSuffix(".local") { return true }
-        let parts = name.split(separator: ".").compactMap { Int($0) }
-        guard parts.count == 4, parts.allSatisfy({ (0...255).contains($0) }) else { return false }
-        return parts[0] == 10 || parts[0] == 127 || (parts[0] == 192 && parts[1] == 168)
-            || (parts[0] == 172 && (16...31).contains(parts[1]))
-    }
-
-    private func storeToken(_ token: String) -> Bool {
-        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-                                   kSecAttrService as String: "com.hubbubb.local-camera",
-                                   kSecAttrAccount as String: "home-assistant-token"]
-        SecItemDelete(query as CFDictionary)
-        var item = query
-        item[kSecValueData as String] = Data(token.utf8)
-        return SecItemAdd(item as CFDictionary, nil) == errSecSuccess
-    }
-
-    private func loadToken() -> String? {
-        let query: [String: Any] = [kSecClass as String: kSecClassGenericPassword,
-                                   kSecAttrService as String: "com.hubbubb.local-camera",
-                                   kSecAttrAccount as String: "home-assistant-token",
-                                   kSecReturnData as String: true,
-                                   kSecMatchLimit as String: kSecMatchLimitOne]
-        var result: CFTypeRef?
-        guard SecItemCopyMatching(query as CFDictionary, &result) == errSecSuccess,
-              let data = result as? Data else { return nil }
-        return String(data: data, encoding: .utf8)
-    }
-
-    private func sendTVVolumeStep(up: Bool) {
-        let defaults = UserDefaults.standard
-        guard let base = defaults.string(forKey: "haBaseURL"),
-              let entity = defaults.string(forKey: "haMediaPlayer"),
-              let token = loadToken(), !token.isEmpty else {
-            controlFeedbackLabel.stringValue = "Set up a local Home Assistant connection before using TV volume gestures."
-            eventLabel.stringValue = "GESTURE RECOGNIZED  •  Home Assistant setup needed"
-            return
-        }
-        pendingTVButtonSteps += up ? 1 : -1
-        processTVVolumeButtonStep(base: base, entity: entity, token: token)
-    }
-
-    private func sendTVSelect() {
-        let defaults = UserDefaults.standard
-        guard let base = defaults.string(forKey: "haBaseURL"),
-              let entity = defaults.string(forKey: "haMediaPlayer"),
-              let token = loadToken(), !token.isEmpty else {
-            controlFeedbackLabel.stringValue = "Set up the Apple TV media player in the local Home Assistant connection first."
-            eventLabel.stringValue = "GESTURE RECOGNIZED  •  Apple TV remote setup needed"
-            return
-        }
-        guard entity.hasPrefix("media_player."),
-              let url = URL(string: "\(base)/api/services/remote/send_command") else { return }
-        let remoteEntity = "remote." + String(entity.dropFirst("media_player.".count))
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["entity_id": remoteEntity, "command": ["select"]])
-        URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                if let error {
-                    self.controlFeedbackLabel.stringValue = "Apple TV select command failed: \(error.localizedDescription)"
-                    return
-                }
-                guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode) else {
-                    self.controlFeedbackLabel.stringValue = "Home Assistant rejected select. Check that \(remoteEntity) is the matching Apple TV remote entity."
-                    return
-                }
-                self.controlFeedbackLabel.stringValue = "Apple TV center / select button sent."
-                self.eventLabel.stringValue = "EVENT FIRED  •  Apple TV select"
-            }
-        }.resume()
-    }
-
-    private func processTVVolumeButtonStep(base: String, entity: String, token: String) {
-        guard !tvVolumeActionInFlight, pendingTVButtonSteps != 0 else { return }
-        tvVolumeActionInFlight = true
-        let up = pendingTVButtonSteps > 0
-        pendingTVButtonSteps -= up ? 1 : -1
-        let service = up ? "volume_up" : "volume_down"
-        guard let url = URL(string: "\(base)/api/services/media_player/\(service)") else {
-            tvVolumeActionInFlight = false
-            return
-        }
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: ["entity_id": entity])
-        URLSession.shared.dataTask(with: request) { [weak self] _, response, error in
-            DispatchQueue.main.async {
-                guard let self else { return }
-                self.tvVolumeActionInFlight = false
-                if let error {
-                    self.pendingTVButtonSteps = 0
-                    self.controlFeedbackLabel.stringValue = "Home Assistant volume command failed: \(error.localizedDescription)"
-                    return
-                }
-                guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode) else {
-                    self.pendingTVButtonSteps = 0
-                    self.controlFeedbackLabel.stringValue = "Home Assistant rejected the volume command. Check the Apple TV entity."
-                    return
-                }
-                self.controlFeedbackLabel.stringValue = "TV volume \(up ? "up" : "down"); keep holding the thumb for more."
-                self.eventLabel.stringValue = "EVENT FIRED  •  TV volume \(up ? "up" : "down")"
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) {
-                    self.processTVVolumeButtonStep(base: base, entity: entity, token: token)
-                }
-            }
-        }.resume()
-    }
-
-    private func requestCameraAccess() {
-        switch AVCaptureDevice.authorizationStatus(for: .video) {
-        case .authorized:
-            configureAndStart()
-        case .notDetermined:
-            AVCaptureDevice.requestAccess(for: .video) { [weak self] granted in
-                DispatchQueue.main.async {
-                    guard let self else { return }
-                    if granted {
-                        self.configureAndStart()
-                    } else {
-                        self.setStatus("Camera access denied. Allow it in System Settings → Privacy & Security → Camera.")
-                    }
-                }
-            }
-        case .denied, .restricted:
-            setStatus("Camera access is blocked. Allow Hubbubb Local Camera in System Settings → Privacy & Security → Camera.")
-        @unknown default:
-            setStatus("Could not determine camera permission.")
-        }
-    }
-
-    private func configureAndStart() {
-        sessionQueue.async { [weak self] in
-            guard let self, !self.configured else { return }
-            let discovery = AVCaptureDevice.DiscoverySession(
-                deviceTypes: [.external, .builtInWideAngleCamera, .continuityCamera],
-                mediaType: .video,
-                position: .unspecified
-            )
-            guard let camera = discovery.devices.first(where: {
-                $0.localizedName.localizedCaseInsensitiveContains("Insta360 Link 2")
-            }) else {
-                let available = discovery.devices.map(\.localizedName).joined(separator: ", ")
-                DispatchQueue.main.async {
-                    self.setStatus(available.isEmpty
-                        ? "No camera found. Connect the Insta360 Link 2 by USB and quit Insta360 Link Controller."
-                        : "Insta360 Link 2 not found. Cameras visible to macOS: \(available)")
-                }
-                return
-            }
-
-            var zoomMinimum = 0
-            var zoomMaximum = 0
-            var zoomStep = 1
-            var currentZoom = 100
-            let zoomSupported = hubbubbLinkCameraZoomInitialize(
-                &zoomMinimum, &zoomMaximum, &zoomStep, &currentZoom
-            ) == 1
-
-            do {
-                let input = try AVCaptureDeviceInput(device: camera)
-                self.session.beginConfiguration()
-                if self.session.canAddInput(input) {
-                    self.session.addInput(input)
-                } else {
-                    self.session.commitConfiguration()
-                    DispatchQueue.main.async { self.setStatus("Could not open the camera. Quit other apps using it and retry.") }
-                    return
-                }
-
-                if self.session.canSetSessionPreset(.hd4K3840x2160) {
-                    self.session.sessionPreset = .hd4K3840x2160
-                } else if self.session.canSetSessionPreset(.hd1920x1080) {
-                    self.session.sessionPreset = .hd1920x1080
-                }
-
-                let output = AVCaptureVideoDataOutput()
-                output.alwaysDiscardsLateVideoFrames = true
-                output.videoSettings = [
-                    kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
-                ]
-                let processor = LocalVisionProcessor(
-                    zoomRange: zoomSupported ? (zoomMinimum, zoomMaximum, zoomStep, currentZoom) : nil,
-                    zoomUpdate: { [weak self] factor, message in
-                        DispatchQueue.main.async {
-                            if let factor {
-                                self?.zoomSlider.doubleValue = Double(factor)
-                                self?.zoomLabel.stringValue = String(format: "%.1f×", factor)
-                            }
-                            if let message {
-                                self?.controlFeedbackLabel.stringValue = message
-                            }
-                        }
-                    },
-                    presence: { [weak self] people in
-                        DispatchQueue.main.async { self?.postPresence(people) }
-                    },
-                    status: { [weak self] image, message, gesture in
-                    DispatchQueue.main.async {
-                        if let image {
-                            self?.previewImage.image = NSImage(cgImage: image, size: .zero)
-                        }
-                        self?.setStatus(message)
-                        if let gesture {
-                            self?.handleGesture(gesture)
-                        }
-                    }
-                    }
-                )
-                self.processor = processor
-                self.lookServer = LookServer(processor: processor)
-                output.setSampleBufferDelegate(processor, queue: DispatchQueue(label: "com.hubbubb.camera.vision"))
-                if self.session.canAddOutput(output) {
-                    self.session.addOutput(output)
-                }
-                self.session.commitConfiguration()
-                self.configured = true
-
-                DispatchQueue.main.async {
-                    self.trackingCheckbox.isEnabled = true
-                    self.trackingCheckbox.state = self.localFollowingEnabled ? .on : .off
-                    if zoomSupported {
-                        let factor = 1 + Double(currentZoom - zoomMinimum) / Double(max(1, zoomMaximum - zoomMinimum)) * 3
-                        self.zoomSlider.doubleValue = factor
-                        self.zoomLabel.stringValue = String(format: "%.1f×", factor)
-                        self.framingCheckbox.isEnabled = true
-                        self.zoomSlider.isEnabled = true
-                        self.processor?.updateSettings(
-                            autoZoom: self.framingCheckbox.state == .on,
-                            zoomFactor: CGFloat(self.zoomSlider.doubleValue),
-                            autoFollow: self.localFollowingEnabled
-                        )
-                        self.controlFeedbackLabel.stringValue = "Hardware lens zoom is ready. Face detection stays on this Mac."
-                        self.setStatus("Connected to \(camera.localizedName). Using camera zoom controls; full feed stays visible.")
-                    } else {
-                        self.framingCheckbox.isEnabled = false
-                        self.zoomSlider.isEnabled = false
-                        self.controlFeedbackLabel.stringValue = "Camera connected, but hardware zoom could not initialize."
-                        self.setStatus("Camera feed connected, but Link 2 hardware zoom control could not initialize.")
-                    }
-                }
-                self.session.startRunning()
-            } catch {
-                DispatchQueue.main.async { self.setStatus("Camera setup failed: \(error.localizedDescription)") }
-            }
-        }
-    }
-
-    private func setStatus(_ value: String) {
-        statusLabel.stringValue = value
-    }
-}
+    }}
 
 /// One hand-gesture vote buffer. Each person in view gets their own, so two
 /// people's hands never vote in the same pool.
@@ -1260,9 +682,9 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     private let humanRequest = VNDetectHumanRectanglesRequest()
     private let animalRequest = VNRecognizeAnimalsRequest()
     private let context = CIContext(options: [.useSoftwareRenderer: false])
-    private let status: (CGImage?, String, String?) -> Void
-    private let zoomUpdate: (CGFloat?, String?) -> Void
-    private let presence: ([String]) -> Void
+    private let preview: (CGImage?, String) -> Void
+    private let gesture: (String, String?, Bool) -> Void
+    private let presence: ([String], [String]) -> Void
     private var frameNumber = 0
     private var tracks: [Track] = []
     private var nextTrackID = 1
@@ -1274,10 +696,12 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     private let enrollTarget = 20
     // Feature-print distance under which a face counts as an enrolled person.
     // Calibration knob: the overlay shows each face's nearest distance; tune with
-    // `defaults write home.jarvis.local-camera faceMatchThreshold 0.5`.
+    // the Home Assistant panel's tuning section.
     // ponytail: generic image feature prints, not a face-ID model; swap in a
     // Core ML face embedding if two people keep getting confused.
-    private let faceMatchThreshold = Float(UserDefaults.standard.object(forKey: "faceMatchThreshold") as? Double ?? 0.6)
+    private var faceMatchThreshold: Float {
+        Float(UserDefaults.standard.object(forKey: "faceMatchThreshold") as? Double ?? 0.6)
+    }
     private var lastPresence: [String] = []
     private var lastPresenceSent = Date.distantPast
     // What the most recent frame held, for /look and /people (under settingsLock).
@@ -1309,17 +733,18 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     private var roomMap = RoomMap.load()
     private var lastSighting: (pan: Float, tilt: Float)?
     private var lastMapUpdate = Date.distantPast
-    // Seconds between volume steps while thumbs up/down is held; lower = faster ramp.
+    // Seconds between "held" repeats while a gesture is held (Home Assistant
+    // runs the action on each when the gesture is set to repeat).
     private let volumeRepeatInterval: TimeInterval = 0.35
 
     init(
         zoomRange: (Int, Int, Int, Int)?,
-        zoomUpdate: @escaping (CGFloat?, String?) -> Void,
-        presence: @escaping ([String]) -> Void,
-        status: @escaping (CGImage?, String, String?) -> Void
+        preview: @escaping (CGImage?, String) -> Void,
+        gesture: @escaping (String, String?, Bool) -> Void,
+        presence: @escaping ([String], [String]) -> Void
     ) {
-        self.status = status
-        self.zoomUpdate = zoomUpdate
+        self.preview = preview
+        self.gesture = gesture
         self.presence = presence
         if let (minimum, maximum, step, current) = zoomRange, maximum > minimum {
             self.zoomRange = (minimum, maximum, max(1, step))
@@ -1391,7 +816,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             latestNames = names
             latestAnimals = animalNames
             settingsLock.unlock()
-            reportPresence(names, now: now)
+            reportPresence(names, animals: animalNames, now: now)
 
             // Gestures, per person: each visible track votes with its own hands.
             let hands = handRequest.results ?? []
@@ -1405,7 +830,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             // relaxed thumbs-up at the chest is missed.
             let reach = CGFloat(UserDefaults.standard.object(forKey: "gestureReach") as? Double ?? 1.5)
             var messages: [String] = []
-            var fired: [String] = []
+            var fired: [(gesture: String, person: String?, held: Bool)] = []
             var raisedHands = 0
             for index in tracks.indices where tracks[index].visible {
                 let track = tracks[index]
@@ -1419,7 +844,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                     messages.append(tracks[index].name.map { "\($0): \(message)" } ?? message)
                 }
                 if let gesture = result.fired {
-                    fired.append(gesture)
+                    fired.append((gesture.id, track.name, gesture.held))
                     // Whoever gestures has the room's attention: keep them in frame.
                     tracks[index].lastSeen = now
                 }
@@ -1432,14 +857,14 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                     ? "\(people.joined(separator: ", ")) in view. Raise a hand to gesture."
                     : raisedHands == 0
                     ? "Hands are low (typing?), so gestures are ignored. Raise a hand to chest height to gesture."
-                    : "Hand detected. Hold up 1, 2, or 3 fingers to choose an HDMI input, or hold thumbs up/down for volume.")
+                    : "Hand raised. Hold a gesture steady to run its action.")
             lastStatus = enrollMessage ?? messages.first ?? idle
-            status(annotate(fullFrame, animals: animals), lastStatus, nil)
-            for gesture in fired { status(nil, lastStatus, gesture) }
+            preview(annotate(fullFrame, animals: animals), lastStatus)
+            for event in fired { gesture(event.gesture, event.person, event.held) }
         } catch {
             if lastStatus != "Local Vision could not analyze this frame." {
                 lastStatus = "Local Vision could not analyze this frame."
-                status(nil, lastStatus, nil)
+                preview(nil, lastStatus)
             }
         }
     }
@@ -1527,7 +952,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     /// line (nil when idle) and at most one fired gesture out.
     private func updateGestures(
         _ votes: inout GestureVotes, hands: [VNHumanHandPoseObservation], face: CGRect?
-    ) -> (message: String?, fired: String?) {
+    ) -> (message: String?, fired: (id: String, held: Bool)?) {
         // Vision may return a weak duplicate/false hand: use its strongest.
         let primaryHand = hands.max { $0.confidence < $1.confidence }
         let now = Date()
@@ -1572,17 +997,17 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         let gestureHits = gestureVotes[detectedGesture] ?? 0
         votes.missed = 0
         if let latched = votes.latched, latched != detectedGesture { votes.latched = nil }
-        let isVolume = detectedGesture == "thumbs_up" || detectedGesture == "thumbs_down"
         if gestureHits >= requiredHits && votes.latched != detectedGesture {
             votes.latched = detectedGesture
             votes.lastVolumeRepeat = Date()
-            return ("\(gestureTitle(detectedGesture)) recognized. Running its assigned action.", detectedGesture)
+            return ("\(gestureTitle(detectedGesture)) recognized. Running its assigned action.", (detectedGesture, false))
         }
-        if isVolume, votes.latched == detectedGesture, rawGesture == detectedGesture,
+        if votes.latched == detectedGesture, rawGesture == detectedGesture,
            Date().timeIntervalSince(votes.lastVolumeRepeat) > volumeRepeatInterval {
-            // Held thumbs keep stepping the volume: the longer the hold, the bigger the change.
+            // Still held: report it again, so a "repeat while held" action (volume)
+            // keeps stepping. Home Assistant ignores it for one-shot actions.
             votes.lastVolumeRepeat = Date()
-            return ("\(gestureTitle(detectedGesture)) held. Stepping TV volume; drop your hand to stop.", detectedGesture)
+            return ("\(gestureTitle(detectedGesture)) held. Drop your hand to stop.", (detectedGesture, true))
         }
         if let latched = votes.latched {
             return ("\(gestureTitle(latched)) recognized. Running its assigned action.", nil)
@@ -1610,7 +1035,10 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         let url = Self.galleryURL
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-            let data = try NSKeyedArchiver.archivedData(withRootObject: gallery as NSDictionary, requiringSecureCoding: true)
+            settingsLock.lock()
+            let snapshot = gallery
+            settingsLock.unlock()
+            let data = try NSKeyedArchiver.archivedData(withRootObject: snapshot as NSDictionary, requiringSecureCoding: true)
             try data.write(to: url, options: .atomic)
             return nil
         } catch {
@@ -1623,13 +1051,72 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     func beginEnrollment(name: String) {
         settingsLock.lock()
         enrollName = name
+        enrollSamples = []
         settingsLock.unlock()
     }
 
-    var enrolledNames: [String] {
+    /// Everyone enrolled, with how many face samples each has.
+    func enrolled() -> [[String: Any]] {
         settingsLock.lock()
         defer { settingsLock.unlock() }
-        return gallery.keys.sorted()
+        return gallery.keys.sorted().map { ["name": $0, "samples": gallery[$0]?.count ?? 0] }
+    }
+
+    /// The enrollment in progress, if any.
+    func enrolling() -> [String: Any]? {
+        settingsLock.lock()
+        defer { settingsLock.unlock() }
+        return enrollName.map { ["name": $0, "samples": enrollSamples.count, "target": enrollTarget] }
+    }
+
+    func forget(name: String) -> Bool {
+        settingsLock.lock()
+        let removed = gallery.removeValue(forKey: name) != nil
+        settingsLock.unlock()
+        if removed { _ = saveGallery() }
+        return removed
+    }
+
+    /// Everything taught, newest sighting first, photos inline (they are small).
+    func items() -> [[String: Any]] {
+        lookQueue.sync {
+            itemBook.items.values.sorted { ($0.lastSeenAt ?? .distantPast) > ($1.lastSeenAt ?? .distantPast) }.map { item in
+                let photo = try? Data(contentsOf: ItemBook.folder.appendingPathComponent(item.image))
+                return [
+                    "name": item.name, "description": item.description,
+                    "last_seen": item.lastSeen ?? NSNull(),
+                    "last_seen_at": item.lastSeenAt.map { $0.timeIntervalSince1970 } ?? NSNull(),
+                    "photo": photo?.base64EncodedString() ?? NSNull(),
+                ]
+            }
+        }
+    }
+
+    func forgetItem(name: String) -> Bool {
+        lookQueue.sync {
+            guard let item = itemBook.items.removeValue(forKey: name.lowercased()) else { return false }
+            try? FileManager.default.removeItem(at: ItemBook.folder.appendingPathComponent(item.image))
+            try? itemBook.save()
+            return true
+        }
+    }
+
+    func resetRoomMap() {
+        ptzQueue.sync {
+            roomMap = RoomMap()
+            roomMap.save()
+        }
+    }
+
+    /// The learned search span, for display.
+    func roomSpan() -> [String: Any] {
+        ptzQueue.sync {
+            let sightings = roomMap.bins.values.reduce(0) { $0 + $1.count }
+            guard let search = roomMap.search else {
+                return ["learned": false, "sightings": sightings, "needed": RoomMap.needed]
+            }
+            return ["learned": true, "sightings": sightings, "low": search.low, "high": search.high]
+        }
     }
 
     private func featurePrint(_ handler: VNImageRequestHandler, face: CGRect) -> VNFeaturePrintObservation? {
@@ -1651,17 +1138,21 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         guard faces.count == 1, let face = faces.first, face.height > 0.06 else {
             return "Enrolling \(name): only \(name)'s face should be in view, close enough to see clearly."
         }
-        if frameNumber.isMultiple(of: 6), let print = featurePrint(handler, face: face) {
-            enrollSamples.append(print)
-        }
-        guard enrollSamples.count >= enrollTarget else {
-            return "Enrolling \(name): \(enrollSamples.count)/\(enrollTarget). Turn your head a little left, right, up and down."
-        }
+        // Samples and the gallery change under the lock: Home Assistant reads
+        // enrollment progress and the enrolled list from the server's thread.
+        let print = frameNumber.isMultiple(of: 6) ? featurePrint(handler, face: face) : nil
         settingsLock.lock()
-        gallery[name] = enrollSamples
-        enrollName = nil
+        if let print { enrollSamples.append(print) }
+        let count = enrollSamples.count
+        if count >= enrollTarget {
+            gallery[name] = enrollSamples
+            enrollName = nil
+            enrollSamples = []
+        }
         settingsLock.unlock()
-        enrollSamples = []
+        guard count >= enrollTarget else {
+            return "Enrolling \(name): \(count)/\(enrollTarget). Turn your head a little left, right, up and down."
+        }
         let failure = saveGallery()
         for index in tracks.indices where tracks[index].visible { tracks[index].name = name }
         if let failure {
@@ -1672,6 +1163,9 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
 
     /// Re-check one face per frame: unnamed faces often, named ones now and then.
     private func identifyFaces(_ handler: VNImageRequestHandler, now: Date) {
+        settingsLock.lock()
+        let gallery = self.gallery
+        settingsLock.unlock()
         guard !gallery.isEmpty else { return }
         let due = tracks.indices.filter { index in
             guard tracks[index].visible, let face = tracks[index].face, face.height > 0.05 else { return false }
@@ -1703,12 +1197,12 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
 
     /// Tell Home Assistant who is in view when that changes, and every 20 s
     /// so it knows the answer is still current.
-    private func reportPresence(_ names: [String], now: Date) {
-        guard !gallery.isEmpty,
-              names != lastPresence || now.timeIntervalSince(lastPresenceSent) > 20 else { return }
-        lastPresence = names
+    private func reportPresence(_ names: [String], animals: [String], now: Date) {
+        let seen = names + ["|"] + animals.sorted()
+        guard seen != lastPresence || now.timeIntervalSince(lastPresenceSent) > 20 else { return }
+        lastPresence = seen
         lastPresenceSent = now
-        presence(names)
+        presence(names, animals)
     }
 
     /// The preview, half size, with people and animals boxed and labeled.
@@ -1779,12 +1273,8 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         currentZoomFactor = clamped
         settingsLock.unlock()
         let rawValue = range.minimum + Int((clamped - 1) / 3 * CGFloat(range.maximum - range.minimum))
-        ptzQueue.async { [weak self] in
-            guard hubbubbLinkCameraZoomSet(rawValue) == 1 else {
-                self?.zoomUpdate(nil, "Camera rejected the lens zoom command. Check camera controls.")
-                return
-            }
-            self?.zoomUpdate(clamped, nil)
+        ptzQueue.async {
+            if hubbubbLinkCameraZoomSet(rawValue) != 1 { NSLog("Hubbubb camera: the Link 2 rejected a zoom command") }
         }
     }
 
@@ -2215,35 +1705,111 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
 }
 
 
-/// Jarvis's way in: Home Assistant asks the camera questions over the LAN.
-///   GET  /people  -> {"people": [...], "animals": [...]}
-///   POST /look    {"question": "..."} -> {"found", "answer", "people", ...}
-///   POST /learn   {"name": "...", "hint": "..."} -> {"learned", "looks_like"}
-/// Every request needs the companion's token (same Mac, same file), so no
-/// second secret has to be set up. Answers are words; frames never leave.
-private final class LookServer {
+/// Home Assistant's way in, over the LAN. Every request needs the companion's
+/// token (same Mac, same file), so no second secret has to be set up.
+///   JSON endpoints are routed by CameraService.
+///   GET /stream  -> MJPEG of the annotated preview, for the camera entity
+///   GET /events?after=N -> long poll: {"seq", "events": [...]} after event N,
+///                          answered at once if there are any, else within 25 s
+private final class CameraServer {
+    enum Reply {
+        case json(String, Any)
+        case jpeg(Data)
+        case stream
+        case poll(Int)
+    }
+    typealias Route = (_ method: String, _ path: String, _ query: [String: String], _ body: [String: Any]) -> Reply
+
     static let port: UInt16 = 8791
     private let listener: NWListener
     private let token: String
-    private let processor: LocalVisionProcessor
+    private let route: Route
     private let queue = DispatchQueue(label: "com.hubbubb.camera.server", attributes: .concurrent)
+    private let lock = NSLock()
+    private var streams: [ObjectIdentifier: NWConnection] = [:]
+    private var waiters: [ObjectIdentifier: (after: Int, connection: NWConnection)] = [:]
+    private var events: [(seq: Int, event: [String: Any])] = []
+    private var seq = 0
+    private var frame: Data?
 
-    init?(processor: LocalVisionProcessor) {
+    init?(route: @escaping Route) {
         let path = NSString(string: "~/.claude/hooks/.voice-token").expandingTildeInPath
         guard let token = try? String(contentsOfFile: path, encoding: .utf8)
                 .trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty,
               let port = NWEndpoint.Port(rawValue: Self.port),
               let listener = try? NWListener(using: .tcp, on: port) else { return nil }
         self.token = token
-        self.processor = processor
+        self.route = route
         self.listener = listener
-        listener.newConnectionHandler = { [weak self] connection in self?.serve(connection) }
+        listener.newConnectionHandler = { [weak self] connection in
+            connection.start(queue: self?.queue ?? .global())
+            self?.receive(connection, buffer: Data())
+        }
         listener.start(queue: queue)
     }
 
-    private func serve(_ connection: NWConnection) {
-        connection.start(queue: queue)
-        receive(connection, buffer: Data())
+    /// Whether anyone is watching the live view (frames are only encoded then).
+    var watching: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return !streams.isEmpty || frame == nil || Date().timeIntervalSince(frameAt) > 2
+    }
+    private var frameAt = Date.distantPast
+
+    var lastFrame: Data? {
+        lock.lock()
+        defer { lock.unlock() }
+        return frame
+    }
+
+    func pushFrame(_ jpeg: Data) {
+        lock.lock()
+        frame = jpeg
+        frameAt = Date()
+        let viewers = Array(streams.values)
+        lock.unlock()
+        let part = Data("--frame\r\nContent-Type: image/jpeg\r\nContent-Length: \(jpeg.count)\r\n\r\n".utf8) + jpeg + Data("\r\n".utf8)
+        for connection in viewers {
+            connection.send(content: part, completion: .contentProcessed { [weak self] error in
+                if error != nil { self?.drop(connection) }
+            })
+        }
+    }
+
+    func push(_ event: [String: Any]) {
+        lock.lock()
+        seq += 1
+        var stamped = event
+        stamped["ts"] = Date().timeIntervalSince1970
+        events.append((seq, stamped))
+        if events.count > 200 { events.removeFirst(events.count - 200) }
+        let ready = waiters
+        waiters.removeAll()
+        lock.unlock()
+        for (_, waiter) in ready { answerPoll(waiter.connection, after: waiter.after) }
+    }
+
+    private func drop(_ connection: NWConnection) {
+        lock.lock()
+        streams.removeValue(forKey: ObjectIdentifier(connection))
+        lock.unlock()
+        connection.cancel()
+    }
+
+    private func answerPoll(_ connection: NWConnection, after: Int) {
+        lock.lock()
+        // A poller from before a restart can be ahead of us: send everything.
+        let since = after > seq ? 0 : after
+        let pending = events.filter { $0.seq > since }.map(\.event)
+        let current = seq
+        lock.unlock()
+        send(connection, status: "200 OK", type: "application/json",
+             body: (try? JSONSerialization.data(withJSONObject: ["seq": current, "events": pending])) ?? Data())
+    }
+
+    private func send(_ connection: NWConnection, status: String, type: String, body: Data) {
+        let head = "HTTP/1.1 \(status)\r\nContent-Type: \(type)\r\nContent-Length: \(body.count)\r\nConnection: close\r\n\r\n"
+        connection.send(content: Data(head.utf8) + body, completion: .contentProcessed { _ in connection.cancel() })
     }
 
     private func receive(_ connection: NWConnection, buffer: Data) {
@@ -2266,38 +1832,50 @@ private final class LookServer {
             if let length = Int(headers["content-length"] ?? "0"), body.count < length, !complete {
                 return self.receive(connection, buffer: buffer)
             }
-            let request = lines.first?.split(separator: " ").map(String.init) ?? []
-            let (status, reply) = self.handle(request, headers: headers, body: Data(body))
-            let json = (try? JSONSerialization.data(withJSONObject: reply)) ?? Data("{}".utf8)
-            let response = "HTTP/1.1 \(status)\r\nContent-Type: application/json\r\nContent-Length: \(json.count)\r\nConnection: close\r\n\r\n"
-            connection.send(content: Data(response.utf8) + json, completion: .contentProcessed { _ in connection.cancel() })
+            self.handle(connection, request: lines.first ?? "", headers: headers, body: Data(body))
         }
     }
 
-    private func handle(_ request: [String], headers: [String: String], body: Data) -> (String, Any) {
-        guard Self.sameSecret(headers["authorization"] ?? "", "Bearer \(token)") else {
-            return ("401 Unauthorized", ["ok": false, "detail": "missing or wrong token"])
+    private func handle(_ connection: NWConnection, request: String, headers: [String: String], body: Data) {
+        func json(_ status: String, _ value: Any) {
+            send(connection, status: status, type: "application/json",
+                 body: (try? JSONSerialization.data(withJSONObject: value)) ?? Data("{}".utf8))
         }
-        switch (request.first, request.dropFirst().first) {
-        case ("GET", "/people"):
-            return ("200 OK", processor.inView())
-        case ("POST", "/learn"):
-            let request = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
-            guard let name = (request?["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                  !name.isEmpty, name.count <= 60 else {
-                return ("400 Bad Request", ["ok": false, "detail": "send {\"name\": \"...\", \"hint\": \"...\"}"])
+        guard Self.sameSecret(headers["authorization"] ?? "", "Bearer \(token)") else {
+            return json("401 Unauthorized", ["ok": false, "detail": "missing or wrong token"])
+        }
+        let parts = request.split(separator: " ").map(String.init)
+        guard parts.count >= 2, let url = URLComponents(string: parts[1]) else {
+            return json("400 Bad Request", ["ok": false, "detail": "bad request line"])
+        }
+        let query = Dictionary((url.queryItems ?? []).map { ($0.name, $0.value ?? "") }) { _, last in last }
+        let fields = ((try? JSONSerialization.jsonObject(with: body)) as? [String: Any]) ?? [:]
+        switch route(parts[0], url.path, query, fields) {
+        case let .json(status, value):
+            json(status, value)
+        case let .jpeg(data):
+            send(connection, status: "200 OK", type: "image/jpeg", body: data)
+        case .stream:
+            let head = "HTTP/1.1 200 OK\r\nContent-Type: multipart/x-mixed-replace; boundary=frame\r\nCache-Control: no-cache\r\nConnection: close\r\n\r\n"
+            connection.send(content: Data(head.utf8), completion: .contentProcessed { [weak self] error in
+                guard let self, error == nil else { return connection.cancel() }
+                self.lock.lock()
+                self.streams[ObjectIdentifier(connection)] = connection
+                self.lock.unlock()
+            })
+        case let .poll(after):
+            lock.lock()
+            let ready = events.contains { $0.seq > after } || after > seq
+            if !ready { waiters[ObjectIdentifier(connection)] = (after, connection) }
+            lock.unlock()
+            if ready { return answerPoll(connection, after: after) }
+            queue.asyncAfter(deadline: .now() + 25) { [weak self] in
+                guard let self else { return }
+                self.lock.lock()
+                let waiter = self.waiters.removeValue(forKey: ObjectIdentifier(connection))
+                self.lock.unlock()
+                if let waiter { self.answerPoll(waiter.connection, after: waiter.after) }
             }
-            let hint = (request?["hint"] as? String).flatMap { $0.isEmpty ? nil : String($0.prefix(200)) }
-                ?? "the thing the person is holding up to the camera"
-            return ("200 OK", processor.learn(name: name, hint: hint))
-        case ("POST", "/look"):
-            let question = ((try? JSONSerialization.jsonObject(with: body)) as? [String: Any])?["question"] as? String
-            guard let question, !question.isEmpty, question.count <= 300 else {
-                return ("400 Bad Request", ["ok": false, "detail": "send {\"question\": \"...\"}"])
-            }
-            return ("200 OK", processor.look(question: question))
-        default:
-            return ("404 Not Found", ["ok": false, "detail": "no such path"])
         }
     }
 

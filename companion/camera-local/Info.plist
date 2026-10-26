@@ -19,7 +19,9 @@
 	<key>NSCameraUsageDescription</key>
 	<string>Hubbubb Local Camera reads the Insta360 webcam feed on this Mac for local preview and on-device gesture recognition. It does not send camera frames over the network.</string>
 	<key>NSAppleEventsUsageDescription</key>
-	<string>Hubbubb Local Camera uses macOS System Events to select the Samsung Screen Mirroring destination when you hold up three fingers.</string>
+	<string>Hubbubb Local Camera uses macOS System Events to start or stop Screen Mirroring to the TV when Home Assistant asks it to.</string>
+	<key>LSUIElement</key>
+	<true/>
 	<key>NSHighResolutionCapable</key>
 	<true/>
 	<key>NSAppTransportSecurity</key>
