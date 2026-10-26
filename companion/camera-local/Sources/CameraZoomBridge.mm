@@ -91,6 +91,49 @@ extern "C" int HubbubbLinkCameraNudge(float pan, float tilt) {
     return cameraController->SetPanTiltAbsolute(targetPan, targetTilt) ? 1 : 0;
 }
 
+// What the camera itself says: its zoom (raw units) and framing mode, where
+// 0 is normal and anything else is the Link 2 framing on its own.
+extern "C" int HubbubbLinkCameraDiagnostics(long *zoom, int *videoMode) {
+    std::lock_guard<std::mutex> lock(cameraMutex);
+    if (!cameraController || !cameraController->GetZoomAbsolute(*zoom)) return 0;
+    VideoMode mode = VideoMode::Normal;
+    VideoModeAuxiliaryData auxiliary{};
+    *videoMode = cameraExtendController && cameraExtendController->GetVideoMode(mode, auxiliary) ? static_cast<int>(mode) : -1;
+    return 1;
+}
+
+// Make this app the only thing steering the camera: normal (not AutoFraming
+// or tracking) mode, and the Link 2's own hand gestures and AI zoom off - its
+// palm and V gestures otherwise flip it into its own framing. Returns a mask
+// of what had to change: 1 mode, 2 gestures, 4 AI zoom/tracking.
+extern "C" int HubbubbLinkCameraTakeControl() {
+    std::lock_guard<std::mutex> lock(cameraMutex);
+    if (!cameraExtendController) return 0;
+    int changed = 0;
+    VideoMode mode = VideoMode::Normal;
+    VideoModeAuxiliaryData auxiliary{};
+    if (cameraExtendController->GetVideoMode(mode, auxiliary) && mode != VideoMode::Normal) {
+        VideoModeAuxiliaryData none{};
+        if (cameraExtendController->SetVideoMode(VideoMode::Normal, none)) changed |= 1;
+    }
+    std::map<Gesture, bool> gestures;
+    if (cameraExtendController->GetGestureStatus(gestures)) {
+        // One by one: the per-gesture status ignores EnableAllGesture, so only
+        // this makes the next check come back quiet.
+        for (const auto &entry : gestures) {
+            if (entry.second && cameraExtendController->EnableGestureWork(entry.first, false)) changed |= 2;
+        }
+    }
+    std::map<ExtendFuction, bool> functions;
+    if (cameraExtendController->GetExtendFuncStatus(functions)) {
+        for (auto func : {ExtendFuction::AiZoom, ExtendFuction::EnableTracking, ExtendFuction::EnableSingleTapTracking}) {
+            const auto found = functions.find(func);
+            if (found != functions.end() && found->second && cameraExtendController->EnableExtendFuncWork(func, false)) changed |= 4;
+        }
+    }
+    return changed;
+}
+
 extern "C" int HubbubbLinkCameraZoomSet(long value) {
     std::lock_guard<std::mutex> lock(cameraMutex);
     if (!cameraController) return 0;

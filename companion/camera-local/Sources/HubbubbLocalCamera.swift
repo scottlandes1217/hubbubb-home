@@ -160,6 +160,10 @@ private struct RoomMap {
     }
 }
 
+@_silgen_name("HubbubbLinkCameraDiagnostics")
+private func hubbubbLinkCameraDiagnostics(_ zoom: UnsafeMutablePointer<Int>, _ videoMode: UnsafeMutablePointer<Int32>) -> Int32
+@_silgen_name("HubbubbLinkCameraTakeControl")
+private func hubbubbLinkCameraTakeControl() -> Int32
 @_silgen_name("HubbubbLinkCameraNudge")
 private func hubbubbLinkCameraNudge(_ pan: Float, _ tilt: Float) -> Int32
 
@@ -357,6 +361,7 @@ private final class CameraService {
     private var status = "Starting the camera…"
     private let jpegContext = CIContext(options: [.useSoftwareRenderer: false])
     private var lastFrameSent = Date.distantPast
+    private var controlWatchdog: DispatchSourceTimer?
 
     // Tuning knobs Home Assistant may set: name -> (allowed range, default).
     // Each is read where it is used, from these same defaults.
@@ -465,7 +470,15 @@ private final class CameraService {
             if self.session.canAddOutput(output) { self.session.addOutput(output) }
             self.session.commitConfiguration()
             self.processor = processor
+            processor.takeControl()
             self.applySettings()
+            // Re-assert now and then: a tap on the camera's touch panel or the
+            // Insta360 app can switch its own framing back on.
+            let watchdog = DispatchSource.makeTimerSource(queue: self.sessionQueue)
+            watchdog.schedule(deadline: .now() + 15, repeating: 15)
+            watchdog.setEventHandler { [weak processor] in processor?.takeControl() }
+            watchdog.resume()
+            self.controlWatchdog = watchdog
             self.setStatus(zoomSupported ? "Connected to \(camera.localizedName)."
                 : "Connected to \(camera.localizedName), but its zoom and pan controls did not initialize.")
             self.session.startRunning()
@@ -507,6 +520,7 @@ private final class CameraService {
             state["enrolling"] = processor.enrolling() ?? NSNull()
             state["room"] = processor.roomSpan()
             state["mood"] = processor.mood
+            state["hardware"] = processor.hardware()
         }
         return state
     }
@@ -1337,6 +1351,44 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
 
     var mood: String { moodQueue.sync { currentMood } }
 
+    /// Keep the Link 2's own framing, gestures and AI zoom off, and our idea of
+    /// the zoom matched to the lens. Called at start and every 15 s.
+    func takeControl() {
+        ptzQueue.async { [weak self] in
+            guard let self else { return }
+            let changed = hubbubbLinkCameraTakeControl()
+            if changed != 0 {
+                note("Hubbubb camera: took the camera back from its own %@",
+                     [(1, "auto-framing"), (2, "hand gestures"), (4, "AI zoom/tracking")]
+                        .filter { changed & Int32($0.0) != 0 }.map(\.1).joined(separator: ", "))
+            }
+            // Whatever moved the lens, start from where it really is.
+            var raw = 0, mode: Int32 = 0
+            if hubbubbLinkCameraDiagnostics(&raw, &mode) == 1, let range = self.zoomRange {
+                let actual = 1 + CGFloat(raw - range.minimum) / CGFloat(range.maximum - range.minimum) * 3
+                self.settingsLock.lock()
+                let believed = self.currentZoomFactor
+                self.currentZoomFactor = actual
+                self.settingsLock.unlock()
+                if abs(actual - believed) > 0.1 {
+                    note("Hubbubb camera: lens was at %.1fx, not %.1fx; corrected", Double(actual), Double(believed))
+                }
+            }
+        }
+    }
+
+    /// The camera's own view of its zoom and mode, against what we believe.
+    func hardware() -> [String: Any] {
+        var raw = 0, mode: Int32 = -1
+        let ok = ptzQueue.sync { hubbubbLinkCameraDiagnostics(&raw, &mode) } == 1
+        settingsLock.lock()
+        let believed = currentZoomFactor
+        settingsLock.unlock()
+        var factor: Double? = nil
+        if ok, let range = zoomRange { factor = 1 + Double(raw - range.minimum) / Double(range.maximum - range.minimum) * 3 }
+        return ["zoom_believed": believed, "zoom_actual": factor ?? NSNull(), "zoom_raw": ok ? raw : NSNull(), "video_mode": mode]
+    }
+
     private func moodTick() {
         guard let base = moodBase else { return }
         if Date().timeIntervalSince(moodRefreshed) > 30 {
@@ -1601,7 +1653,9 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             let lift = rise * Float(43 / current * 0.6)
             note("Hubbubb camera: lost them at (%.2f, %.2f), zoom %.1f; chasing pan %+.0f° tilt %+.0f°",
                   Double(last.x), Double(last.y), Double(current), Double(direction * jump), Double(lift))
-            if autoZoom, current > 1.03 { applyHardwareZoom(1) }
+            // All the way out, whatever we believe the lens is at: finding them
+            // wide is easy, and the belief can lag the lens (camera restarted).
+            if autoZoom { applyHardwareZoom(1) }
             ptzQueue.async { [weak self] in
                 guard let self, let position = cameraPosition() else { return }
                 let target = position.pan + direction * jump
