@@ -20,6 +20,8 @@ import voluptuous as vol
 from homeassistant.core import Context, HomeAssistant, ServiceCall, SupportsResponse, callback
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import config_validation as cv
+from homeassistant.helpers import entity_registry as er
+from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 from homeassistant.helpers.script import SCRIPT_MODE_PARALLEL, Script, async_validate_actions_config
 from homeassistant.helpers.storage import Store
 
@@ -66,6 +68,34 @@ GESTURE_SCHEMA = vol.Schema(
 )
 
 
+# The puck's states, as the camera's moods.
+SATELLITE_MOODS = {"listening": "listening", "processing": "thinking", "responding": "speaking"}
+MOOD_ORDER = ("speaking", "thinking", "listening")
+MOOD_COLORS = {"listening": [0, 120, 255], "thinking": [255, 150, 0], "speaking": [0, 220, 200]}
+SNAPSHOT_SCENE = "hubbubb_jarvis_lights_before"
+
+JARVIS_SCHEMA = vol.Schema(
+    {
+        vol.Optional("move", default=True): bool,
+        vol.Optional("satellites", default=[]): [cv.entity_id],
+        vol.Optional("strength", default=0.6): vol.All(vol.Coerce(float), vol.Range(0, 1)),
+        vol.Optional("lights", default=False): bool,
+        vol.Optional("light_entities", default=[]): [cv.entity_id],
+        vol.Optional("pause_while"): vol.Any(None, cv.entity_id),
+        vol.Optional("brightness", default=80): vol.All(vol.Coerce(int), vol.Range(1, 100)),
+        vol.Optional("colors", default=MOOD_COLORS): {
+            vol.In(tuple(MOOD_COLORS)): vol.All([vol.All(vol.Coerce(int), vol.Range(0, 255))], vol.Length(3, 3))
+        },
+    }
+)
+
+
+def mood_for(states: list[str]) -> str:
+    """The mood for several pucks at once: the busiest one wins."""
+    moods = {SATELLITE_MOODS.get(s) for s in states}
+    return next((m for m in MOOD_ORDER if m in moods), "idle")
+
+
 def gesture_allowed(config: dict | None, person: str | None, held: bool) -> bool:
     """Whether a recognized gesture should run its actions.
 
@@ -96,6 +126,7 @@ class CameraLink:
         self.connected = False
         self.last_gesture: dict | None = None
         self._listeners: list[Callable[[], None]] = []
+        self.jarvis: dict = {}
 
     def url(self, path: str) -> str:
         return f"{self._base}/{path.lstrip('/')}"
@@ -143,6 +174,14 @@ class CameraLink:
     async def async_load(self) -> None:
         stored = await self._store.async_load() or {}
         self.gestures = stored.get("gestures") or {}
+        self.jarvis = JARVIS_SCHEMA(stored.get("jarvis") or {})
+        if "pause_while" not in (stored.get("jarvis") or {}):
+            # A Hue Sync Box owns its lights while syncing; stay out of its way.
+            self.jarvis["pause_while"] = next(
+                (e.entity_id for e in er.async_get(self.hass).entities.values()
+                 if e.platform == "huesyncbox" and e.entity_id.endswith("_light_sync")),
+                None,
+            )
         if stored.get("imported"):
             return
         # First run: bring over what the old windowed app had hard-coded, so
@@ -154,7 +193,7 @@ class CameraLink:
         for gesture, config in (legacy.get("gestures") or {}).items():
             if gesture in TITLES and gesture not in self.gestures:
                 self.gestures[gesture] = {"enabled": True, "people": [], **config}
-        await self._store.async_save({"gestures": self.gestures, "imported": True})
+        await self._save()
 
     async def async_save_gesture(self, data: dict) -> dict:
         data = GESTURE_SCHEMA(data)
@@ -166,8 +205,11 @@ class CameraLink:
         config = {k: data[k] for k in ("enabled", "repeat", "people", "actions")}
         self.gestures[data["gesture"]] = config
         self._scripts.pop(data["gesture"], None)
-        await self._store.async_save({"gestures": self.gestures, "imported": True})
+        await self._save()
         return config
+
+    async def _save(self) -> None:
+        await self._store.async_save({"gestures": self.gestures, "imported": True, "jarvis": self.jarvis})
 
     async def _script(self, gesture: str) -> Script | None:
         if gesture not in self._scripts:
@@ -250,7 +292,99 @@ class CameraLink:
                     self._changed()
 
 
-def async_register_services(hass: HomeAssistant, link: CameraLink) -> list[str]:
+class JarvisPresence:
+    """The camera's body language and the room's lights, following the pucks.
+
+    Listening, thinking and speaking move the camera a few degrees and, when
+    chosen, tint some lights; idle puts both back. The lights are snapshotted
+    into a scene first and restored from it, so they return to exactly what
+    they were - including off.
+    """
+
+    def __init__(self, hass: HomeAssistant, link: CameraLink) -> None:
+        self.hass = hass
+        self.link = link
+        self.mood = "idle"
+        self._unsub: Callable[[], None] | None = None
+        self._watchdog: Callable[[], None] | None = None
+        self._snapshot = False
+
+    @property
+    def satellites(self) -> list[str]:
+        return self.link.jarvis.get("satellites") or self.hass.states.async_entity_ids("assist_satellite")
+
+    @callback
+    def async_start(self) -> Callable[[], None]:
+        """(Re)subscribe to the chosen pucks. Returns the unsubscribe."""
+        self.async_stop()
+        if self.satellites:
+            self._unsub = async_track_state_change_event(self.hass, self.satellites, self._changed)
+        return self.async_stop
+
+    @callback
+    def async_stop(self) -> None:
+        if self._unsub:
+            self._unsub()
+            self._unsub = None
+
+    @callback
+    def _changed(self, event) -> None:
+        states = [getattr(self.hass.states.get(e), "state", "") for e in self.satellites]
+        mood = mood_for(states)
+        if mood != self.mood:
+            self.hass.async_create_background_task(self.async_apply(mood), f"{DOMAIN} jarvis {mood}")
+
+    async def async_apply(self, mood: str) -> None:
+        self.mood = mood
+        if self._watchdog:
+            self._watchdog()
+            self._watchdog = None
+        if mood != "idle":
+            # A missed "idle" (puck rebooted) must not leave the room tinted.
+            self._watchdog = async_call_later(self.hass, 90, self._reset)
+        config = self.link.jarvis
+        if config.get("move"):
+            try:
+                await self.link.async_request("POST", "mood", {"mood": mood, "strength": config.get("strength", 0.6)}, timeout=5)
+            except HomeAssistantError:
+                pass  # the camera being away must never hold up the lights
+        if config.get("lights") and config.get("light_entities"):
+            await self._lights(mood, config)
+
+    @callback
+    def _reset(self, _now=None) -> None:
+        self._watchdog = None
+        self.hass.async_create_background_task(self.async_apply("idle"), f"{DOMAIN} jarvis reset")
+
+    async def _lights(self, mood: str, config: dict) -> None:
+        entities = config["light_entities"]
+        if mood == "idle":
+            if self._snapshot:
+                self._snapshot = False
+                await self.hass.services.async_call("scene", "turn_on", {"entity_id": f"scene.{SNAPSHOT_SCENE}", "transition": 1}, blocking=False)
+            return
+        pause = config.get("pause_while")
+        if pause and self.hass.states.is_state(pause, "on"):
+            return
+        if not self._snapshot:
+            await self.hass.services.async_call(
+                "scene", "create", {"scene_id": SNAPSHOT_SCENE, "snapshot_entities": entities}, blocking=True
+            )
+            self._snapshot = True
+        await self.hass.services.async_call(
+            "light",
+            "turn_on",
+            {
+                "entity_id": entities,
+                "rgb_color": (config.get("colors") or MOOD_COLORS).get(mood, MOOD_COLORS[mood]),
+                "brightness_pct": config.get("brightness", 80),
+                "transition": 0.4,
+            },
+            blocking=False,
+        )
+
+
+def async_register_services(hass: HomeAssistant, link: CameraLink, presence: JarvisPresence) -> list[str]:
     """The panel's calls, plus the two actions a gesture or automation may use."""
 
     def _passthrough(method: str, path: str):
@@ -282,6 +416,29 @@ def async_register_services(hass: HomeAssistant, link: CameraLink) -> list[str]:
             raise HomeAssistantError(reply.get("detail") or "Screen mirroring did not change")
         return reply
 
+    async def jarvis_get(call: ServiceCall):
+        return {"config": link.jarvis, "satellites": presence.satellites, "mood": presence.mood}
+
+    async def jarvis_save(call: ServiceCall):
+        try:
+            link.jarvis = JARVIS_SCHEMA(dict(call.data))
+        except vol.Invalid as err:
+            raise HomeAssistantError(f"Not a valid setting: {err}") from err
+        await link._save()
+        presence.async_start()
+        return {"config": link.jarvis}
+
+    async def jarvis_test(call: ServiceCall):
+        """Play one mood for a few seconds, then put everything back."""
+        await presence.async_apply(call.data["mood"])
+        async_call_later(hass, 4, presence._reset)
+
+    hass.services.async_register(DOMAIN, "jarvis_presence_get", jarvis_get, supports_response=SupportsResponse.ONLY)
+    hass.services.async_register(DOMAIN, "jarvis_presence_save", jarvis_save, supports_response=SupportsResponse.ONLY)
+    hass.services.async_register(
+        DOMAIN, "jarvis_presence_test", jarvis_test,
+        schema=vol.Schema({vol.Required("mood"): vol.In(MOOD_ORDER)}),
+    )
     hass.services.async_register(DOMAIN, "gestures_get", gestures_get, supports_response=SupportsResponse.ONLY)
     hass.services.async_register(DOMAIN, "gesture_save", gesture_save, supports_response=SupportsResponse.ONLY)
     hass.services.async_register(
@@ -293,4 +450,5 @@ def async_register_services(hass: HomeAssistant, link: CameraLink) -> list[str]:
         schema=vol.Schema({vol.Required("on"): cv.boolean}),
         supports_response=SupportsResponse.OPTIONAL,
     )
-    return [*PASSTHROUGH, "gestures_get", "gesture_save", "gesture_test", "mac_screen_sharing"]
+    return [*PASSTHROUGH, "gestures_get", "gesture_save", "gesture_test", "mac_screen_sharing",
+            "jarvis_presence_get", "jarvis_presence_save", "jarvis_presence_test"]

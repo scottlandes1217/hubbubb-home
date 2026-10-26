@@ -94,6 +94,8 @@ except ImportError:
         All=lambda *a, **k: None,
         Length=lambda *a, **k: None,
         Range=lambda *a, **k: None,
+        Any=lambda *a, **k: None,
+        Invalid=Exception,
     )
 
 class _LLMAPI:
@@ -102,7 +104,12 @@ class _LLMAPI:
 
 
 _helpers = _stub("homeassistant.helpers")
-_stub("homeassistant.helpers.event", async_track_point_in_time=_track_point_in_time)
+_stub(
+    "homeassistant.helpers.event",
+    async_track_point_in_time=_track_point_in_time,
+    async_call_later=None,
+    async_track_state_change_event=None,
+)
 _stub(
     "homeassistant.helpers.llm",
     API=_LLMAPI,
@@ -115,8 +122,8 @@ _stub(
 for _name, _attrs in {
     "area_registry": {},
     "device_registry": {},
-    "entity_registry": {},
-    "config_validation": {"string": str},
+    "entity_registry": {"async_get": None},
+    "config_validation": {"string": str, "SCRIPT_SCHEMA": lambda v: v, "boolean": bool, "entity_id": str},
     "intent": {"IntentHandler": _IntentHandler, "async_register": lambda *a: None},
     "aiohttp_client": {"async_get_clientsession": lambda hass: None},
     "issue_registry": {
@@ -145,7 +152,6 @@ class _Store:
 
 
 _stub("homeassistant.helpers.storage", Store=_Store)
-_stub("homeassistant.helpers.config_validation", SCRIPT_SCHEMA=lambda v: v, boolean=bool)
 _stub(
     "homeassistant.helpers.script",
     SCRIPT_MODE_PARALLEL="parallel",
@@ -173,7 +179,7 @@ sys.modules["hubbubb_home"] = _pkg
 from hubbubb_home.memory import Memory  # noqa: E402
 from hubbubb_home.recipes import Recipes, as_lines, recipe_from_html  # noqa: E402
 from hubbubb_home.speakers import SpeakerBook  # noqa: E402
-from hubbubb_home.eyes import gesture_allowed  # noqa: E402
+from hubbubb_home.eyes import gesture_allowed, mood_for  # noqa: E402
 from hubbubb_home.timers import TimerPool  # noqa: E402
 from hubbubb_home.nightly import FindingsReport, _days  # noqa: E402
 from hubbubb_home.review import ReviewReport, parse_proposals  # noqa: E402
@@ -490,6 +496,15 @@ def test_gesture_runs_only_when_its_settings_allow():
     assert not gesture_allowed({**once, "enabled": False}, "Scott", held=False)
     assert not gesture_allowed({**once, "actions": []}, "Scott", held=False)
     assert not gesture_allowed(None, "Scott", held=False)
+
+
+def test_jarvis_mood_follows_the_busiest_puck():
+    assert mood_for([]) == "idle"
+    assert mood_for(["idle", "unavailable"]) == "idle"
+    assert mood_for(["listening"]) == "listening"
+    assert mood_for(["processing"]) == "thinking"
+    assert mood_for(["listening", "responding"]) == "speaking"
+    assert mood_for(["processing", "listening", "idle"]) == "thinking"
 
 
 def test_speaker_prompt_line_three_cases():

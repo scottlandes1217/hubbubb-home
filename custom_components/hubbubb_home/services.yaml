@@ -210,3 +210,10 @@ camera_forget_item:
 camera_learn:
 camera_room_reset:
 camera_look:
+jarvis_presence_get:
+jarvis_presence_save:
+jarvis_presence_test:
+  fields:
+    mood:
+      required: true
+      selector: { select: { options: [listening, thinking, speaking] } }

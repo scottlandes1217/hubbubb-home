@@ -107,6 +107,14 @@ private struct RoomMap {
         precondition(GestureGate.isFacing(yaw: 0.1, pitch: -0.2, limit: 25), "looking at the camera")
         precondition(!GestureGate.isFacing(yaw: 0, pitch: -0.7, limit: 25), "looking down at a phone")
         precondition(!GestureGate.isFacing(yaw: 0.8, pitch: 0, limit: 25), "looking across at the dog")
+        for mood in ["listening", "thinking", "speaking"] {
+            for step in 0..<200 {
+                let o = Mood.offset(mood, t: Double(step) * 0.05, strength: 1)
+                precondition(abs(o.pan) <= 4.01 && abs(o.tilt) <= 3.01, "\(mood) stays within a few degrees")
+            }
+        }
+        precondition(Mood.offset("speaking", t: 1, strength: 0) == (0, 0), "strength 0 is still")
+        precondition(Mood.offset("idle", t: 1, strength: 1) == (0, 0), "idle is still")
         let head = GestureGate.head(face, hair: 0.9, chin: 0.6)
         precondition(head.contains(CGPoint(x: 0.49, y: 0.56)), "a fork at the mouth, under the chin, is in the head zone")
         precondition(!head.contains(CGPoint(x: 0.6, y: 0.50)), "a thumbs up beside the chest is not")
@@ -201,6 +209,32 @@ private enum GestureGate {
         let mean = CGPoint(x: points.map(\.x).reduce(0, +) / CGFloat(points.count),
                            y: points.map(\.y).reduce(0, +) / CGFloat(points.count))
         return points.allSatisfy { hypot($0.x - mean.x, $0.y - mean.y) <= tolerance }
+    }
+}
+
+/// Camera body language while Jarvis talks: an offset from where the camera
+/// pointed when the mood began, in degrees, `t` seconds into it. Pure, so
+/// `--self-test` can check it never wanders far.
+private enum Mood {
+    static func offset(_ mood: String, t: Double, strength: Double) -> (pan: Float, tilt: Float) {
+        let s = max(0, min(1, strength))
+        switch mood {
+        case "listening":
+            // Perk up: a quick lift that settles, like raising its head.
+            let lift = t < 0.25 ? t / 0.25 : max(0.4, 1 - (t - 0.25) / 0.8)
+            return (0, Float(3 * s * lift))
+        case "thinking":
+            // A slow glance up and to one side and back, every 3 s.
+            let phase = sin(t.truncatingRemainder(dividingBy: 3) / 3 * 2 * .pi)
+            return (Float(4 * s * max(0, phase)), Float(2 * s * max(0, phase)))
+        case "speaking":
+            // Nods with speech-like cadence: two mixed rhythms, never repeating exactly.
+            let nod = 0.65 * sin(t * 2 * .pi / 0.9) + 0.35 * sin(t * 2 * .pi / 0.37 + 1.3)
+            let sway = sin(t * 2 * .pi / 4.1)
+            return (Float(1.2 * s * sway), Float(2 * s * nod))
+        default:
+            return (0, 0)
+        }
     }
 }
 
@@ -449,6 +483,13 @@ private final class CameraService {
                 return bad("direction is 1 or -1")
             }
             return ok(["ok": hubbubbLinkCameraPanStep(direction) == 1])
+        case ("POST", "/mood"):
+            guard let processor, let mood = body["mood"] as? String,
+                  ["listening", "thinking", "speaking", "idle"].contains(mood) else {
+                return bad("mood is listening, thinking, speaking or idle")
+            }
+            processor.setMood(mood, strength: (body["strength"] as? NSNumber)?.doubleValue ?? 0.6)
+            return ok(["ok": true])
         case ("POST", "/enroll"):
             guard let processor, !name.isEmpty, name.count <= 40 else { return bad("send a name, up to 40 characters") }
             processor.beginEnrollment(name: name)
@@ -733,6 +774,14 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     private var followPausedUntil = Date.distantPast
     private let lookQueue = DispatchQueue(label: "com.hubbubb.camera.look")
     private var itemBook = ItemBook.load()  // lookQueue only
+    // Jarvis's body language (moodQueue only).
+    private let moodQueue = DispatchQueue(label: "com.hubbubb.camera.mood")
+    private var moodTimer: DispatchSourceTimer?
+    private var moodBase: (pan: Float, tilt: Float)?
+    private var currentMood = "idle"
+    private var moodStrength = 0.6
+    private var moodStarted = Date()
+    private var moodRefreshed = Date()
     private var looking = false
     private let settingsLock = NSLock()
     private var autoZoomEnabled = true
@@ -1152,6 +1201,55 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             roomMap = RoomMap()
             roomMap.save()
         }
+    }
+
+    /// Play a mood ("listening", "thinking", "speaking", "idle") on the gimbal.
+    /// Following pauses while it plays; "idle", or a minute without a refresh,
+    /// returns the camera to where it was and hands back to following.
+    func setMood(_ mood: String, strength: Double) {
+        moodQueue.async { [self] in
+            let now = Date()
+            if mood == "idle" {
+                stopMood()
+                return
+            }
+            if moodTimer == nil {
+                moodBase = ptzQueue.sync { cameraPosition() }
+                guard moodBase != nil else { return }
+                let timer = DispatchSource.makeTimerSource(queue: moodQueue)
+                timer.schedule(deadline: .now(), repeating: 0.12)
+                timer.setEventHandler { [weak self] in self?.moodTick() }
+                moodTimer = timer
+                timer.resume()
+            }
+            if mood != currentMood { moodStarted = now }
+            currentMood = mood
+            moodStrength = strength
+            moodRefreshed = now
+            settingsLock.lock()
+            followPausedUntil = .distantFuture
+            settingsLock.unlock()
+        }
+    }
+
+    private func moodTick() {
+        guard let base = moodBase else { return }
+        if Date().timeIntervalSince(moodRefreshed) > 60 { return stopMood() }
+        let o = Mood.offset(currentMood, t: Date().timeIntervalSince(moodStarted), strength: moodStrength)
+        ptzQueue.async { _ = hubbubbLinkCameraPointAt(base.pan + o.pan, base.tilt + o.tilt) }
+    }
+
+    private func stopMood() {
+        moodTimer?.cancel()
+        moodTimer = nil
+        if let base = moodBase {
+            ptzQueue.async { _ = hubbubbLinkCameraPointAt(base.pan, base.tilt) }
+        }
+        moodBase = nil
+        currentMood = "idle"
+        settingsLock.lock()
+        followPausedUntil = Date().addingTimeInterval(0.5)
+        settingsLock.unlock()
     }
 
     /// The learned search span, for display.

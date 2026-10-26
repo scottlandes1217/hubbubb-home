@@ -103,3 +103,12 @@ This is a capture and local-inference prototype, not yet a virtual webcam.
   When someone leaves the frame it zooms out and jumps about half a frame
   the way they went, then sweeps on in that direction.
 - `HubbubbLocalCamera --self-test` checks the room map and follow math.
+
+## Jarvis body language
+
+`POST /mood {"mood": "listening"|"thinking"|"speaking"|"idle", "strength": 0-1}`
+plays small gimbal motions from wherever the camera points (a perk-up, a
+glance, speech-like nods; a few degrees at most), pausing following until
+`idle` or 60 s without a refresh, then returns. Home Assistant drives it from
+the voice pucks' states, along with optional coloured lights; both are set up
+in the Camera panel's Jarvis tab.

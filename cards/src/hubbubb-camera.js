@@ -17,6 +17,7 @@ const TABS = [
   ["gestures", "Gestures", "mdi:hand-wave"],
   ["people", "People", "mdi:account-multiple"],
   ["things", "Things", "mdi:package-variant-closed"],
+  ["jarvis", "Jarvis", "mdi:account-voice"],
   ["tuning", "Tuning", "mdi:tune-variant"],
 ];
 
@@ -70,6 +71,32 @@ export const gestureForm = (config) => ({
 /* Whether the form differs from what is saved. */
 export const changed = (form, config) => JSON.stringify(form) !== JSON.stringify(gestureForm(config));
 
+const MOODS = [
+  ["listening", "Listening", "mdi:ear-hearing"],
+  ["thinking", "Thinking", "mdi:head-cog-outline"],
+  ["speaking", "Speaking", "mdi:account-voice"],
+];
+
+/* The stored Jarvis settings <-> a flat form (ha-form has no nested colours). */
+export const jarvisForm = (config = {}) => ({
+  move: config.move ?? true,
+  satellites: config.satellites ?? [],
+  strength: config.strength ?? 0.6,
+  lights: config.lights ?? false,
+  light_entities: config.light_entities ?? [],
+  brightness: config.brightness ?? 80,
+  pause_while: config.pause_while ?? "",
+  ...Object.fromEntries(MOODS.map(([m]) => [`${m}_color`, config.colors?.[m] ?? null])),
+});
+
+export const jarvisConfig = (form) => {
+  const { listening_color, thinking_color, speaking_color, pause_while, ...rest } = form;
+  const colors = Object.fromEntries(
+    [["listening", listening_color], ["thinking", thinking_color], ["speaking", speaking_color]].filter(([, c]) => Array.isArray(c))
+  );
+  return { ...rest, pause_while: pause_while || null, ...(Object.keys(colors).length ? { colors } : {}) };
+};
+
 /* ha-form is lazy-loaded by Home Assistant. A custom panel can be the first
    thing on screen, so pull it in the way card editors do. */
 let formReady;
@@ -101,6 +128,8 @@ class HubbubbCamera extends LitElement {
     _teach: { state: true },
     _formReady: { state: true },
     _viewKey: { state: true },
+    _jarvis: { state: true },
+    _jarvisForm: { state: true },
   };
 
   constructor() {
@@ -122,6 +151,8 @@ class HubbubbCamera extends LitElement {
     this._teach = { name: "", where: "", result: null, busy: false };
     this._formReady = false;
     this._viewKey = 0; // bumped to reconnect the live view
+    this._jarvis = null; // { config, satellites, mood }
+    this._jarvisForm = null;
   }
 
   connectedCallback() {
@@ -180,13 +211,23 @@ class HubbubbCamera extends LitElement {
     } catch (e) {
       this._state = { connected: false, status: e?.message || String(e) };
     }
-    const fast = ["live", "people"].includes(this._tab) || this._state?.enrolling;
+    if (this._tab === "jarvis") this._loadJarvis(false);
+    const fast = ["live", "people", "jarvis"].includes(this._tab) || this._state?.enrolling;
     this._timer = setTimeout(() => this._poll(), fast ? 1500 : 6000);
   }
 
   async _loadGestures() {
     const res = await this._try(() => this._call("gestures_get"));
     if (res) this._gestures = res;
+  }
+
+  async _loadJarvis(resetForm) {
+    try {
+      this._jarvis = await this._call("jarvis_presence_get");
+      if (resetForm || !this._jarvisForm) this._jarvisForm = jarvisForm(this._jarvis.config);
+    } catch (e) {
+      this._err = e?.message || String(e);
+    }
   }
 
   async _loadItems() {
@@ -207,6 +248,7 @@ class HubbubbCamera extends LitElement {
     this._confirm = null;
     try { localStorage.setItem("hubbubb-camera-tab", tab); } catch {}
     if (tab === "things" && !this._items) this._loadItems();
+    if (tab === "jarvis") this._loadJarvis(true);
     this._poll();
   }
 
@@ -243,7 +285,7 @@ class HubbubbCamera extends LitElement {
         ? html`<div class="notice"><ha-icon icon="mdi:lan-disconnect"></ha-icon><div><b>The camera isn't reachable.</b><br />${s.status}<br /><span class="muted">It runs as Hubbubb Local Camera on the Mac and starts at login.</span></div></div>`
         : nothing}
       <main>
-        ${{ live: () => this._renderLive(), gestures: () => this._renderGestures(), people: () => this._renderPeople(), things: () => this._renderThings(), tuning: () => this._renderTuning() }[this._tab]?.() ?? nothing}
+        ${{ live: () => this._renderLive(), gestures: () => this._renderGestures(), people: () => this._renderPeople(), things: () => this._renderThings(), jarvis: () => this._renderJarvis(), tuning: () => this._renderTuning() }[this._tab]?.() ?? nothing}
       </main>
     `;
   }
@@ -552,6 +594,79 @@ class HubbubbCamera extends LitElement {
     this._loadItems();
   }
 
+  /* --- Jarvis --- */
+
+  _renderJarvis() {
+    const j = this._jarvis;
+    const f = this._jarvisForm;
+    if (!j || !f || !this._formReady) return html`<div class="empty">Loading…</div>`;
+    const dirty = JSON.stringify(jarvisConfig(f)) !== JSON.stringify(jarvisConfig(jarvisForm(j.config)));
+    const mood = MOODS.find(([m]) => m === j.mood);
+    return html`
+      <p class="intro">While Jarvis listens, thinks and talks through your Voice puck, the camera can move like it's paying attention, and lights can glow to show what it's doing. Both go back to normal when Jarvis is done.</p>
+      <div class="two">
+        <section class="card">
+          <h3>Now</h3>
+          <div class="mood ${j.mood}">
+            <ha-icon .icon=${mood?.[2] || "mdi:sleep"}></ha-icon>
+            <span>${mood ? mood[1] : "Idle"}</span>
+          </div>
+          <h3>Preview</h3>
+          <div class="actions">
+            ${MOODS.map(([m, label, icon]) => html`<button ?disabled=${this._busy || dirty} title=${dirty ? "Save first" : ""} @click=${() => this._try(() => this._call("jarvis_presence_test", { mood: m }, false))}><ha-icon .icon=${icon}></ha-icon> ${label}</button>`)}
+          </div>
+          <p class="muted small">Plays for 4 seconds, then puts the camera and lights back.</p>
+        </section>
+        <section class="card">
+          <h3>Camera movement</h3>
+          <ha-form
+            .hass=${this.hass}
+            .data=${f}
+            .schema=${[
+              { name: "move", selector: { boolean: {} } },
+              ...(f.move ? [{ name: "strength", selector: { number: { min: 0.1, max: 1, step: 0.05, mode: "slider" } } }] : []),
+              { name: "satellites", selector: { entity: { domain: "assist_satellite", multiple: true } } },
+            ]}
+            .computeLabel=${(x) => ({ move: "Move the camera while Jarvis talks", strength: "How much it moves", satellites: "Which pucks" })[x.name]}
+            .computeHelper=${(x) => ({ strength: "A perk-up when listening, a glance while thinking, gentle nods while speaking.", satellites: "Leave empty to follow every voice puck." })[x.name]}
+            @value-changed=${(e) => (this._jarvisForm = { ...this._jarvisForm, ...e.detail.value })}
+          ></ha-form>
+          <h3>Lights</h3>
+          <ha-form
+            .hass=${this.hass}
+            .data=${f}
+            .schema=${[
+              { name: "lights", selector: { boolean: {} } },
+              ...(f.lights
+                ? [
+                    { name: "light_entities", selector: { entity: { domain: "light", multiple: true } } },
+                    { name: "brightness", selector: { number: { min: 1, max: 100, step: 1, mode: "slider", unit_of_measurement: "%" } } },
+                    ...MOODS.map(([m]) => ({ name: `${m}_color`, selector: { color_rgb: {} } })),
+                    { name: "pause_while", selector: { entity: {} } },
+                  ]
+                : []),
+            ]}
+            .computeLabel=${(x) =>
+              ({ lights: "Tint lights while Jarvis talks", light_entities: "Which lights", brightness: "Brightness", listening_color: "Listening colour", thinking_color: "Thinking colour", speaking_color: "Speaking colour", pause_while: "Leave the lights alone while this is on" })[x.name]}
+            .computeHelper=${(x) => ({ light_entities: "Coloured lights near the TV work best, like the Hue Play bars.", pause_while: "For example the Sync Box's light sync, which owns those lights while it runs." })[x.name]}
+            @value-changed=${(e) => (this._jarvisForm = { ...this._jarvisForm, ...e.detail.value })}
+          ></ha-form>
+          <div class="actions">
+            <button class="primary" ?disabled=${this._busy || !dirty} @click=${() => this._saveJarvis()}>${dirty ? "Save" : "Saved"}</button>
+            ${dirty ? html`<button ?disabled=${this._busy} @click=${() => (this._jarvisForm = jarvisForm(j.config))}>Undo changes</button>` : nothing}
+          </div>
+        </section>
+      </div>
+    `;
+  }
+
+  async _saveJarvis() {
+    const res = await this._try(() => this._call("jarvis_presence_save", jarvisConfig(this._jarvisForm)));
+    if (!res) return;
+    this._jarvis = { ...this._jarvis, config: res.config };
+    this._jarvisForm = jarvisForm(res.config);
+  }
+
   /* --- tuning --- */
 
   _renderTuning() {
@@ -816,6 +931,12 @@ class HubbubbCamera extends LitElement {
     .progress div { height: 100%; background: var(--primary-color); transition: width 300ms; }
     .view.small { max-width: 100%; }
 
+    .mood { display: inline-flex; align-items: center; gap: 10px; font-size: 18px; font-weight: 500; padding: 10px 16px; border-radius: 12px; background: var(--primary-background-color); }
+    .mood ha-icon { --mdc-icon-size: 28px; color: var(--secondary-text-color); }
+    .mood.listening ha-icon { color: rgb(0, 120, 255); }
+    .mood.thinking ha-icon { color: rgb(255, 150, 0); }
+    .mood.speaking ha-icon { color: rgb(0, 200, 180); }
+    .actions button ha-icon { --mdc-icon-size: 18px; vertical-align: -3px; }
     .teach { margin-bottom: 16px; }
     .teach p { margin: 0 0 12px; line-height: 1.5; }
     .items { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 16px; }

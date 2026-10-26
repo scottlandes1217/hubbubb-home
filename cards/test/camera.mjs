@@ -28,3 +28,11 @@ assert.equal(changed({ ...gestureForm(saved), repeat: false }, saved), true);
 // Every knob has a label, helper text and a slider step.
 for (const knob of KNOBS) assert.equal(knob.length, 4);
 console.log("camera ok");
+
+import { jarvisConfig, jarvisForm } from "../src/hubbubb-camera.js";
+// The flat form round-trips the stored settings, colours included.
+const stored = { move: true, satellites: ["assist_satellite.puck"], strength: 0.5, lights: true, light_entities: ["light.bar"], brightness: 70, pause_while: "switch.sync", colors: { listening: [0, 0, 255], thinking: [255, 150, 0], speaking: [0, 220, 200] } };
+assert.deepEqual(jarvisConfig(jarvisForm(stored)), stored);
+// Defaults: moving on, lights off, no colours sent until chosen.
+assert.deepEqual(jarvisConfig(jarvisForm({})), { move: true, satellites: [], strength: 0.6, lights: false, light_entities: [], brightness: 80, pause_while: null });
+console.log("jarvis form ok");
