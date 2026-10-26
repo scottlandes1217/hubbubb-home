@@ -129,6 +129,14 @@ private struct RoomMap {
         precondition(!GestureGate.isRaised(wrist: CGPoint(x: 0.5, y: 0.30), face: face, body: body, reach: 1.5), "hands on the keyboard never count")
         precondition(!GestureGate.isRaised(wrist: CGPoint(x: 0.5, y: 0.40), face: nil, body: body, reach: 1.5), "no face: lower body half never counts")
         precondition(GestureGate.isFacing(yaw: 0.1, pitch: -0.2, limit: 25), "looking at the camera")
+        // Nose centred between the eyes is facing, upright or tilted 60 degrees.
+        precondition(abs(GestureGate.turn(leftEye: CGPoint(x: 0.45, y: 0.5), rightEye: CGPoint(x: 0.55, y: 0.5), nose: CGPoint(x: 0.5, y: 0.45))) < 0.01, "facing, upright")
+        let tilt = CGVector(dx: -0.866, dy: 0.5)  // head tilted ~60 degrees
+        let le = Upright.picture(CGPoint(x: 0.45, y: 0.5), around: CGPoint(x: 0.5, y: 0.5), up: tilt)
+        let re = Upright.picture(CGPoint(x: 0.55, y: 0.5), around: CGPoint(x: 0.5, y: 0.5), up: tilt)
+        let no = Upright.picture(CGPoint(x: 0.5, y: 0.45), around: CGPoint(x: 0.5, y: 0.5), up: tilt)
+        precondition(abs(GestureGate.turn(leftEye: le, rightEye: re, nose: no)) < 0.01, "facing, head tilted on a pillow")
+        precondition(GestureGate.turn(leftEye: CGPoint(x: 0.45, y: 0.5), rightEye: CGPoint(x: 0.55, y: 0.5), nose: CGPoint(x: 0.535, y: 0.45)) > 0.25, "turned away")
         precondition(!GestureGate.isFacing(yaw: 0, pitch: -0.7, limit: 25), "looking down at a phone")
         precondition(!GestureGate.isFacing(yaw: 0.8, pitch: 0, limit: 25), "looking across at the dog")
         for mood in ["listening", "thinking", "speaking"] {
@@ -367,6 +375,19 @@ private enum GestureGate {
     static func atHead(_ points: [CGPoint], head: CGRect, share: CGFloat = 0.4) -> Bool {
         guard !points.isEmpty else { return false }
         return CGFloat(points.filter(head.contains).count) / CGFloat(points.count) >= share
+    }
+
+    /// How far a face is turned from the camera, from where the nose sits
+    /// between the eyes, measured along the eye line: 0 facing the camera,
+    /// growing toward +-0.5 as the head turns to profile. Measured along the
+    /// eyes, it reads the same with the head tilted on a pillow - unlike
+    /// Vision's yaw, which reads a tilted head as turned away.
+    static func turn(leftEye l: CGPoint, rightEye r: CGPoint, nose n: CGPoint) -> CGFloat {
+        let ex = (r.x - l.x) * 16 / 9, ey = r.y - l.y
+        let eyes = max(0.0001, hypot(ex, ey))
+        let mx = (l.x + r.x) / 2, my = (l.y + r.y) / 2
+        let nx = (n.x - mx) * 16 / 9, ny = n.y - my
+        return (nx * ex + ny * ey) / (eyes * eyes)
     }
 
     /// Whether a wrist held still: every recent position within `tolerance`
@@ -1124,6 +1145,8 @@ private struct Track {
     var headAngles: (yaw: Double, pitch: Double)?
     // Their own up (hips to neck), smoothed; the picture's up until seen.
     var up = Upright.vertical
+    // How turned from the camera, from eyes and nose (0 facing).
+    var turn: CGFloat?
     var lastSeen: Date
     var visible = true
     var name: String?
@@ -1145,6 +1168,8 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     private let animalRequest = VNRecognizeAnimalsRequest()
     // Arms: elbows tell a raised hand from one resting in a lap.
     private let bodyPoseRequest = VNDetectHumanBodyPoseRequest()
+    // Eyes and nose, for a tilt-proof "looking at the camera".
+    private let landmarksRequest = VNDetectFaceLandmarksRequest()
     private let context = CIContext(options: [.useSoftwareRenderer: false])
     private let preview: (CGImage?, String) -> Void
     private let gesture: (String, String?, Bool) -> Void
@@ -1293,9 +1318,27 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             // Which tracked faces look at the camera (yaw/pitch from the face request).
             let lookAngle = UserDefaults.standard.object(forKey: "lookAngle") as? Double ?? 25
             let faceObservations = faceRequest.results ?? []
+            // Landmarks for the faces already found (no second face search).
+            var landmarked: [VNFaceObservation] = []
+            if !faceObservations.isEmpty {
+                landmarksRequest.inputFaceObservations = faceObservations
+                try? handler.perform([landmarksRequest])
+                landmarked = landmarksRequest.results ?? []
+            }
+            // Calibration knob: how turned a face may be and still be "looking"
+            // (0 facing, ~0.5 profile).
+            let turnLimit = CGFloat(UserDefaults.standard.object(forKey: "lookTurn") as? Double ?? 0.22)
             for index in tracks.indices where tracks[index].visible {
                 let observation = faceObservations.first { $0.boundingBox == tracks[index].face }
-                tracks[index].facing = observation.map {
+                let marks = landmarked.min { a, b in
+                    guard let face = tracks[index].face else { return false }
+                    return hypot(a.boundingBox.midX - face.midX, a.boundingBox.midY - face.midY)
+                        < hypot(b.boundingBox.midX - face.midX, b.boundingBox.midY - face.midY)
+                }
+                let turn = marks.flatMap { Self.faceTurn($0) }
+                tracks[index].turn = turn
+                // Eyes and nose when seen (tilt-proof); Vision's yaw only if not.
+                tracks[index].facing = turn.map { abs($0) <= turnLimit } ?? observation.map {
                     GestureGate.isFacing(yaw: $0.yaw?.doubleValue, pitch: $0.pitch?.doubleValue, limit: lookAngle)
                 } ?? false
                 tracks[index].headAngles = observation.map {
@@ -1349,7 +1392,8 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             latestAnimals = animalNames
             latestHeads = visible.compactMap { track in
                 track.headAngles.map { ["name": track.name ?? "someone", "yaw": $0.yaw.isNaN ? NSNull() : Int($0.yaw), "pitch": $0.pitch.isNaN ? NSNull() : Int($0.pitch), "looking": track.facing,
-                                        "lean": Int(atan2(track.up.dx, track.up.dy) * 180 / .pi)] }
+                                        "lean": Int(atan2(track.up.dx, track.up.dy) * 180 / .pi),
+                                        "turn": track.turn.map { Double(Int($0 * 100)) / 100 } ?? NSNull()] }
             }
             settingsLock.unlock()
             reportPresence(names, animals: animalNames, now: now)
@@ -1776,6 +1820,19 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 }
             }
         }
+    }
+
+    /// Eye and nose centres in picture coordinates -> GestureGate.turn.
+    static func faceTurn(_ face: VNFaceObservation) -> CGFloat? {
+        func centre(_ region: VNFaceLandmarkRegion2D?) -> CGPoint? {
+            guard let points = region?.normalizedPoints, !points.isEmpty else { return nil }
+            let box = face.boundingBox
+            let x = points.map(\.x).reduce(0, +) / CGFloat(points.count), y = points.map(\.y).reduce(0, +) / CGFloat(points.count)
+            return CGPoint(x: box.minX + x * box.width, y: box.minY + y * box.height)
+        }
+        guard let marks = face.landmarks, let l = centre(marks.leftEye), let r = centre(marks.rightEye),
+              let n = centre(marks.noseCrest) ?? centre(marks.nose) else { return nil }
+        return GestureGate.turn(leftEye: l, rightEye: r, nose: n)
     }
 
     /// The camera's own view of its zoom and mode, against what we believe.
