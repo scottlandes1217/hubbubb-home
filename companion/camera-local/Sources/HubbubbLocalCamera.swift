@@ -1593,11 +1593,16 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         return stored
     }
 
-    private func saveGallery() {
+    /// -> nil when saved, else why not.
+    private func saveGallery() -> String? {
         let url = Self.galleryURL
-        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        if let data = try? NSKeyedArchiver.archivedData(withRootObject: gallery as NSDictionary, requiringSecureCoding: true) {
-            try? data.write(to: url, options: .completeFileProtection)
+        do {
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            let data = try NSKeyedArchiver.archivedData(withRootObject: gallery as NSDictionary, requiringSecureCoding: true)
+            try data.write(to: url, options: .atomic)
+            return nil
+        } catch {
+            return error.localizedDescription
         }
     }
 
@@ -1645,8 +1650,11 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         enrollName = nil
         settingsLock.unlock()
         enrollSamples = []
-        saveGallery()
+        let failure = saveGallery()
         for index in tracks.indices where tracks[index].visible { tracks[index].name = name }
+        if let failure {
+            return "Enrolled \(name) for now, but could not save it (\(failure)); it will be forgotten on restart."
+        }
         return "Enrolled \(name). The camera will recognize them from now on."
     }
 
