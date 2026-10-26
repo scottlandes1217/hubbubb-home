@@ -164,6 +164,8 @@ private struct RoomMap {
 private func hubbubbLinkCameraDiagnostics(_ zoom: UnsafeMutablePointer<Int>, _ videoMode: UnsafeMutablePointer<Int32>) -> Int32
 @_silgen_name("HubbubbLinkCameraTakeControl")
 private func hubbubbLinkCameraTakeControl() -> Int32
+@_silgen_name("HubbubbLinkCameraIdentity")
+private func hubbubbLinkCameraIdentity(_ buffer: UnsafeMutablePointer<CChar>, _ size: Int32) -> Int32
 @_silgen_name("HubbubbLinkCameraNudge")
 private func hubbubbLinkCameraNudge(_ pan: Float, _ tilt: Float) -> Int32
 
@@ -571,6 +573,11 @@ private final class CameraService {
             }
             processor.setMood(mood, strength: (body["strength"] as? NSNumber)?.doubleValue ?? 0.6)
             return ok(["ok": true])
+        case ("GET", "/identity"):
+            var buffer = [CChar](repeating: 0, count: 256)
+            guard hubbubbLinkCameraIdentity(&buffer, 256) == 1 else { return bad("camera not connected") }
+            let parts = String(cString: buffer).split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+            return ok(["serial": parts.first ?? "", "firmware": parts.count > 1 ? parts[1] : ""])
         case ("POST", "/enroll"):
             guard let processor, !name.isEmpty, name.count <= 40 else { return bad("send a name, up to 40 characters") }
             processor.beginEnrollment(name: name)

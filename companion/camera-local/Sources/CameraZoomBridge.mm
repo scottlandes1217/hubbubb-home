@@ -134,6 +134,18 @@ extern "C" int HubbubbLinkCameraTakeControl() {
     return changed;
 }
 
+// Read-only identity: serial number and firmware, as "serial|firmware".
+extern "C" int HubbubbLinkCameraIdentity(char *buffer, int size) {
+    std::lock_guard<std::mutex> lock(cameraMutex);
+    if (!cameraExtendController || !buffer || size <= 0) return 0;
+    std::string serial;
+    DeviceInfo info{};
+    cameraExtendController->GetSerialNumber(serial);
+    cameraExtendController->GetDeviceInfo(info);
+    snprintf(buffer, size, "%s|%s", serial.c_str(), info.hostFirmwareVer.c_str());
+    return 1;
+}
+
 extern "C" int HubbubbLinkCameraZoomSet(long value) {
     std::lock_guard<std::mutex> lock(cameraMutex);
     if (!cameraController) return 0;
