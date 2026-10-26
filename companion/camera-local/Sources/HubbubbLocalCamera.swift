@@ -168,6 +168,13 @@ private struct RoomMap {
         let beside = atMouth.enumerated().map { $0.offset < 2 ? $0.element : CGPoint(x: 0.6, y: 0.55) }
         precondition(GestureGate.atHead(atMouth, head: mouth), "a hand at the mouth is at the head")
         precondition(!GestureGate.atHead(beside, head: mouth), "a fingertip grazing it is not")
+        // Elbows: a forearm up is raised; a hand in the lap is not, even when
+        // the camera's angle puts it close to the face in the picture.
+        let arm = [(wrist: CGPoint(x: 0.6, y: 0.4), elbow: CGPoint(x: 0.62, y: 0.3))]
+        precondition(GestureGate.elbow(for: CGPoint(x: 0.61, y: 0.41), arms: arm) != nil, "finds the arm for a hand")
+        precondition(GestureGate.isRaised(wrist: CGPoint(x: 0.6, y: 0.4), elbow: CGPoint(x: 0.62, y: 0.3)), "wrist above elbow: raised")
+        precondition(!GestureGate.isRaised(wrist: CGPoint(x: 0.55, y: 0.45), elbow: CGPoint(x: 0.5, y: 0.47)), "wrist level with or below the elbow: resting")
+        precondition(GestureGate.elbow(for: CGPoint(x: 0.2, y: 0.2), arms: arm) == nil, "a far-off arm is someone else's")
         let head = GestureGate.head(face, hair: 0.9, chin: 0.25)
         precondition(head.contains(CGPoint(x: 0.49, y: 0.58)), "a fork at the mouth, just under the chin, is in the head zone")
         precondition(!head.contains(CGPoint(x: 0.6, y: 0.50)), "a thumbs up beside the chest is not")
@@ -242,6 +249,21 @@ private enum GestureGate {
     static func isRaised(wrist: CGPoint, face: CGRect?, body: CGRect, reach: CGFloat) -> Bool {
         if let face { return wrist.y >= face.minY - face.height * reach }
         return wrist.y >= body.midY
+    }
+
+    /// The better test, when the arm is seen: a gesture lifts the forearm, so
+    /// the wrist sits above its elbow. Hands in a lap, on a keyboard or on the
+    /// dog rest at or below the elbow - however close to the face the camera's
+    /// downward angle makes them look. `margin` is in frame heights.
+    static func isRaised(wrist: CGPoint, elbow: CGPoint, margin: CGFloat = 0.01) -> Bool {
+        wrist.y > elbow.y + margin
+    }
+
+    /// The elbow for a hand: the body-pose wrist nearest the hand's wrist (if
+    /// it is near), and that same arm's elbow.
+    static func elbow(for wrist: CGPoint, arms: [(wrist: CGPoint, elbow: CGPoint)], near: CGFloat = 0.06) -> CGPoint? {
+        arms.map { ($0, hypot($0.wrist.x - wrist.x, $0.wrist.y - wrist.y)) }
+            .filter { $0.1 < near }.min { $0.1 < $1.1 }?.0.elbow
     }
 
     /// The head, where a hand means eating or a scratch, not a gesture: the face
@@ -555,7 +577,7 @@ private final class CameraService {
     // Each is read where it is used, from these same defaults.
     private static let knobs: [String: (range: ClosedRange<Double>, value: Double)] = [
         "followGain": (0.1...1.0, 0.45),
-        "gestureReach": (0.5...3.0, 1.5),
+        "gestureReach": (0.5...3.0, 1.0),
         "hairReach": (0...2, 0.9),
         "chinReach": (0...1.5, 0.25),
         "steadiness": (0.1...1.0, 0.35),
@@ -1033,6 +1055,8 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     private let faceRequest = VNDetectFaceRectanglesRequest()
     private let humanRequest = VNDetectHumanRectanglesRequest()
     private let animalRequest = VNRecognizeAnimalsRequest()
+    // Arms: elbows tell a raised hand from one resting in a lap.
+    private let bodyPoseRequest = VNDetectHumanBodyPoseRequest()
     private let context = CIContext(options: [.useSoftwareRenderer: false])
     private let preview: (CGImage?, String) -> Void
     private let gesture: (String, String?, Bool) -> Void
@@ -1150,7 +1174,15 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         do {
             let handler = VNImageRequestHandler(cvPixelBuffer: pixelBuffer, orientation: .up)
             handRequest.regionOfInterest = CGRect(x: 0, y: 0, width: 1, height: 1)
-            try handler.perform([faceRequest, humanRequest, animalRequest, handRequest])
+            try handler.perform([faceRequest, humanRequest, animalRequest, handRequest, bodyPoseRequest])
+            let arms: [(wrist: CGPoint, elbow: CGPoint)] = (bodyPoseRequest.results ?? []).flatMap { body in
+                [(VNHumanBodyPoseObservation.JointName.leftWrist, VNHumanBodyPoseObservation.JointName.leftElbow),
+                 (.rightWrist, .rightElbow)].compactMap { wristJoint, elbowJoint in
+                    guard let w = try? body.recognizedPoint(wristJoint), let e = try? body.recognizedPoint(elbowJoint),
+                          w.confidence > 0.2, e.confidence > 0.2 else { return nil }
+                    return (w.location, e.location)
+                }
+            }
             let animals = (animalRequest.results ?? []).filter { $0.confidence > 0.5 }
             let now = Date()
             updateTracks(
@@ -1221,7 +1253,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             // Calibration knob: how far below the chin a gesturing wrist may be,
             // in face heights. Lower if typing still triggers; higher if a
             // relaxed thumbs-up at the chest is missed.
-            let reach = CGFloat(UserDefaults.standard.object(forKey: "gestureReach") as? Double ?? 1.5)
+            let reach = CGFloat(UserDefaults.standard.object(forKey: "gestureReach") as? Double ?? 1.0)
             var messages: [String] = []
             var fired: [(gesture: String, person: String?, held: Bool)] = []
             var raisedHands = 0
@@ -1233,6 +1265,9 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 let track = tracks[index]
                 var raised = (handsByTrack[track.id] ?? []).filter { hand in
                     guard let wrist = try? hand.recognizedPoint(.wrist), wrist.confidence > 0.1 else { return false }
+                    if let elbow = GestureGate.elbow(for: wrist.location, arms: arms) {
+                        return GestureGate.isRaised(wrist: wrist.location, elbow: elbow)
+                    }
                     return GestureGate.isRaised(wrist: wrist.location, face: track.face, body: track.body, reach: reach)
                 }
                 if requireLooking && !track.facing && !raised.isEmpty {
