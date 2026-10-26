@@ -13,7 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from collections.abc import Callable
 from urllib.parse import urlsplit
 
@@ -111,6 +111,29 @@ def scene_to_restore(scenes: list[tuple], groups: set[str], lights_changed: date
     if lights_changed is None or when >= lights_changed - timedelta(seconds=15):
         return entity_id
     return None
+
+
+def reapply(entity_id: str, state: str, attributes: dict) -> tuple[str, dict]:
+    """The light service call that puts a light back to a recorded state."""
+    if state != "on":
+        return "turn_off", {"entity_id": entity_id}
+    data: dict = {"entity_id": entity_id, "transition": 1}
+    if attributes.get("brightness") is not None:
+        data["brightness"] = attributes["brightness"]
+    mode = attributes.get("color_mode")
+    if mode == "color_temp" and attributes.get("color_temp_kelvin"):
+        data["color_temp_kelvin"] = attributes["color_temp_kelvin"]
+    elif attributes.get("xy_color"):
+        data["xy_color"] = attributes["xy_color"]
+    elif attributes.get("rgb_color"):
+        data["rgb_color"] = attributes["rgb_color"]
+    return "turn_on", data
+
+
+def is_tint(attributes: dict, rgb: list | None) -> bool:
+    """Whether a light shows the colour this feature last set (its own echo)."""
+    shown = attributes.get("rgb_color")
+    return bool(rgb and shown) and all(abs(a - b) <= 40 for a, b in zip(shown, rgb))
 
 
 def mood_for(states: list[str]) -> str:
@@ -338,6 +361,13 @@ class JarvisPresence:
         # What to put back: a scene to re-activate, else the colour snapshot.
         self._scene: str | None = None
         self._restored_at = 0.0
+        # During a conversation: when it began, our own calls (by context), and
+        # anything else that changed the lights - a command to them wins.
+        self._started: datetime | None = None
+        self._ours: set[str] = set()
+        self._tint: list | None = None
+        self._foreign: dict = {}
+        self._watch_lights: Callable[[], None] | None = None
 
     @property
     def satellites(self) -> list[str]:
@@ -392,19 +422,55 @@ class JarvisPresence:
             return
         self._snapshot = False
         self._restored_at = time.monotonic()
-        # A scene comes back as a scene (an animated one starts animating
-        # again); otherwise the colours exactly as they were.
-        target = self._scene or f"scene.{SNAPSHOT_SCENE}"
-        self.hass.async_create_background_task(
-            self.hass.services.async_call("scene", "turn_on", {"entity_id": target, "transition": 1}),
-            f"{DOMAIN} jarvis lights restore",
-        )
+        if self._watch_lights:
+            self._watch_lights()
+            self._watch_lights = None
+        entities = self.link.jarvis.get("light_entities") or []
+        # What the person asked for during the conversation beats what was
+        # there before: a scene they started (Natural light), else the state a
+        # command set. Otherwise the scene they were in, else the colours.
+        asked = self._active_scene(entities, since=self._started) if self._started else None
+        if asked:
+            calls = [("scene", "turn_on", {"entity_id": asked, "transition": 1})]
+        elif self._foreign:
+            calls = [("light", *reapply(e, st.state, dict(st.attributes))) for e, st in self._foreign.items()]
+        else:
+            calls = [("scene", "turn_on", {"entity_id": self._scene or f"scene.{SNAPSHOT_SCENE}", "transition": 1})]
 
-    def _active_scene(self, entities: list[str]) -> str | None:
-        """Which scene the lights are in now, from the scenes Home Assistant knows."""
+        async def _run() -> None:
+            for domain, service, data in calls:
+                await self.hass.services.async_call(domain, service, data, context=self._context())
+
+        self.hass.async_create_background_task(_run(), f"{DOMAIN} jarvis lights restore")
+
+    def _context(self) -> Context:
+        """A context for our own light calls, remembered so their echoes are ours."""
+        context = Context()
+        self._ours.add(context.id)
+        if len(self._ours) > 200:
+            self._ours = set(list(self._ours)[-100:])
+        return context
+
+    @callback
+    def _lights_changed(self, event) -> None:
+        """A light we tint changed. Ours, or someone's command?"""
+        new = event.data.get("new_state")
+        context = event.context
+        if new is None or context.id in self._ours or context.parent_id in self._ours:
+            return
+        if is_tint(dict(new.attributes), self._tint):
+            return  # a late echo of our own colour
+        self._foreign[new.entity_id] = new
+
+    def _active_scene(self, entities: list[str], since: datetime | None = None) -> str | None:
+        """Which scene the lights are in now, from the scenes Home Assistant knows.
+
+        With `since`, only a scene started after then (or one that says it is
+        active) - what someone asked for during the conversation.
+        """
         states = self.hass.states
         lights = [states.get(e) for e in entities]
-        changed = max((l.last_changed for l in lights if l), default=None)
+        changed = since or max((l.last_changed for l in lights if l), default=None)
         # Hue rooms and zones containing any of these lights, by name - the
         # same name a Hue scene gives as its group_name.
         groups = {
@@ -448,19 +514,27 @@ class JarvisPresence:
             if time.monotonic() - self._restored_at > 15:
                 self._scene = self._active_scene(entities)
                 await self.hass.services.async_call(
-                    "scene", "create", {"scene_id": SNAPSHOT_SCENE, "snapshot_entities": entities}, blocking=True
+                    "scene", "create", {"scene_id": SNAPSHOT_SCENE, "snapshot_entities": entities},
+                    blocking=True, context=self._context(),
                 )
             self._snapshot = True
+            self._started = datetime.now(UTC)
+            self._foreign = {}
+            self._watch_lights = async_track_state_change_event(self.hass, entities, self._lights_changed)
+        if self._foreign:
+            return  # they changed these lights mid-conversation; leave them be
+        self._tint = (config.get("colors") or MOOD_COLORS).get(mood, MOOD_COLORS[mood])
         await self.hass.services.async_call(
             "light",
             "turn_on",
             {
                 "entity_id": entities,
-                "rgb_color": (config.get("colors") or MOOD_COLORS).get(mood, MOOD_COLORS[mood]),
+                "rgb_color": self._tint,
                 "brightness_pct": config.get("brightness", 80),
                 "transition": 0.4,
             },
             blocking=False,
+            context=self._context(),
         )
 
 

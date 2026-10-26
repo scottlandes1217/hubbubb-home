@@ -68,7 +68,8 @@ _stub(
 )
 _stub(
     "homeassistant.core",
-    Context=object,
+    Context=type("Context", (), {"__init__": lambda self, parent_id=None: (
+        setattr(self, "id", f"ctx{id(self)}"), setattr(self, "parent_id", parent_id))[0]}),
     Event=object,
     HomeAssistant=object,
     CALLBACK_TYPE=object,
@@ -515,7 +516,7 @@ def test_jarvis_lights_survive_a_follow_up_question():
     calls, timers = [], []
 
     class Services:
-        async def async_call(self, domain, service, data, blocking=False):
+        async def async_call(self, domain, service, data, blocking=False, context=None):
             calls.append(f"{domain}.{service}")
 
     class Hass:
@@ -530,6 +531,7 @@ def test_jarvis_lights_survive_a_follow_up_question():
         return lambda: timers.remove(action)
 
     eyes.async_call_later = call_later
+    eyes.async_track_state_change_event = lambda *a: (lambda: None)
     link = types.SimpleNamespace(jarvis={"move": False, "lights": True, "light_entities": ["light.bar"]})
     presence = eyes.JarvisPresence(Hass(), link)
 
@@ -567,6 +569,56 @@ def test_jarvis_puts_back_the_scene_the_lights_were_in():
     natural = scenes[:3] + [("scene.all_natural_light", "All", None, True)]
     assert eyes.scene_to_restore(natural, groups, t + timedelta(minutes=10)) == "scene.all_natural_light"
     assert eyes.scene_to_restore([], groups, t) is None
+
+
+def test_a_light_command_during_the_conversation_wins():
+    """'Set my lights to natural' mid-conversation: no tint over it, and no
+    restoring the old colour afterwards."""
+    import asyncio
+
+    calls, timers = [], []
+
+    class Services:
+        async def async_call(self, domain, service, data, blocking=False, context=None):
+            calls.append((f"{domain}.{service}", data))
+
+    class Hass:
+        services = Services()
+        states = types.SimpleNamespace(is_state=lambda *a: False, get=lambda e: None, async_all=lambda d: [])
+
+        def async_create_background_task(self, coro, name):
+            return asyncio.ensure_future(coro)
+
+    def call_later(hass, delay, action):
+        timers.append(action)
+        return lambda: timers.remove(action)
+
+    eyes.async_call_later = call_later
+    eyes.async_track_state_change_event = lambda *a: (lambda: None)
+    link = types.SimpleNamespace(jarvis={"move": False, "lights": True, "light_entities": ["light.bar"]})
+    presence = eyes.JarvisPresence(Hass(), link)
+    natural = types.SimpleNamespace(entity_id="light.bar", state="on",
+                                    attributes={"color_mode": "color_temp", "color_temp_kelvin": 4000, "brightness": 200, "rgb_color": [255, 210, 170]})
+
+    async def run():
+        await presence.async_apply("listening")
+        await presence.async_apply("thinking")
+        # Jarvis runs the command: the bar changes under someone else's context.
+        presence._lights_changed(types.SimpleNamespace(data={"new_state": natural}, context=eyes.Context()))
+        # Our own echo (our context) never counts as theirs.
+        mine = presence._context()
+        presence._lights_changed(types.SimpleNamespace(data={"new_state": natural}, context=mine))
+        tints_before = sum(1 for c, _ in calls if c == "light.turn_on")
+        await presence.async_apply("speaking")
+        assert sum(1 for c, _ in calls if c == "light.turn_on") == tints_before, "no tint over their command"
+        await presence.async_apply("idle")
+        [t for t in timers if getattr(t, "__name__", "") == "_restore"][0]()
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+    last, data = calls[-1]
+    assert last == "light.turn_on" and data["color_temp_kelvin"] == 4000, calls[-1]  # what they asked for
+    assert not any(c == "scene.turn_on" for c, _ in calls), "never back to the old snapshot"
 
 
 def test_speaker_prompt_line_three_cases():
