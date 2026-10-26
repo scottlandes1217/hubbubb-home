@@ -1226,6 +1226,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     private var latestNames: [String] = []
     private var latestAnimals: [String] = []
     private var latestHeads: [[String: Any]] = []
+    private var latestHandNotes: [[String: Any]] = []
     private var followPausedUntil = Date.distantPast
     private var nobodyInView = true  // under settingsLock; read by the mood engine
     // Vision thread only: no re-framing until then (a hand is raised to gesture).
@@ -1431,8 +1432,13 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             let hands = handRequest.results ?? []
             var handsByTrack: [Int: [VNHumanHandPoseObservation]] = [:]
             // A hand nobody in view owns can't be judged raised or not, so it never gestures.
+            var unowned: [CGPoint] = []
             for hand in hands {
-                if let owner = owner(of: hand) { handsByTrack[owner, default: []].append(hand) }
+                if let owner = owner(of: hand) {
+                    handsByTrack[owner, default: []].append(hand)
+                } else if let w = try? hand.recognizedPoint(.wrist) {
+                    unowned.append(w.location)
+                }
             }
             // Calibration knob: how far below the chin a gesturing wrist may be,
             // in face heights. Lower if typing still triggers; higher if a
@@ -1441,6 +1447,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             var messages: [String] = []
             var fired: [(gesture: String, person: String?, held: Bool)] = []
             var raisedHands = 0
+            var handNotes: [[String: Any]] = []  // why each hand was or wasn't raised
             var lookingAway = 0
             // A deliberate gesture comes with a look at the camera; scrolling a
             // phone or petting the dog does not. Switchable in Home Assistant.
@@ -1461,9 +1468,15 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                     // Lifted against gravity or toward their head: reclining, people
                     // hold a hand straight up; lying flat, toward the head works too.
                     if let elbow = GestureGate.elbow(for: wrist.location, arms: arms) {
-                        return GestureGate.isRaised(wrist: wrist.location, elbow: elbow)
+                        let ok = GestureGate.isRaised(wrist: wrist.location, elbow: elbow)
                             || GestureGate.isRaised(wrist: wrist.location, elbow: elbow, up: track.up)
+                        handNotes.append(["wrist": [Double(wrist.location.x), Double(wrist.location.y)].map { Double(Int($0 * 100)) / 100 },
+                                          "elbow": [Double(elbow.x), Double(elbow.y)].map { Double(Int($0 * 100)) / 100 },
+                                          "by": "elbow", "raised": ok])
+                        return ok
                     }
+                    handNotes.append(["wrist": [Double(wrist.location.x), Double(wrist.location.y)].map { Double(Int($0 * 100)) / 100 },
+                                      "by": track.face == nil ? "body" : "face", "arms_seen": arms.count])
                     if let face = track.face {
                         let c = CGPoint(x: face.midX, y: face.midY)
                         return GestureGate.isRaised(wrist: wrist.location, face: face, body: track.body, reach: reach)
@@ -1493,7 +1506,16 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 }
             }
 
-            if raisedHands > 0 { framingHoldUntil = now.addingTimeInterval(1.2) }
+            // Any hand up near someone holds the shot - not only one that already
+            // passed every check: zooming while a hand is lifted moves it in the
+            // picture and the gesture never completes.
+            if raisedHands > 0 || handNotes.contains(where: { $0["raised"] as? Bool == true }) || lookingAway > 0 {
+                framingHoldUntil = now.addingTimeInterval(1.5)
+            }
+            handNotes += unowned.map { ["wrist": [Double($0.x), Double($0.y)].map { Double(Int($0 * 100)) / 100 }, "by": "nobody's"] }
+            settingsLock.lock()
+            latestHandNotes = handNotes
+            settingsLock.unlock()
             let people = visible.map { $0.name ?? "someone" }
             let holdingSomething = visible.contains { track in
                 let w = (handsByTrack[track.id] ?? []).compactMap { try? $0.recognizedPoint(.wrist) }.filter { $0.confidence > 0.1 }.map(\.location)
@@ -1579,7 +1601,11 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         // Someone is making a gesture: hold the shot still. Zooming or turning
         // under a held hand makes it look like it moved, and raising an arm
         // reshapes the body box the framing follows.
-        if now < framingHoldUntil { return }
+        if now < framingHoldUntil {
+            // Holding still for a gesture, unless they are about to leave the frame.
+            if abs(aim.midX - 0.5) > 0.32 || abs(aim.midY - 0.5) > 0.32 { adjustGimbal(forFace: aim) }
+            return
+        }
         settingsLock.lock()
         let current = currentZoomFactor
         settingsLock.unlock()
@@ -1610,7 +1636,14 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             let reach = track.body.insetBy(dx: -track.body.width * 0.5, dy: -track.body.height * 0.2)
             let dx = max(reach.minX - point.x, 0, point.x - reach.maxX)
             let dy = max(reach.minY - point.y, 0, point.y - reach.maxY)
-            return (track.id, hypot(dx, dy))
+            var gap = hypot(dx, dy)
+            // Lying back, an arm stretched up and out leaves the body box; within
+            // arm's reach of the face (~5 face heights) it is still theirs.
+            if let face = track.face {
+                let fromFace = hypot((point.x - face.midX) * 16 / 9, point.y - face.midY)
+                if fromFace < face.height * 5 { gap = 0 }
+            }
+            return (track.id, gap)
         }
         guard let best = scored.min(by: { $0.1 < $1.1 }), best.1 < 0.15 else { return nil }
         return best.0
@@ -1665,7 +1698,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         let steady = votes.wrists.count >= 3 && GestureGate.isSteady(votes.wrists, tolerance: tolerance) && fingersStill
         fingersUnclear = false
         let rawGesture = steady ? primaryHand.flatMap { classifyGesture($0) } : nil
-        if steady, rawGesture == nil, let hand = primaryHand { recordUnrecognized(hand) }
+        if steady, let hand = primaryHand { recordUnrecognized(hand, result: rawGesture) }
         // Calibration knob: seconds a gesture must be held (about 10 analysed
         // frames a second). A pose a hand only passes through never gets there.
         let holdSeconds = UserDefaults.standard.object(forKey: "holdSeconds") as? Double ?? 0.6
@@ -1711,7 +1744,9 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             votes.lastVolumeRepeat = Date()
             return ("\(gestureTitle(detectedGesture)) recognized. Running its assigned action.", (detectedGesture, false))
         }
-        if votes.latched == detectedGesture, rawGesture == detectedGesture,
+        // Held: keep repeating while the hand stays up and isn't clearly a
+        // different gesture - one unclear frame must not skip a volume step.
+        if votes.latched == detectedGesture, rawGesture == nil || rawGesture == detectedGesture, primaryHand != nil,
            Date().timeIntervalSince(votes.lastVolumeRepeat) > volumeRepeatInterval {
             // Still held: report it again, so a "repeat while held" action (volume)
             // keeps stepping. Home Assistant ignores it for one-shot actions.
@@ -2249,7 +2284,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     func inView() -> [String: Any] {
         settingsLock.lock()
         defer { settingsLock.unlock() }
-        return ["people": latestNames, "animals": latestAnimals, "heads": latestHeads]
+        return ["people": latestNames, "animals": latestAnimals, "heads": latestHeads, "hands": latestHandNotes]
     }
 
     /// Answer a question about the room from the camera, panning to search when
@@ -2481,7 +2516,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     /// A raised, still hand that matched no gesture: keep its joints and the
     /// rule numbers (at most two a second) in ~/Library/Logs/Hubbubb Local
     /// Camera hands.jsonl, to tune the rules against real hands. Local only.
-    private func recordUnrecognized(_ hand: VNHumanHandPoseObservation) {
+    private func recordUnrecognized(_ hand: VNHumanHandPoseObservation, result: String? = nil) {
         let now = Date()
         guard now.timeIntervalSince(lastHandRecord) > 0.5,
               let all = try? hand.recognizedPoints(.all) else { return }
@@ -2493,7 +2528,8 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             points[Self.jointNames[name] ?? name] = point.location
             joints[Self.jointNames[name] ?? name] = [Double(point.location.x), Double(point.location.y), Double(point.confidence)]
         }
-        let line: [String: Any] = ["ts": now.timeIntervalSince1970, "joints": joints, "measures": HandShape.measures(points)]
+        let line: [String: Any] = ["ts": now.timeIntervalSince1970, "joints": joints, "measures": HandShape.measures(points),
+                                   "result": result ?? NSNull()]
         guard let data = try? JSONSerialization.data(withJSONObject: line) else { return }
         logQueue.async {
             let url = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]

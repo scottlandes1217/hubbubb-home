@@ -310,6 +310,7 @@ class CameraLink:
     async def async_run(self) -> None:
         """Follow the Mac's event feed for as long as the entry is loaded."""
         seq = 0
+        failures = 0
         while True:
             try:
                 if not self.connected:
@@ -317,11 +318,17 @@ class CameraLink:
                     self.connected = True
                     self._changed()
                 feed = await self.async_request("GET", f"events?after={seq}", timeout=40)
-            except HomeAssistantError:
-                if self.connected:
+                failures = 0
+            except HomeAssistantError as err:
+                failures += 1
+                _LOGGER.debug("camera feed dropped (%s), attempt %d", err.__cause__ or err, failures)
+                # Straight back: a dropped long poll is routine, and every second
+                # waiting is a held thumbs-up that steps the volume late, all at
+                # once. Only a camera that stays away gets the slow retry.
+                if failures >= 3 and self.connected:
                     self.connected = False
                     self._changed()
-                await asyncio.sleep(10)
+                await asyncio.sleep(0.2 if failures < 3 else 10)
                 continue
             seq = int(feed.get("seq") or 0)
             for event in feed.get("events") or []:
