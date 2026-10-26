@@ -520,7 +520,7 @@ def test_jarvis_lights_survive_a_follow_up_question():
 
     class Hass:
         services = Services()
-        states = types.SimpleNamespace(is_state=lambda *a: False)
+        states = types.SimpleNamespace(is_state=lambda *a: False, get=lambda e: None, async_all=lambda d: [])
 
         def async_create_background_task(self, coro, name):
             return asyncio.ensure_future(coro)
@@ -545,6 +545,28 @@ def test_jarvis_lights_survive_a_follow_up_question():
     assert calls.count("scene.create") == 1, calls  # saved once, before any colour
     assert calls[-1] == "scene.turn_on", calls  # and put back once, at the end
     assert calls.count("scene.turn_on") == 1, calls
+
+
+def test_jarvis_puts_back_the_scene_the_lights_were_in():
+    from datetime import datetime, timedelta, timezone
+
+    t = datetime(2026, 10, 26, 20, 0, tzinfo=timezone.utc)
+    scenes = [
+        ("scene.all_movie", "All", t - timedelta(hours=3), None),
+        ("scene.all_bright", "All", t, None),
+        ("scene.outside_bright", "Outside", t + timedelta(minutes=5), None),  # not their group
+        ("scene.all_natural_light", "All", None, False),
+        ("scene.mine", None, t, None),  # a snapshot, no group
+    ]
+    groups = {"All", "Home", "Living room"}
+    # The latest scene of their groups, when it is what last changed them.
+    assert eyes.scene_to_restore(scenes, groups, t + timedelta(seconds=2)) == "scene.all_bright"
+    # Changed by hand since: no scene, use the colour snapshot.
+    assert eyes.scene_to_restore(scenes, groups, t + timedelta(minutes=10)) is None
+    # An active smart scene (Natural light) wins outright.
+    natural = scenes[:3] + [("scene.all_natural_light", "All", None, True)]
+    assert eyes.scene_to_restore(natural, groups, t + timedelta(minutes=10)) == "scene.all_natural_light"
+    assert eyes.scene_to_restore([], groups, t) is None
 
 
 def test_speaker_prompt_line_three_cases():

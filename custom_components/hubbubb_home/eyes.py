@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from datetime import datetime, timedelta
 from collections.abc import Callable
 from urllib.parse import urlsplit
 
@@ -88,6 +90,27 @@ JARVIS_SCHEMA = vol.Schema(
         },
     }
 )
+
+
+def scene_to_restore(scenes: list[tuple], groups: set[str], lights_changed: datetime | None) -> str | None:
+    """The scene the lights are in, if one is: re-activating it beats a colour snapshot.
+
+    scenes: (entity_id, group_name, last activated or None, is_active or None).
+    A smart scene that says it is active wins; otherwise the latest-activated
+    scene of a group the lights belong to, if that activation is what last
+    changed them (later changes mean someone has moved on from it).
+    """
+    mine = [s for s in scenes if s[1] in groups]
+    for entity_id, _group, _when, active in mine:
+        if active:
+            return entity_id
+    dated = [(when, entity_id) for entity_id, _g, when, _a in mine if when]
+    if not dated:
+        return None
+    when, entity_id = max(dated)
+    if lights_changed is None or when >= lights_changed - timedelta(seconds=15):
+        return entity_id
+    return None
 
 
 def mood_for(states: list[str]) -> str:
@@ -312,6 +335,9 @@ class JarvisPresence:
         # again for a follow-up; and one mood change at a time.
         self._pending_restore: Callable[[], None] | None = None
         self._lock = asyncio.Lock()
+        # What to put back: a scene to re-activate, else the colour snapshot.
+        self._scene: str | None = None
+        self._restored_at = 0.0
 
     @property
     def satellites(self) -> list[str]:
@@ -365,10 +391,36 @@ class JarvisPresence:
         if self.mood != "idle" or not self._snapshot:
             return
         self._snapshot = False
+        self._restored_at = time.monotonic()
+        # A scene comes back as a scene (an animated one starts animating
+        # again); otherwise the colours exactly as they were.
+        target = self._scene or f"scene.{SNAPSHOT_SCENE}"
         self.hass.async_create_background_task(
-            self.hass.services.async_call("scene", "turn_on", {"entity_id": f"scene.{SNAPSHOT_SCENE}", "transition": 1}),
+            self.hass.services.async_call("scene", "turn_on", {"entity_id": target, "transition": 1}),
             f"{DOMAIN} jarvis lights restore",
         )
+
+    def _active_scene(self, entities: list[str]) -> str | None:
+        """Which scene the lights are in now, from the scenes Home Assistant knows."""
+        states = self.hass.states
+        lights = [states.get(e) for e in entities]
+        changed = max((l.last_changed for l in lights if l), default=None)
+        # Hue rooms and zones containing any of these lights, by name - the
+        # same name a Hue scene gives as its group_name.
+        groups = {
+            g.name for g in states.async_all("light")
+            if g.attributes.get("is_hue_group") and set(g.attributes.get("entity_id") or []) & set(entities)
+        }
+        scenes = []
+        for st in states.async_all("scene"):
+            when = None
+            if st.state not in ("unknown", "unavailable", ""):
+                try:
+                    when = datetime.fromisoformat(st.state)
+                except ValueError:
+                    pass
+            scenes.append((st.entity_id, st.attributes.get("group_name"), when, st.attributes.get("is_active")))
+        return scene_to_restore(scenes, groups, changed)
 
     @callback
     def _reset(self, _now=None) -> None:
@@ -391,9 +443,13 @@ class JarvisPresence:
         if pause and self.hass.states.is_state(pause, "on"):
             return
         if not self._snapshot:
-            await self.hass.services.async_call(
-                "scene", "create", {"scene_id": SNAPSHOT_SCENE, "snapshot_entities": entities}, blocking=True
-            )
+            # Back within 15 s of putting them back: they may still be fading
+            # from Jarvis's colour, so keep what was saved rather than save that.
+            if time.monotonic() - self._restored_at > 15:
+                self._scene = self._active_scene(entities)
+                await self.hass.services.async_call(
+                    "scene", "create", {"scene_id": SNAPSHOT_SCENE, "snapshot_entities": entities}, blocking=True
+                )
             self._snapshot = True
         await self.hass.services.async_call(
             "light",
