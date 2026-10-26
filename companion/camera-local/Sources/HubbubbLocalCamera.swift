@@ -154,6 +154,15 @@ private struct RoomMap {
             precondition(HandShape.classify(HandShape.sample("open", scale: scale)) == "open_palm", "open palm at hand size \(scale)")
             precondition(HandShape.classify(HandShape.sample("fist", scale: scale)) == nil, "a fist is no gesture at \(scale)")
         }
+        // Taught samples: a thumbs-up taught at one size and place matches at
+        // another, and from the other hand; a fist matches nothing.
+        var taught = GestureTemplates()
+        taught.samples["thumbs_up"] = [HandVector.make(HandShape.sample("thumbs_up", scale: 0.05))!]
+        taught.samples["open_palm"] = [HandVector.make(HandShape.sample("open", scale: 0.05))!]
+        precondition(taught.match(HandShape.sample("thumbs_up", scale: 0.12, at: CGPoint(x: 0.3, y: 0.4)), within: 0.35) == "thumbs_up", "taught thumbs up, any size")
+        let left = HandShape.sample("thumbs_up", scale: 0.05).mapValues { CGPoint(x: 1.2 - $0.x, y: $0.y) }
+        precondition(taught.match(left, within: 0.35) == "thumbs_up", "taught right hand, shown with the left")
+        precondition(taught.match(HandShape.sample("fist", scale: 0.05), within: 0.2) == nil, "a fist is not a taught gesture")
         let mouth = CGRect(x: 0.4, y: 0.5, width: 0.1, height: 0.2)
         let atMouth = (0..<10).map { CGPoint(x: 0.42 + CGFloat($0) * 0.005, y: 0.52 + CGFloat($0) * 0.01) }
         let beside = atMouth.enumerated().map { $0.offset < 2 ? $0.element : CGPoint(x: 0.6, y: 0.55) }
@@ -311,10 +320,11 @@ private enum HandShape {
         let size = max(palmWidth, d("wrist", "middleMCP"))
         let fingers = [("indexTip", "indexPIP", "indexMCP"), ("middleTip", "middlePIP", "middleMCP"),
                        ("ringTip", "ringPIP", "ringMCP"), ("littleTip", "littlePIP", "littleMCP")]
-        let curled = fingers.filter { d($0.0, $0.2) < d($0.1, $0.2) * 1.35 }.count
+        // Tuned on real hands (hands.jsonl): side-on, curled fingers measure up
+        // to ~1.6 knuckle-to-tip lengths; straight ones 1.8-2.6, pointing any way.
+        let curled = fingers.filter { d($0.0, $0.2) < d($0.1, $0.2) * 1.6 }.count
         let extended = fingers.filter { f in
-            guard let tip = p[f.0], let pip = p[f.1] else { return false }
-            return d(f.0, f.2) > d(f.1, f.2) * 1.35 && tip.y > pip.y + size * 0.03
+            d(f.0, f.2) > d(f.1, f.2) * 1.7 && d(f.0, "wrist") > d(f.1, "wrist")
         }.count
         switch extended {
         case 1: return "number_1"
@@ -330,9 +340,10 @@ private enum HandShape {
         // Thumbs-down only needs the thumb angled downward (x scaled for 16:9).
         let dx = (thumbTip.x - thumbMP.x) * 16 / 9, dy = thumbTip.y - thumbMP.y
         let thumbLowered = dy / max(0.0001, hypot(dx, dy)) < -0.2
-        if thumbRaised && curled >= 3 && thumbToPalm > palmWidth * 0.78 && thumbToBase > palmWidth * 0.52 { return "thumbs_up" }
+        if thumbRaised && curled >= 3 && thumbToBase > palmWidth * 0.35 { return "thumbs_up" }
         if thumbLowered && curled >= 3 && thumbToPalm > palmWidth * 0.55 && thumbToBase > palmWidth * 0.35 { return "thumbs_down" }
-        if extended == 4 && thumbToPalm > palmWidth * 0.78 && d("indexTip", "littleTip") > palmWidth * 0.95 { return "open_palm" }
+        // A relaxed open hand keeps its thumb at about half a palm out.
+        if extended == 4 && thumbToPalm > palmWidth * 0.3 { return "open_palm" }
         return nil
     }
 
@@ -369,7 +380,9 @@ private enum HandShape {
             p[name + "PIP"] = pt(x, 1.4)
             // Curled fingers fold back toward the knuckle; extended ones reach up.
             p[name + "Tip"] = pose == "open" ? pt(x * 1.3, 2.0) : pt(x, 1.1)
+            p[name + "DIP"] = pose == "open" ? pt(x * 1.15, 1.7) : pt(x, 1.35)
         }
+        p["thumbCMC"] = pt(-0.3, 0.4)
         switch pose {
         case "thumbs_up":
             p["thumbMP"] = pt(-0.5, 0.9); p["thumbIP"] = pt(-0.55, 1.3); p["thumbTip"] = pt(-0.55, 1.7)
@@ -379,6 +392,75 @@ private enum HandShape {
             p["thumbMP"] = pt(-0.45, 0.7); p["thumbIP"] = pt(-0.35, 0.85); p["thumbTip"] = pt(-0.2, 0.9)
         }
         return p
+    }
+}
+
+/// A hand as numbers for matching against taught samples: every joint relative
+/// to the wrist, in hand sizes (x scaled for 16:9), so the same pose matches
+/// at any zoom, distance or place in the frame. Mirrored, a left hand matches
+/// a right hand's samples.
+private enum HandVector {
+    static let order = [
+        "wrist", "thumbCMC", "thumbMP", "thumbIP", "thumbTip",
+        "indexMCP", "indexPIP", "indexDIP", "indexTip", "middleMCP", "middlePIP", "middleDIP", "middleTip",
+        "ringMCP", "ringPIP", "ringDIP", "ringTip", "littleMCP", "littlePIP", "littleDIP", "littleTip",
+    ]
+
+    static func make(_ p: [String: CGPoint], mirrored: Bool = false) -> [Double]? {
+        guard let w = p["wrist"], order.filter({ p[$0] != nil }).count >= 18 else { return nil }
+        func rel(_ q: CGPoint) -> (Double, Double) { (Double((q.x - w.x) * 16 / 9), Double(q.y - w.y)) }
+        let size = ["indexMCP", "middleMCP", "ringMCP", "littleMCP"].compactMap { p[$0] }
+            .map { let r = rel($0); return hypot(r.0, r.1) }.max() ?? 0
+        guard size > 0.001 else { return nil }
+        return order.flatMap { name -> [Double] in
+            guard let q = p[name] else { return [0, 0] }  // missing: at the wrist
+            let r = rel(q)
+            return [r.0 / size * (mirrored ? -1 : 1), r.1 / size]
+        }
+    }
+
+    /// How different two hands are, in hand sizes: the average of the four
+    /// joints that differ most. Averaging every joint would let a fist pass
+    /// for a thumbs-up - they differ only in the thumb.
+    static func distance(_ a: [Double], _ b: [Double]) -> Double {
+        guard a.count == b.count, !a.isEmpty else { return .infinity }
+        let gaps = stride(from: 0, to: a.count, by: 2).map { hypot(a[$0] - b[$0], a[$0 + 1] - b[$0 + 1]) }
+        return gaps.sorted(by: >).prefix(4).reduce(0, +) / 4
+    }
+}
+
+/// The gestures someone has taught the camera: their own hand, ~25 samples a
+/// gesture. Matching against these beats any hand-written rule.
+private struct GestureTemplates {
+    var samples: [String: [[Double]]] = [:]
+
+    static var url: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Hubbubb Local Camera/gestures.json")
+    }
+
+    static func load() -> GestureTemplates {
+        let data = try? Data(contentsOf: url)
+        return GestureTemplates(samples: data.flatMap { try? JSONDecoder().decode([String: [[Double]]].self, from: $0) } ?? [:])
+    }
+
+    func save() throws {
+        try FileManager.default.createDirectory(at: Self.url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONEncoder().encode(samples).write(to: Self.url, options: .atomic)
+    }
+
+    /// The taught gesture nearest this hand (either hand), if it is near
+    /// enough and clearly nearer than the next-best gesture.
+    func match(_ p: [String: CGPoint], within limit: Double) -> String? {
+        let hands = [HandVector.make(p), HandVector.make(p, mirrored: true)].compactMap { $0 }
+        guard !hands.isEmpty else { return nil }
+        let ranked = samples.compactMap { gesture, taught -> (String, Double)? in
+            let best = taught.flatMap { t in hands.map { HandVector.distance($0, t) } }.min()
+            return best.map { (gesture, $0) }
+        }.sorted { $0.1 < $1.1 }
+        guard let first = ranked.first, first.1 < limit else { return nil }
+        if ranked.count > 1, ranked[1].1 < first.1 * 1.15 { return nil }  // too close to call
+        return first.0
     }
 }
 
@@ -484,6 +566,7 @@ private final class CameraService {
         "handConfidence": (0.1...0.8, 0.25),
         "lookAngle": (10...60, 25),
         "framingFill": (0.4...1.0, 0.7),
+        "gestureMatch": (0.15...0.7, 0.35),
     ]
     private var follow: Bool {
         get { UserDefaults.standard.object(forKey: "localAIFollowingEnabled") as? Bool ?? true }
@@ -626,6 +709,7 @@ private final class CameraService {
             state["enrolling"] = processor.enrolling() ?? NSNull()
             state["room"] = processor.roomSpan()
             state["mood"] = processor.mood
+            state["gestures"] = processor.gestureTraining()
             state["hardware"] = processor.hardware()
         }
         return state
@@ -682,6 +766,15 @@ private final class CameraService {
             guard hubbubbLinkCameraIdentity(&buffer, 256) == 1 else { return bad("camera not connected") }
             let parts = String(cString: buffer).split(separator: "|", omittingEmptySubsequences: false).map(String.init)
             return ok(["serial": parts.first ?? "", "firmware": parts.count > 1 ? parts[1] : ""])
+        case ("POST", "/gesture_teach"):
+            guard let processor, let gesture = body["gesture"] as? String,
+                  ["thumbs_up", "thumbs_down", "open_palm", "number_1", "number_2", "number_3"].contains(gesture) else {
+                return bad("unknown gesture")
+            }
+            processor.beginTeaching(gesture)
+            return ok(["ok": true])
+        case ("POST", "/gesture_forget"):
+            return ok(["ok": processor?.forgetTeaching(body["gesture"] as? String ?? "") ?? false])
         case ("POST", "/enroll"):
             guard let processor, !name.isEmpty, name.count <= 40 else { return bad("send a name, up to 40 characters") }
             processor.beginEnrollment(name: name)
@@ -1147,6 +1240,11 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                     raised = []
                 }
                 raisedHands += raised.count
+                // Teaching: sample the raised hand instead of acting on it.
+                if let hand = raised.max(by: { $0.confidence < $1.confidence }), let line = teach(hand) {
+                    messages.append(line)
+                    continue
+                }
                 let result = updateGestures(&tracks[index].votes, hands: raised, face: track.face)
                 if let message = result.message {
                     messages.append(tracks[index].name.map { "\($0): \(message)" } ?? message)
@@ -2127,6 +2225,11 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         }
     }
     private var lastHandRecord = Date.distantPast
+    // Taught gestures, and a teaching in progress (under settingsLock).
+    private var templates = GestureTemplates.load()
+    private var teaching: String?
+    private var teachSamples: [[Double]] = []
+    private let teachTarget = 25
     // Vision's joint keys -> the names HandShape uses.
     private static let jointNames: [String: String] = [
         "VNHLKWRI": "wrist", "VNHLKTTIP": "thumbTip", "VNHLKTIP": "thumbIP", "VNHLKTMP": "thumbMP", "VNHLKTCMC": "thumbCMC",
@@ -2170,7 +2273,73 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         for (joint, name) in joints {
             if let found = point(joint), found.confidence > 0.1 { points[name] = found.location }
         }
-        return HandShape.classify(points)
+        // Taught samples first; the rules only speak for gestures nobody taught.
+        let limit = UserDefaults.standard.object(forKey: "gestureMatch") as? Double ?? 0.35
+        if let taught = templates.match(points, within: limit) { return taught }
+        let ruled = HandShape.classify(points)
+        return ruled.flatMap { templates.samples[$0] == nil ? $0 : nil }
+    }
+
+    // MARK: - Teaching gestures
+
+    /// Start collecting samples of `gesture` from the next raised hand.
+    func beginTeaching(_ gesture: String) {
+        settingsLock.lock()
+        teaching = gesture
+        teachSamples = []
+        settingsLock.unlock()
+    }
+
+    func forgetTeaching(_ gesture: String) -> Bool {
+        settingsLock.lock()
+        let removed = templates.samples.removeValue(forKey: gesture) != nil
+        let snapshot = templates
+        settingsLock.unlock()
+        if removed { try? snapshot.save() }
+        return removed
+    }
+
+    /// Taught gestures and their sample counts, and any teaching in progress.
+    func gestureTraining() -> [String: Any] {
+        settingsLock.lock()
+        defer { settingsLock.unlock() }
+        return [
+            "taught": templates.samples.mapValues(\.count),
+            "teaching": teaching.map { ["gesture": $0, "samples": teachSamples.count, "target": teachTarget] } ?? NSNull(),
+        ]
+    }
+
+    /// One raised hand while teaching: keep a sample. -> a status line.
+    private func teach(_ hand: VNHumanHandPoseObservation) -> String? {
+        settingsLock.lock()
+        let gesture = teaching
+        settingsLock.unlock()
+        guard let gesture else { return nil }
+        var points: [String: CGPoint] = [:]
+        if let all = try? hand.recognizedPoints(.all) {
+            for (joint, point) in all where point.confidence > 0.1 {
+                points[Self.jointNames[joint.rawValue.rawValue] ?? joint.rawValue.rawValue] = point.location
+            }
+        }
+        guard let vector = HandVector.make(points) else { return "Teaching \(gestureTitle(gesture)): show your whole hand to the camera." }
+        settingsLock.lock()
+        teachSamples.append(vector)
+        let count = teachSamples.count
+        var done = false
+        if count >= teachTarget {
+            templates.samples[gesture] = teachSamples
+            teaching = nil
+            teachSamples = []
+            done = true
+        }
+        let snapshot = templates
+        settingsLock.unlock()
+        if done {
+            try? snapshot.save()
+            note("Hubbubb camera: taught %@ (%d samples)", gesture, count)
+            return "Learned \(gestureTitle(gesture)). It will be recognized from your own hand now."
+        }
+        return "Teaching \(gestureTitle(gesture)): \(count)/\(teachTarget). Keep holding it, move it a little."
     }
 }
 
