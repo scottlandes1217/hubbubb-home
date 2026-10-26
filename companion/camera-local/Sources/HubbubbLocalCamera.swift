@@ -1515,7 +1515,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         let primaryHand = hands.max { $0.confidence < $1.confidence }
         if let face, let primaryHand, handOverlapsFace(primaryHand, faceBounds: face) {
             votes = GestureVotes(lastVolumeRepeat: votes.lastVolumeRepeat)
-            return ("Gesture paused while a hand is touching a face. Move it away to resume.", nil)
+            return ("Gesture paused while a hand is touching a face or hair. Move it away to resume.", nil)
         }
         if hands.count >= 2 && hands.filter(isOpenPalmPose).count >= 2 {
             votes.twoPalmHold += 1
@@ -1749,9 +1749,18 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             return point.location
         }
         guard !points.isEmpty else { return false }
-        // Pause only when a confidently tracked hand joint enters the detected
-        // face itself. A padded zone around the face incorrectly blocked nearby gestures.
-        return points.contains(where: faceBounds.contains)
+        // Pause when a confidently tracked hand joint enters the head: the face
+        // box plus the hair above it and a sliver either side. Padding all round
+        // blocked gestures held beside the face, so the reach is mostly upward.
+        // Calibration knob: `hairReach`, in face heights above the face box.
+        let reach = CGFloat(UserDefaults.standard.object(forKey: "hairReach") as? Double ?? 0.9)
+        let head = CGRect(
+            x: faceBounds.minX - faceBounds.width * 0.15,
+            y: faceBounds.minY,
+            width: faceBounds.width * 1.3,
+            height: faceBounds.height * (1 + reach)
+        )
+        return points.contains(where: head.contains)
     }
 
     private func applyHardwareZoom(_ factor: CGFloat) {
