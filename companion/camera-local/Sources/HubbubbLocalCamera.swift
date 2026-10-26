@@ -110,11 +110,21 @@ private struct RoomMap {
         for mood in ["listening", "thinking", "speaking"] {
             for step in 0..<200 {
                 let o = Mood.offset(mood, t: Double(step) * 0.05, strength: 1)
-                precondition(abs(o.pan) <= 4.01 && abs(o.tilt) <= 3.01, "\(mood) stays within a few degrees")
+                precondition(abs(o.pan) <= 12.01 && abs(o.tilt) <= 8.01, "\(mood) stays within a few degrees")
             }
         }
         precondition(Mood.offset("speaking", t: 1, strength: 0) == (0, 0), "strength 0 is still")
         precondition(Mood.offset("idle", t: 1, strength: 1) == (0, 0), "idle is still")
+        // Sitting at 1x: upper body 0.35 tall, face 0.08 - zoom in to fill 70%.
+        let seated = Framing.zoom(current: 1, face: CGRect(x: 0.46, y: 0.6, width: 0.06, height: 0.08), body: CGRect(x: 0.4, y: 0.3, width: 0.2, height: 0.35), fill: 0.7)
+        precondition(abs(seated - 2) < 0.01, "seated zooms to fit the upper body (\(seated))")
+        // Standing close at 2x: upper body already 0.9 tall - zoom out, not in.
+        let standing = Framing.zoom(current: 2, face: CGRect(x: 0.45, y: 0.6, width: 0.1, height: 0.15), body: CGRect(x: 0.3, y: 0.05, width: 0.4, height: 0.9), fill: 0.7)
+        precondition(standing < 2, "standing up close zooms out (\(standing))")
+        // Whatever the body, the face never ends up taller than a quarter of the frame.
+        let faceOnly = Framing.zoom(current: 1, face: CGRect(x: 0.45, y: 0.5, width: 0.08, height: 0.1), body: nil, fill: 0.7)
+        precondition(0.1 * faceOnly <= 0.25, "face-only framing stays loose (\(faceOnly))")
+        precondition(Framing.aim(face: CGRect(x: 0.4, y: 0.6, width: 0.1, height: 0.1), body: .zero).y < 0.5, "aim below the face, so it sits high")
         let head = GestureGate.head(face, hair: 0.9, chin: 0.6)
         precondition(head.contains(CGPoint(x: 0.49, y: 0.56)), "a fork at the mouth, under the chin, is in the head zone")
         precondition(!head.contains(CGPoint(x: 0.6, y: 0.50)), "a thumbs up beside the chest is not")
@@ -222,19 +232,40 @@ private enum Mood {
         case "listening":
             // Perk up: a quick lift that settles, like raising its head.
             let lift = t < 0.25 ? t / 0.25 : max(0.4, 1 - (t - 0.25) / 0.8)
-            return (0, Float(3 * s * lift))
+            return (0, Float(8 * s * lift))
         case "thinking":
             // A slow glance up and to one side and back, every 3 s.
             let phase = sin(t.truncatingRemainder(dividingBy: 3) / 3 * 2 * .pi)
-            return (Float(4 * s * max(0, phase)), Float(2 * s * max(0, phase)))
+            return (Float(12 * s * max(0, phase)), Float(5 * s * max(0, phase)))
         case "speaking":
             // Nods with speech-like cadence: two mixed rhythms, never repeating exactly.
             let nod = 0.65 * sin(t * 2 * .pi / 0.9) + 0.35 * sin(t * 2 * .pi / 0.37 + 1.3)
             let sway = sin(t * 2 * .pi / 4.1)
-            return (Float(1.2 * s * sway), Float(2 * s * nod))
+            return (Float(3 * s * sway), Float(6 * s * nod))
         default:
             return (0, 0)
         }
+    }
+}
+
+/// How to frame one person, kept pure so `--self-test` can check it.
+private enum Framing {
+    /// The zoom that frames them: the upper body fills `fill` of the frame's
+    /// height, but the face never more than `maxFace` - so standing up close
+    /// stays a half-body shot instead of a face filling the screen. No real
+    /// body box (only a face seen) frames by the face alone.
+    static func zoom(current: CGFloat, face: CGRect?, body: CGRect?, fill: CGFloat, maxFace: CGFloat = 0.25) -> CGFloat {
+        var target: CGFloat = 4
+        if let body { target = min(target, current * fill / max(body.height, 0.01)) }
+        if let face { target = min(target, current * (body == nil ? maxFace * 0.8 : maxFace) / max(face.height, 0.01)) }
+        return min(4, max(1, target))
+    }
+
+    /// Where to centre the camera: on the face across, and low enough that the
+    /// face sits a third from the top rather than dead centre.
+    static func aim(face: CGRect?, body: CGRect) -> CGPoint {
+        guard let face else { return CGPoint(x: body.midX, y: body.maxY - body.height * 0.3) }
+        return CGPoint(x: face.midX, y: face.midY - 0.17)
     }
 }
 
@@ -307,6 +338,7 @@ private final class CameraService {
         "holdSeconds": (0.3...2.0, 0.8),
         "handConfidence": (0.1...0.8, 0.35),
         "lookAngle": (10...60, 25),
+        "framingFill": (0.4...1.0, 0.7),
     ]
     private var follow: Bool {
         get { UserDefaults.standard.object(forKey: "localAIFollowingEnabled") as? Bool ?? true }
@@ -440,6 +472,7 @@ private final class CameraService {
             state["enrolled"] = processor.enrolled()
             state["enrolling"] = processor.enrolling() ?? NSNull()
             state["room"] = processor.roomSpan()
+            state["mood"] = processor.mood
         }
         return state
     }
@@ -725,6 +758,8 @@ private struct Track {
     var face: CGRect?
     // Face turned toward the camera this frame: gestures need eye contact.
     var facing = false
+    // The body box came from Vision's body detector, not guessed from a face.
+    var bodySeen = true
     var lastSeen: Date
     var visible = true
     var name: String?
@@ -972,12 +1007,12 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             faces.contains { body.contains(center($0)) }
                 || !animals.contains { $0.intersection(body).area > body.area * 0.5 }
         }
-        var people: [(body: CGRect, face: CGRect?)] = bodies.map { body in
-            (body, faces.filter { body.contains(center($0)) }.max { $0.area < $1.area })
+        var people: [(body: CGRect, face: CGRect?, seen: Bool)] = bodies.map { body in
+            (body, faces.filter { body.contains(center($0)) }.max { $0.area < $1.area }, true)
         }
         // A face with no body box (close to the lens, body cut off) is a person too.
         for face in faces where !people.contains(where: { $0.face == face }) {
-            people.append((face.insetBy(dx: -face.width * 0.5, dy: 0).union(face.offsetBy(dx: 0, dy: -face.height * 2)), face))
+            people.append((face.insetBy(dx: -face.width * 0.5, dy: 0).union(face.offsetBy(dx: 0, dy: -face.height * 2)), face, false))
         }
 
         var matched = Set<Int>()
@@ -988,10 +1023,11 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             if let best, hypot(center(tracks[best].body).x - center(person.body).x, center(tracks[best].body).y - center(person.body).y) < 0.25 {
                 tracks[best].body = person.body
                 tracks[best].face = person.face
+                tracks[best].bodySeen = person.seen
                 tracks[best].lastSeen = now
                 matched.insert(best)
             } else {
-                tracks.append(Track(id: nextTrackID, body: person.body, face: person.face, lastSeen: now))
+                tracks.append(Track(id: nextTrackID, body: person.body, face: person.face, bodySeen: person.seen, lastSeen: now))
                 nextTrackID += 1
                 matched.insert(tracks.count - 1)
             }
@@ -1015,13 +1051,24 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 self.roomMap.save()
             }
         }
-        if visible.count == 1, let face = visible[0].face {
-            adjustHardwareZoom(forFace: face)
-        } else if visible.count > 1 {
-            // Fit everyone: the group's bodies should span about 80% of the frame.
-            let group = visible.map(\.body).reduce(visible[0].body) { $0.union($1) }
-            adjustHardwareZoom(toFit: group)
+        settingsLock.lock()
+        let current = currentZoomFactor
+        settingsLock.unlock()
+        if visible.count == 1 {
+            // One person: a half-body shot, face a third from the top - the
+            // same framing seated or standing. Calibration knob: `framingFill`.
+            let person = visible[0]
+            let fill = CGFloat(UserDefaults.standard.object(forKey: "framingFill") as? Double ?? 0.7)
+            let point = Framing.aim(face: person.face, body: person.body)
+            if person.face != nil || person.bodySeen {
+                easeZoom(to: Framing.zoom(current: current, face: person.face, body: person.bodySeen ? person.body : nil, fill: fill), centeredOn: point)
+            }
+            adjustGimbal(forFace: CGRect(origin: point, size: .zero))
+            return
         }
+        // Fit everyone: the group's bodies should span about 80% of the frame.
+        let group = visible.map(\.body).reduce(visible[0].body) { $0.union($1) }
+        easeZoom(to: min(4, max(1, current * 0.8 / max(group.width, group.height, 0.01))), centeredOn: CGPoint(x: group.midX, y: group.midY))
         adjustGimbal(forFace: aim)
     }
 
@@ -1232,6 +1279,8 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         }
     }
 
+    var mood: String { moodQueue.sync { currentMood } }
+
     private func moodTick() {
         guard let base = moodBase else { return }
         if Date().timeIntervalSince(moodRefreshed) > 60 { return stopMood() }
@@ -1422,17 +1471,9 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         }
     }
 
-    private func adjustHardwareZoom(forFace face: CGRect) {
-        zoomToward(face, size: face.height, goal: 0.40)
-    }
-
-    private func adjustHardwareZoom(toFit group: CGRect) {
-        zoomToward(group, size: max(group.width, group.height), goal: 0.80)
-    }
-
-    /// Ease the lens so `size` (a fraction of the frame) approaches `goal`.
-    private func zoomToward(_ box: CGRect, size: CGFloat, goal: CGFloat) {
-        guard zoomRange != nil, size > 0.04 else { return }
+    /// Ease the lens toward `target`, a little each update.
+    private func easeZoom(to target: CGFloat, centeredOn point: CGPoint) {
+        guard zoomRange != nil else { return }
         let now = Date()
         guard now.timeIntervalSince(lastAutoZoomUpdate) > 0.20 else { return }
         lastAutoZoomUpdate = now
@@ -1441,9 +1482,8 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         let current = currentZoomFactor
         settingsLock.unlock()
         guard enabled else { return }
-        // Let the gimbal center an off-axis subject before tightening the view.
-        guard abs(box.midX - 0.5) < 0.10, abs(box.midY - 0.5) < 0.12 else { return }
-        let target = min(4, max(1, current * (goal / size)))
+        // Zooming out is always safe; zoom in only once the gimbal has them centred.
+        guard target < current || (abs(point.x - 0.5) < 0.10 && abs(point.y - 0.5) < 0.12) else { return }
         let smoothed = current + (target - current) * 0.12
         guard abs(smoothed - current) > 0.04 else { return }
         applyHardwareZoom(smoothed)

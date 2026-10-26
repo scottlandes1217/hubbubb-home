@@ -23,6 +23,7 @@ const TABS = [
 
 /* What each knob means, in the words a person would use. */
 export const KNOBS = [
+  ["framingFill", "Framing", "How much of the frame one person's upper body fills when auto-zoom is on. Lower shows more of the room; the face never fills more than a quarter.", 0.05],
   ["holdSeconds", "Hold time", "Seconds a gesture must be held before it counts. Longer means fewer accidents.", 0.1],
   ["handConfidence", "Hand clarity", "How clearly every finger must be seen. Higher ignores hands holding a phone or petting the dog.", 0.05],
   ["lookAngle", "Looking-at-camera angle", "How far your head may turn from the camera (degrees) and still count as looking at it.", 1],
