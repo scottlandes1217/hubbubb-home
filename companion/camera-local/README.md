@@ -70,6 +70,10 @@ This is a capture and local-inference prototype, not yet a virtual webcam.
   (1.5) face heights below the chin, or in the top half of the body box when
   no face is visible. Hands on a keyboard or in a lap are ignored, as are
   hands not attached to anyone in view.
+- Any hand at the head (face box plus `hairReach` 0.9 face heights above and
+  `chinReach` 0.6 below, for the mouth) pauses that person's gestures for
+  2 s, so eating keeps them off. A gesture also needs the wrist held still
+  (`steadiness`, 0.35 face heights) for several frames.
 - **Enroll a person…** stores ~20 face feature prints in
   `~/Library/Application Support/Hubbubb Local Camera/faces.archive`. The
   preview labels each face with its nearest match and distance; tune with

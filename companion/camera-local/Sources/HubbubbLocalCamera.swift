@@ -104,6 +104,13 @@ private struct RoomMap {
         precondition(GestureGate.isRaised(wrist: CGPoint(x: 0.6, y: 0.50), face: face, body: body, reach: 1.5), "thumbs up at chest counts")
         precondition(!GestureGate.isRaised(wrist: CGPoint(x: 0.5, y: 0.30), face: face, body: body, reach: 1.5), "hands on the keyboard never count")
         precondition(!GestureGate.isRaised(wrist: CGPoint(x: 0.5, y: 0.40), face: nil, body: body, reach: 1.5), "no face: lower body half never counts")
+        let head = GestureGate.head(face, hair: 0.9, chin: 0.6)
+        precondition(head.contains(CGPoint(x: 0.49, y: 0.56)), "a fork at the mouth, under the chin, is in the head zone")
+        precondition(!head.contains(CGPoint(x: 0.6, y: 0.50)), "a thumbs up beside the chest is not")
+        let held = (0..<5).map { CGPoint(x: 0.6 + CGFloat($0) * 0.002, y: 0.5) }
+        let eating = [CGPoint(x: 0.5, y: 0.3), CGPoint(x: 0.5, y: 0.45), CGPoint(x: 0.5, y: 0.55), CGPoint(x: 0.5, y: 0.4)]
+        precondition(GestureGate.isSteady(held, tolerance: 0.02), "a held pose is steady")
+        precondition(!GestureGate.isSteady(eating, tolerance: 0.02), "hand-to-mouth is not")
         print("RoomMap self-test passed")
     }
 }
@@ -165,6 +172,24 @@ private enum GestureGate {
     static func isRaised(wrist: CGPoint, face: CGRect?, body: CGRect, reach: CGFloat) -> Bool {
         if let face { return wrist.y >= face.minY - face.height * reach }
         return wrist.y >= body.midY
+    }
+
+    /// The head, where a hand means eating or a scratch, not a gesture: the face
+    /// box, `hair` face heights above it, `chin` below it (the mouth and a fork
+    /// on its way there), and a sliver either side. Padding wide to the sides
+    /// blocked gestures held beside the face, so the reach is up and down.
+    static func head(_ face: CGRect, hair: CGFloat, chin: CGFloat) -> CGRect {
+        CGRect(x: face.minX - face.width * 0.15, y: face.minY - face.height * chin,
+               width: face.width * 1.3, height: face.height * (1 + hair + chin))
+    }
+
+    /// Whether a wrist held still: every recent position within `tolerance`
+    /// of their average. Hand-to-mouth eating never settles; a held pose does.
+    static func isSteady(_ points: [CGPoint], tolerance: CGFloat) -> Bool {
+        guard !points.isEmpty else { return false }
+        let mean = CGPoint(x: points.map(\.x).reduce(0, +) / CGFloat(points.count),
+                           y: points.map(\.y).reduce(0, +) / CGFloat(points.count))
+        return points.allSatisfy { hypot($0.x - mean.x, $0.y - mean.y) <= tolerance }
     }
 }
 
@@ -1199,6 +1224,10 @@ private struct GestureVotes {
     var latched: String?
     var missed = 0
     var lastVolumeRepeat = Date.distantPast
+    // Off until then: a hand was just at the head (eating, a scratch).
+    var pausedUntil = Date.distantPast
+    // The gesturing wrist's recent positions; a gesture has to be held still.
+    var wrists: [CGPoint] = []
 }
 
 /// A person followed across frames: matched frame to frame by position, so
@@ -1501,11 +1530,24 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     ) -> (message: String?, fired: String?) {
         // Vision may return a weak duplicate/false hand: use its strongest.
         let primaryHand = hands.max { $0.confidence < $1.confidence }
-        if let face, let primaryHand, handOverlapsFace(primaryHand, faceBounds: face) {
-            votes = GestureVotes(lastVolumeRepeat: votes.lastVolumeRepeat)
-            return ("Gesture paused while a hand is touching a face or hair. Move it away to resume.", nil)
+        let now = Date()
+        // Any hand at the head - eating, a scratch, hair - turns gestures off
+        // for two seconds; a meal keeps renewing that, so it stays off.
+        if let face, hands.contains(where: { handOverlapsFace($0, faceBounds: face) }) {
+            votes = GestureVotes(lastVolumeRepeat: votes.lastVolumeRepeat, pausedUntil: now.addingTimeInterval(2))
+            return ("Gestures paused: a hand is at a face, mouth or hair.", nil)
         }
-        let rawGesture = primaryHand.flatMap { classifyGesture($0) }
+        if now < votes.pausedUntil {
+            return ("Gestures paused for a moment: a hand was just at a face (eating?).", nil)
+        }
+        // Held still or it doesn't count. Tolerance scales with the face, so it
+        // means the same up close and across the room.
+        let wrist = primaryHand.flatMap { try? $0.recognizedPoint(.wrist) }.flatMap { $0.confidence > 0.1 ? $0.location : nil }
+        if let wrist { votes.wrists.append(wrist) } else { votes.wrists.removeAll() }
+        if votes.wrists.count > 5 { votes.wrists.removeFirst() }
+        let tolerance = (face?.height ?? 0.1) * CGFloat(UserDefaults.standard.object(forKey: "steadiness") as? Double ?? 0.35)
+        let steady = votes.wrists.count >= 3 && GestureGate.isSteady(votes.wrists, tolerance: tolerance)
+        let rawGesture = steady ? primaryHand.flatMap { classifyGesture($0) } : nil
         votes.recent.append(rawGesture)
         if votes.recent.count > 8 { votes.recent.removeFirst() }
         // Vote across recent frames so a weak duplicate hand or one noisy
@@ -1719,16 +1761,13 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             return point.location
         }
         guard !points.isEmpty else { return false }
-        // Pause when a confidently tracked hand joint enters the head: the face
-        // box plus the hair above it and a sliver either side. Padding all round
-        // blocked gestures held beside the face, so the reach is mostly upward.
-        // Calibration knob: `hairReach`, in face heights above the face box.
-        let reach = CGFloat(UserDefaults.standard.object(forKey: "hairReach") as? Double ?? 0.9)
-        let head = CGRect(
-            x: faceBounds.minX - faceBounds.width * 0.15,
-            y: faceBounds.minY,
-            width: faceBounds.width * 1.3,
-            height: faceBounds.height * (1 + reach)
+        // Calibration knobs, in face heights: `hairReach` above the face box,
+        // `chinReach` below it.
+        let defaults = UserDefaults.standard
+        let head = GestureGate.head(
+            faceBounds,
+            hair: CGFloat(defaults.object(forKey: "hairReach") as? Double ?? 0.9),
+            chin: CGFloat(defaults.object(forKey: "chinReach") as? Double ?? 0.6)
         )
         return points.contains(where: head.contains)
     }
