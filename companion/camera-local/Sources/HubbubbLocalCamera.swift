@@ -186,10 +186,9 @@ private struct RoomMap {
         precondition(Upright.point(Upright.picture(CGPoint(x: 0.3, y: 0.7), around: CGPoint(x: 0.5, y: 0.5), up: lying),
                                    around: CGPoint(x: 0.5, y: 0.5), up: lying).x.distance(to: 0.3).magnitude < 0.0001, "frames round-trip")
         let wristLying = CGPoint(x: 0.6, y: 0.5)
-        let thumbsUpLying = HandShape.sample("thumbs_up", scale: 0.05, at: wristLying)
-            .mapValues { Upright.picture($0, around: wristLying, up: lying) }
-        let upright = thumbsUpLying.mapValues { Upright.point($0, around: wristLying, up: lying) }
-        precondition(HandShape.classify(upright) == "thumbs_up", "a thumbs-up lying down reads as one")
+        // Lying down, a thumb pointed at the ceiling is still a thumbs-up: shapes
+        // use the room's up, so the same hand reads the same.
+        precondition(HandShape.classify(HandShape.sample("thumbs_up", scale: 0.05, at: wristLying)) == "thumbs_up", "thumbs up, any posture")
         precondition(GestureGate.isRaised(wrist: CGPoint(x: 0.44, y: 0.51), elbow: CGPoint(x: 0.5, y: 0.5), up: lying), "forearm up toward the head, lying down")
         precondition(!GestureGate.isRaised(wrist: CGPoint(x: 0.5, y: 0.6), elbow: CGPoint(x: 0.5, y: 0.5), up: lying), "an arm resting along the couch is not raised")
         // Reclining, the arm held straight up: raised by the room's up, even if
@@ -1397,7 +1396,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 }
                 raisedHands += raised.count
                 // Teaching: sample the raised hand instead of acting on it.
-                if let hand = raised.max(by: { $0.confidence < $1.confidence }), let line = teach(hand, up: track.up) {
+                if let hand = raised.max(by: { $0.confidence < $1.confidence }), let line = teach(hand) {
                     messages.append(line)
                     continue
                 }
@@ -1558,7 +1557,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         let tolerance = (face?.height ?? 0.1) * CGFloat(UserDefaults.standard.object(forKey: "steadiness") as? Double ?? 0.35)
         let steady = votes.wrists.count >= 3 && GestureGate.isSteady(votes.wrists, tolerance: tolerance)
         fingersUnclear = false
-        let rawGesture = steady ? primaryHand.flatMap { classifyGesture($0, up: up) } : nil
+        let rawGesture = steady ? primaryHand.flatMap { classifyGesture($0) } : nil
         if steady, rawGesture == nil, let hand = primaryHand { recordUnrecognized(hand) }
         // Calibration knob: seconds a gesture must be held (about 10 analysed
         // frames a second). A pose a hand only passes through never gets there.
@@ -2403,7 +2402,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         "VNHLKPTIP": "littleTip", "VNHLKPDIP": "littleDIP", "VNHLKPPIP": "littlePIP", "VNHLKPMCP": "littleMCP",
     ]
 
-    private func classifyGesture(_ observation: VNHumanHandPoseObservation, up: CGVector = Upright.vertical) -> String? {
+    private func classifyGesture(_ observation: VNHumanHandPoseObservation) -> String? {
         func point(_ joint: VNHumanHandPoseObservation.JointName) -> VNRecognizedPoint? {
             try? observation.recognizedPoint(joint)
         }
@@ -2437,11 +2436,8 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         for (joint, name) in joints {
             if let found = point(joint), found.confidence > 0.1 { points[name] = found.location }
         }
-        // Judge the hand as if the person were upright, and also as the room
-        // sees it: lying back, a thumbs-up may point at the ceiling or the head.
-        let picture = points
-        if let wrist = points["wrist"] { points = points.mapValues { Upright.point($0, around: wrist, up: up) } }
-        if abs(up.dx) > 0.2, let found = shape(points) ?? shape(picture) { return found }
+        // Shapes are judged by the room's up, whatever the body is doing: lying
+        // down, people still point a thumb at the ceiling or the floor.
         return shape(points)
     }
 
@@ -2483,7 +2479,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     }
 
     /// One raised hand while teaching: keep a sample. -> a status line.
-    private func teach(_ hand: VNHumanHandPoseObservation, up: CGVector = Upright.vertical) -> String? {
+    private func teach(_ hand: VNHumanHandPoseObservation) -> String? {
         settingsLock.lock()
         let gesture = teaching
         settingsLock.unlock()
@@ -2494,7 +2490,6 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 points[Self.jointNames[joint.rawValue.rawValue] ?? joint.rawValue.rawValue] = point.location
             }
         }
-        if let wrist = points["wrist"] { points = points.mapValues { Upright.point($0, around: wrist, up: up) } }
         guard let vector = HandVector.make(points) else { return "Teaching \(gestureTitle(gesture)): show your whole hand to the camera." }
         settingsLock.lock()
         teachSamples.append(vector)
