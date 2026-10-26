@@ -74,6 +74,10 @@ This is a capture and local-inference prototype, not yet a virtual webcam.
   `chinReach` 0.6 below, for the mouth) pauses that person's gestures for
   2 s, so eating keeps them off. A gesture also needs the wrist held still
   (`steadiness`, 0.35 face heights) for several frames.
+- Deliberate gestures only: the person must face the camera (`requireLooking`,
+  head within `lookAngle` 25° per Vision's yaw/pitch), every finger joint must
+  be clearly seen (`handConfidence` 0.35), and the pose held `holdSeconds`
+  (0.8). All are adjustable in the Home Assistant Camera panel's Tuning tab.
 - **Enroll a person…** stores ~20 face feature prints in
   `~/Library/Application Support/Hubbubb Local Camera/faces.archive`. The
   preview labels each face with its nearest match and distance; tune with

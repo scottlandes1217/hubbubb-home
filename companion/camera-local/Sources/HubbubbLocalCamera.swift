@@ -104,6 +104,9 @@ private struct RoomMap {
         precondition(GestureGate.isRaised(wrist: CGPoint(x: 0.6, y: 0.50), face: face, body: body, reach: 1.5), "thumbs up at chest counts")
         precondition(!GestureGate.isRaised(wrist: CGPoint(x: 0.5, y: 0.30), face: face, body: body, reach: 1.5), "hands on the keyboard never count")
         precondition(!GestureGate.isRaised(wrist: CGPoint(x: 0.5, y: 0.40), face: nil, body: body, reach: 1.5), "no face: lower body half never counts")
+        precondition(GestureGate.isFacing(yaw: 0.1, pitch: -0.2, limit: 25), "looking at the camera")
+        precondition(!GestureGate.isFacing(yaw: 0, pitch: -0.7, limit: 25), "looking down at a phone")
+        precondition(!GestureGate.isFacing(yaw: 0.8, pitch: 0, limit: 25), "looking across at the dog")
         let head = GestureGate.head(face, hair: 0.9, chin: 0.6)
         precondition(head.contains(CGPoint(x: 0.49, y: 0.56)), "a fork at the mouth, under the chin, is in the head zone")
         precondition(!head.contains(CGPoint(x: 0.6, y: 0.50)), "a thumbs up beside the chest is not")
@@ -183,6 +186,14 @@ private enum GestureGate {
                width: face.width * 1.3, height: face.height * (1 + hair + chin))
     }
 
+    /// Whether a face is turned toward the camera: head yaw and pitch (radians,
+    /// as Vision reports them; nil when unknown) within `limit` degrees.
+    /// Looking down at a phone or across at the dog fails this.
+    static func isFacing(yaw: Double?, pitch: Double?, limit: Double) -> Bool {
+        let radians = limit * .pi / 180
+        return abs(yaw ?? 0) <= radians && abs(pitch ?? 0) <= radians
+    }
+
     /// Whether a wrist held still: every recent position within `tolerance`
     /// of their average. Hand-to-mouth eating never settles; a held pose does.
     static func isSteady(_ points: [CGPoint], tolerance: CGFloat) -> Bool {
@@ -259,6 +270,9 @@ private final class CameraService {
         "faceMatchThreshold": (0.2...1.2, 0.6),
         "searchDegrees": (10...120, 45),
         "searchTilt": (-60...30, -20),
+        "holdSeconds": (0.3...2.0, 0.8),
+        "handConfidence": (0.1...0.8, 0.35),
+        "lookAngle": (10...60, 25),
     ]
     private var follow: Bool {
         get { UserDefaults.standard.object(forKey: "localAIFollowingEnabled") as? Bool ?? true }
@@ -267,6 +281,10 @@ private final class CameraService {
     private var autoZoom: Bool {
         get { UserDefaults.standard.object(forKey: "autoZoomEnabled") as? Bool ?? true }
         set { UserDefaults.standard.set(newValue, forKey: "autoZoomEnabled") }
+    }
+    private var requireLooking: Bool {
+        get { UserDefaults.standard.object(forKey: "requireLooking") as? Bool ?? true }
+        set { UserDefaults.standard.set(newValue, forKey: "requireLooking") }
     }
     private var manualZoom: Double {
         get { UserDefaults.standard.object(forKey: "manualZoom") as? Double ?? 1 }
@@ -376,7 +394,8 @@ private final class CameraService {
         lock.lock()
         let status = self.status
         lock.unlock()
-        var settings: [String: Any] = ["follow": follow, "auto_zoom": autoZoom, "zoom": manualZoom]
+        var settings: [String: Any] = ["follow": follow, "auto_zoom": autoZoom, "zoom": manualZoom,
+                                       "require_looking": requireLooking]
         for (key, knob) in Self.knobs {
             settings[key] = UserDefaults.standard.object(forKey: key) as? Double ?? knob.value
         }
@@ -394,6 +413,7 @@ private final class CameraService {
     private func updateSettings(_ changes: [String: Any]) -> [String: Any] {
         if let value = changes["follow"] as? Bool { follow = value }
         if let value = changes["auto_zoom"] as? Bool { autoZoom = value }
+        if let value = changes["require_looking"] as? Bool { requireLooking = value }
         if let value = (changes["zoom"] as? NSNumber)?.doubleValue {
             manualZoom = min(4, max(1, value))
             autoZoom = false  // a chosen zoom is a manual zoom
@@ -662,6 +682,8 @@ private struct Track {
     let id: Int
     var body: CGRect
     var face: CGRect?
+    // Face turned toward the camera this frame: gestures need eye contact.
+    var facing = false
     var lastSeen: Date
     var visible = true
     var name: String?
@@ -755,6 +777,8 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         }
         // Room for everyone's hands, not just one person's pair.
         handRequest.maximumHandCount = 6
+        // Revision 3 reports head yaw and pitch, for "looking at the camera".
+        faceRequest.revision = VNDetectFaceRectanglesRequestRevision3
         super.init()
         gallery = Self.loadGallery()
     }
@@ -788,6 +812,15 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 animals: animals.map(\.boundingBox),
                 now: now
             )
+            // Which tracked faces look at the camera (yaw/pitch from the face request).
+            let lookAngle = UserDefaults.standard.object(forKey: "lookAngle") as? Double ?? 25
+            let faceObservations = faceRequest.results ?? []
+            for index in tracks.indices where tracks[index].visible {
+                let observation = faceObservations.first { $0.boundingBox == tracks[index].face }
+                tracks[index].facing = observation.map {
+                    GestureGate.isFacing(yaw: $0.yaw?.doubleValue, pitch: $0.pitch?.doubleValue, limit: lookAngle)
+                } ?? false
+            }
             let visible = tracks.filter(\.visible)
             identifyFaces(handler, now: now)
             let enrollMessage = enroll(handler, visible: tracks.filter(\.visible))
@@ -832,11 +865,19 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             var messages: [String] = []
             var fired: [(gesture: String, person: String?, held: Bool)] = []
             var raisedHands = 0
+            var lookingAway = 0
+            // A deliberate gesture comes with a look at the camera; scrolling a
+            // phone or petting the dog does not. Switchable in Home Assistant.
+            let requireLooking = UserDefaults.standard.object(forKey: "requireLooking") as? Bool ?? true
             for index in tracks.indices where tracks[index].visible {
                 let track = tracks[index]
-                let raised = (handsByTrack[track.id] ?? []).filter { hand in
+                var raised = (handsByTrack[track.id] ?? []).filter { hand in
                     guard let wrist = try? hand.recognizedPoint(.wrist), wrist.confidence > 0.1 else { return false }
                     return GestureGate.isRaised(wrist: wrist.location, face: track.face, body: track.body, reach: reach)
+                }
+                if requireLooking && !track.facing && !raised.isEmpty {
+                    lookingAway += raised.count
+                    raised = []
                 }
                 raisedHands += raised.count
                 let result = updateGestures(&tracks[index].votes, hands: raised, face: track.face)
@@ -855,6 +896,8 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 ? "No one in view. Preview and gesture analysis stay local."
                 : (hands.isEmpty
                     ? "\(people.joined(separator: ", ")) in view. Raise a hand to gesture."
+                    : lookingAway > 0 && raisedHands == 0
+                    ? "Hand raised, but not looking at the camera, so it's ignored. Look at the camera to gesture."
                     : raisedHands == 0
                     ? "Hands are low (typing?), so gestures are ignored. Raise a hand to chest height to gesture."
                     : "Hand raised. Hold a gesture steady to run its action.")
@@ -973,8 +1016,12 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         let tolerance = (face?.height ?? 0.1) * CGFloat(UserDefaults.standard.object(forKey: "steadiness") as? Double ?? 0.35)
         let steady = votes.wrists.count >= 3 && GestureGate.isSteady(votes.wrists, tolerance: tolerance)
         let rawGesture = steady ? primaryHand.flatMap { classifyGesture($0) } : nil
+        // Calibration knob: seconds a gesture must be held (about 10 analysed
+        // frames a second). A pose a hand only passes through never gets there.
+        let holdSeconds = UserDefaults.standard.object(forKey: "holdSeconds") as? Double ?? 0.8
+        let requiredHits = max(3, Int((holdSeconds * 10).rounded()))
         votes.recent.append(rawGesture)
-        if votes.recent.count > 8 { votes.recent.removeFirst() }
+        if votes.recent.count > requiredHits + 3 { votes.recent.removeFirst(votes.recent.count - requiredHits - 3) }
         // Vote across recent frames so a weak duplicate hand or one noisy
         // finger landmark cannot flip a held pose between 1/open/2 fingers.
         let gestureVotes = votes.recent.compactMap { $0 }.reduce(into: [String: Int]()) { counts, id in
@@ -985,7 +1032,6 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         let leadingGesture = rawGesture.flatMap { gestureVotes[$0] == maximumGestureVotes ? $0 : nil }
             ?? latched.flatMap { gestureVotes[$0] == maximumGestureVotes ? $0 : nil }
             ?? gestureVotes.filter { $0.value == maximumGestureVotes }.keys.sorted().first
-        let requiredHits = 5
         guard let detectedGesture = leadingGesture else {
             votes.missed += 1
             if votes.missed >= 8 { votes.latched = nil }
@@ -1228,7 +1274,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             CTLineDraw(CTLineCreateWithAttributedString(text), canvas)
         }
         for track in tracks where track.visible {
-            var label = track.name ?? "Person"
+            var label = (track.name ?? "Person") + (track.facing ? " · looking" : "")
             if let nearest = track.nearest { label += String(format: "  (%@ %.2f)", nearest.name, nearest.distance) }
             box(track.face ?? track.body, track.name == nil ? .systemGreen : .systemBlue, label)
         }
@@ -1639,6 +1685,9 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         func point(_ joint: VNHumanHandPoseObservation.JointName) -> VNRecognizedPoint? {
             try? observation.recognizedPoint(joint)
         }
+        // Calibration knob: how sure Vision must be of every finger joint. A
+        // hand around a phone or in the dog's fur is mostly guessed joints.
+        let handConfidence = Float(UserDefaults.standard.object(forKey: "handConfidence") as? Double ?? 0.35)
 
         guard let thumbTip = point(.thumbTip),
               let thumbIP = point(.thumbIP),
@@ -1650,7 +1699,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
               let littleTip = point(.littleTip), let littlePIP = point(.littlePIP), let littleMCP = point(.littleMCP),
               [thumbTip, thumbIP, thumbMCP, indexTip, indexPIP, indexMCP, middleTip, middlePIP, middleMCP,
                ringTip, ringPIP, ringMCP, littleTip, littlePIP, littleMCP]
-                .allSatisfy({ $0.confidence > 0.08 }) else { return nil }
+                .allSatisfy({ $0.confidence > handConfidence }) else { return nil }
 
         func distance(_ a: VNRecognizedPoint, _ b: VNRecognizedPoint) -> CGFloat {
             hypot(a.location.x - b.location.x, a.location.y - b.location.y)

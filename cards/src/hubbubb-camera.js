@@ -22,6 +22,9 @@ const TABS = [
 
 /* What each knob means, in the words a person would use. */
 export const KNOBS = [
+  ["holdSeconds", "Hold time", "Seconds a gesture must be held before it counts. Longer means fewer accidents.", 0.1],
+  ["handConfidence", "Hand clarity", "How clearly every finger must be seen. Higher ignores hands holding a phone or petting the dog.", 0.05],
+  ["lookAngle", "Looking-at-camera angle", "How far your head may turn from the camera (degrees) and still count as looking at it.", 1],
   ["followGain", "Following speed", "How quickly the camera turns to keep you centred. Higher is snappier; too high and it wobbles.", 0.05],
   ["gestureReach", "Gesture height", "How far below your chin a hand still counts, in face-heights. Lower it if typing sets gestures off.", 0.1],
   ["hairReach", "Head zone: above the face", "Hands this far above your face (hair) pause gestures, in face-heights.", 0.1],
@@ -346,7 +349,7 @@ class HubbubbCamera extends LitElement {
     const g = this._gestures;
     if (!g) return html`<div class="empty">Loading gestures…</div>`;
     return html`
-      <p class="intro">Hold a gesture steady at chest height or above for about a second. Assign each one any Home Assistant actions — the same editor automations use. Hands at the keyboard or near your face never count.</p>
+      <p class="intro">Look at the camera and hold a gesture steady at chest height for about a second. Assign each one any Home Assistant actions — the same editor automations use. Hands at the keyboard, near your face, or while you look elsewhere never count.</p>
       <div class="gestures">
         ${g.catalog.map((c) => this._renderGesture(c, g.gestures[c.id]))}
       </div>
@@ -556,7 +559,7 @@ class HubbubbCamera extends LitElement {
     const settings = s.settings || {};
     const knobs = s.knobs || {};
     const room = s.room || {};
-    const data = Object.fromEntries(KNOBS.map(([k]) => [k, settings[k]]));
+    const data = { require_looking: settings.require_looking, ...Object.fromEntries(KNOBS.map(([k]) => [k, settings[k]])) };
     return html`
       <div class="two">
         <section class="card">
@@ -565,13 +568,19 @@ class HubbubbCamera extends LitElement {
             ? html`<ha-form
                 .hass=${this.hass}
                 .data=${data}
-                .schema=${KNOBS.filter(([k]) => knobs[k]).map(([k, , , step]) => ({ name: k, selector: { number: { min: knobs[k].min, max: knobs[k].max, step, mode: "slider" } } }))}
-                .computeLabel=${(f) => KNOBS.find(([k]) => k === f.name)?.[1]}
-                .computeHelper=${(f) => KNOBS.find(([k]) => k === f.name)?.[2]}
+                .schema=${[
+                  { name: "require_looking", selector: { boolean: {} } },
+                  ...KNOBS.filter(([k]) => knobs[k]).map(([k, , , step]) => ({ name: k, selector: { number: { min: knobs[k].min, max: knobs[k].max, step, mode: "slider" } } })),
+                ]}
+                .computeLabel=${(f) => (f.name === "require_looking" ? "Only when looking at the camera" : KNOBS.find(([k]) => k === f.name)?.[1])}
+                .computeHelper=${(f) =>
+                  f.name === "require_looking"
+                    ? "Gestures only count while the person faces the camera. The live view marks them \u201clooking\u201d."
+                    : KNOBS.find(([k]) => k === f.name)?.[2]}
                 @value-changed=${(e) => this._knobs(e.detail.value, data)}
               ></ha-form>
               <div class="actions">
-                <button ?disabled=${this._busy} @click=${() => this._settings(Object.fromEntries(Object.entries(knobs).map(([k, v]) => [k, v.default])))}>Reset to defaults</button>
+                <button ?disabled=${this._busy} @click=${() => this._settings({ require_looking: true, ...Object.fromEntries(Object.entries(knobs).map(([k, v]) => [k, v.default])) })}>Reset to defaults</button>
               </div>`
             : html`<div class="empty">Waiting for the camera…</div>`}
         </section>
