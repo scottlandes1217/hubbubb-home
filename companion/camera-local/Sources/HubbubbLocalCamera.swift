@@ -691,6 +691,7 @@ private final class CameraService {
         "holdSeconds": (0.3...2.0, 0.6),
         "handConfidence": (0.1...0.8, 0.25),
         "lookAngle": (10...60, 25),
+        "lookTurn": (0.1...0.5, 0.33),
         "framingFill": (0.4...1.0, 0.7),
         "gestureMatch": (0.15...0.7, 0.35),
     ]
@@ -1326,8 +1327,9 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 landmarked = landmarksRequest.results ?? []
             }
             // Calibration knob: how turned a face may be and still be "looking"
-            // (0 facing, ~0.5 profile).
-            let turnLimit = CGFloat(UserDefaults.standard.object(forKey: "lookTurn") as? Double ?? 0.22)
+            // (0 facing, ~0.5 profile). Measured on the couch: facing the camera
+            // lying down read 0.11-0.26, looking at a phone 0.44-0.62.
+            let turnLimit = CGFloat(UserDefaults.standard.object(forKey: "lookTurn") as? Double ?? 0.33)
             for index in tracks.indices where tracks[index].visible {
                 let observation = faceObservations.first { $0.boundingBox == tracks[index].face }
                 let marks = landmarked.min { a, b in

@@ -27,7 +27,7 @@ export const KNOBS = [
   ["framingFill", "Framing", "How much of the frame one person's upper body fills when auto-zoom is on. Lower shows more of the room; the face never fills more than a quarter.", 0.05],
   ["holdSeconds", "Hold time", "Seconds a gesture must be held before it counts. Longer means fewer accidents.", 0.1],
   ["handConfidence", "Hand clarity", "How clearly every finger must be seen. Higher ignores hands holding a phone or petting the dog.", 0.05],
-  ["lookAngle", "Looking-at-camera angle", "How far your head may turn from the camera (degrees) and still count as looking at it.", 1],
+  ["lookTurn", "Looking at the camera", "How far your face may turn from the camera and still count as looking (0 = straight at it, 0.5 = side-on). Works with your head tilted, lying down. Raise it if you're refused while looking at the camera; lower it if glancing at your phone counts.", 0.01],
   ["followGain", "Following speed", "How quickly the camera turns to keep you centred. Higher is snappier; too high and it wobbles.", 0.05],
   ["gestureReach", "Gesture height (fallback)", "A hand counts as raised when its wrist is above its elbow. Only when the elbow can't be seen: how far below your chin a hand still counts, in face-heights.", 0.1],
   ["hairReach", "Head zone: above the face", "Hands this far above your face (hair) pause gestures, in face-heights.", 0.1],
