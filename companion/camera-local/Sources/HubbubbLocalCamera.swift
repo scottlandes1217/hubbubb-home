@@ -159,8 +159,8 @@ private struct RoomMap {
         let beside = atMouth.enumerated().map { $0.offset < 2 ? $0.element : CGPoint(x: 0.6, y: 0.55) }
         precondition(GestureGate.atHead(atMouth, head: mouth), "a hand at the mouth is at the head")
         precondition(!GestureGate.atHead(beside, head: mouth), "a fingertip grazing it is not")
-        let head = GestureGate.head(face, hair: 0.9, chin: 0.6)
-        precondition(head.contains(CGPoint(x: 0.49, y: 0.56)), "a fork at the mouth, under the chin, is in the head zone")
+        let head = GestureGate.head(face, hair: 0.9, chin: 0.25)
+        precondition(head.contains(CGPoint(x: 0.49, y: 0.58)), "a fork at the mouth, just under the chin, is in the head zone")
         precondition(!head.contains(CGPoint(x: 0.6, y: 0.50)), "a thumbs up beside the chest is not")
         let held = (0..<5).map { CGPoint(x: 0.6 + CGFloat($0) * 0.002, y: 0.5) }
         let eating = [CGPoint(x: 0.5, y: 0.3), CGPoint(x: 0.5, y: 0.45), CGPoint(x: 0.5, y: 0.55), CGPoint(x: 0.5, y: 0.4)]
@@ -336,6 +336,29 @@ private enum HandShape {
         return nil
     }
 
+    /// The numbers behind a decision, for tuning against real hands.
+    static func measures(_ p: [String: CGPoint]) -> [String: Any] {
+        func d(_ a: String, _ b: String) -> Double {
+            guard let x = p[a], let y = p[b] else { return -1 }
+            return Double(hypot(x.x - y.x, x.y - y.y))
+        }
+        let palmWidth = max(0.002, d("indexMCP", "littleMCP"))
+        let size = max(palmWidth, d("wrist", "middleMCP"))
+        let fingers = [("indexTip", "indexPIP", "indexMCP"), ("middleTip", "middlePIP", "middleMCP"),
+                       ("ringTip", "ringPIP", "ringMCP"), ("littleTip", "littlePIP", "littleMCP")]
+        func r(_ v: Double) -> Double { (v * 100).rounded() / 100 }
+        return [
+            "size": r(size * 1000) / 1000, "palmWidth": r(palmWidth * 1000) / 1000,
+            "curled": fingers.filter { d($0.0, $0.2) < d($0.1, $0.2) * 1.35 }.count,
+            "fingerReach": fingers.map { r(d($0.0, $0.2) / max(0.0001, d($0.1, $0.2))) },
+            "thumbAboveIP": r(Double((p["thumbTip"]?.y ?? 0) - (p["thumbIP"]?.y ?? 0)) / size),
+            "thumbAboveMP": r(Double((p["thumbTip"]?.y ?? 0) - (p["thumbMP"]?.y ?? 0)) / size),
+            "thumbToPalm": r(d("thumbTip", "indexMCP") / palmWidth),
+            "thumbToBase": r(d("thumbTip", "thumbMP") / palmWidth),
+            "joints": p.count,
+        ]
+    }
+
     /// A synthetic right hand at `scale` (fraction of the frame), for tests.
     static func sample(_ pose: String, scale s: CGFloat, at o: CGPoint = CGPoint(x: 0.6, y: 0.5)) -> [String: CGPoint] {
         func pt(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: o.x + x * s, y: o.y + y * s) }
@@ -452,7 +475,7 @@ private final class CameraService {
         "followGain": (0.1...1.0, 0.45),
         "gestureReach": (0.5...3.0, 1.5),
         "hairReach": (0...2, 0.9),
-        "chinReach": (0...1.5, 0.6),
+        "chinReach": (0...1.5, 0.25),
         "steadiness": (0.1...1.0, 0.35),
         "faceMatchThreshold": (0.2...1.2, 0.6),
         "searchDegrees": (10...120, 45),
@@ -1263,7 +1286,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         // Any hand at the head - eating, a scratch, hair - turns gestures off
         // for two seconds; a meal keeps renewing that, so it stays off.
         if let face, hands.contains(where: { handOverlapsFace($0, faceBounds: face) }) {
-            votes = GestureVotes(lastVolumeRepeat: votes.lastVolumeRepeat, pausedUntil: now.addingTimeInterval(2))
+            votes = GestureVotes(lastVolumeRepeat: votes.lastVolumeRepeat, pausedUntil: now.addingTimeInterval(1.2))
             return ("Gestures paused: a hand is at a face, mouth or hair.", nil)
         }
         if now < votes.pausedUntil {
@@ -1282,6 +1305,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         let steady = votes.wrists.count >= 3 && GestureGate.isSteady(votes.wrists, tolerance: tolerance)
         fingersUnclear = false
         let rawGesture = steady ? primaryHand.flatMap { classifyGesture($0) } : nil
+        if steady, rawGesture == nil, let hand = primaryHand { recordUnrecognized(hand) }
         // Calibration knob: seconds a gesture must be held (about 10 analysed
         // frames a second). A pose a hand only passes through never gets there.
         let holdSeconds = UserDefaults.standard.object(forKey: "holdSeconds") as? Double ?? 0.8
@@ -1691,7 +1715,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         let head = GestureGate.head(
             faceBounds,
             hair: CGFloat(defaults.object(forKey: "hairReach") as? Double ?? 0.9),
-            chin: CGFloat(defaults.object(forKey: "chinReach") as? Double ?? 0.6)
+            chin: CGFloat(defaults.object(forKey: "chinReach") as? Double ?? 0.25)
         )
         return GestureGate.atHead(points, head: head)
     }
@@ -2072,6 +2096,45 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         }
     }
 
+
+    /// A raised, still hand that matched no gesture: keep its joints and the
+    /// rule numbers (at most two a second) in ~/Library/Logs/Hubbubb Local
+    /// Camera hands.jsonl, to tune the rules against real hands. Local only.
+    private func recordUnrecognized(_ hand: VNHumanHandPoseObservation) {
+        let now = Date()
+        guard now.timeIntervalSince(lastHandRecord) > 0.5,
+              let all = try? hand.recognizedPoints(.all) else { return }
+        lastHandRecord = now
+        var points: [String: CGPoint] = [:]
+        var joints: [String: [Double]] = [:]
+        for (joint, point) in all where point.confidence > 0.1 {
+            let name = joint.rawValue.rawValue
+            points[Self.jointNames[name] ?? name] = point.location
+            joints[Self.jointNames[name] ?? name] = [Double(point.location.x), Double(point.location.y), Double(point.confidence)]
+        }
+        let line: [String: Any] = ["ts": now.timeIntervalSince1970, "joints": joints, "measures": HandShape.measures(points)]
+        guard let data = try? JSONSerialization.data(withJSONObject: line) else { return }
+        logQueue.async {
+            let url = FileManager.default.urls(for: .libraryDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("Logs/Hubbubb Local Camera hands.jsonl")
+            if let handle = try? FileHandle(forWritingTo: url) {
+                handle.seekToEndOfFile()
+                handle.write(data + Data("\n".utf8))
+                try? handle.close()
+            } else {
+                try? (data + Data("\n".utf8)).write(to: url)
+            }
+        }
+    }
+    private var lastHandRecord = Date.distantPast
+    // Vision's joint keys -> the names HandShape uses.
+    private static let jointNames: [String: String] = [
+        "VNHLKWRI": "wrist", "VNHLKTTIP": "thumbTip", "VNHLKTIP": "thumbIP", "VNHLKTMP": "thumbMP", "VNHLKTCMC": "thumbCMC",
+        "VNHLKITIP": "indexTip", "VNHLKIDIP": "indexDIP", "VNHLKIPIP": "indexPIP", "VNHLKIMCP": "indexMCP",
+        "VNHLKMTIP": "middleTip", "VNHLKMDIP": "middleDIP", "VNHLKMPIP": "middlePIP", "VNHLKMMCP": "middleMCP",
+        "VNHLKRTIP": "ringTip", "VNHLKRDIP": "ringDIP", "VNHLKRPIP": "ringPIP", "VNHLKRMCP": "ringMCP",
+        "VNHLKPTIP": "littleTip", "VNHLKPDIP": "littleDIP", "VNHLKPPIP": "littlePIP", "VNHLKPMCP": "littleMCP",
+    ]
 
     private func classifyGesture(_ observation: VNHumanHandPoseObservation) -> String? {
         func point(_ joint: VNHumanHandPoseObservation.JointName) -> VNRecognizedPoint? {
