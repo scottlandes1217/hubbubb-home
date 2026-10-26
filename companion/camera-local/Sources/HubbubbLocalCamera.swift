@@ -149,6 +149,16 @@ private struct RoomMap {
         let faceOnly = Framing.zoom(current: 1, face: CGRect(x: 0.45, y: 0.5, width: 0.08, height: 0.1), body: nil, fill: 0.7)
         precondition(0.1 * faceOnly <= 0.25, "face-only framing stays loose (\(faceOnly))")
         precondition(Framing.aim(face: CGRect(x: 0.4, y: 0.6, width: 0.1, height: 0.1), body: .zero).y < 0.5, "aim below the face, so it sits high")
+        for scale in [0.02, 0.05, 0.15] as [CGFloat] {
+            precondition(HandShape.classify(HandShape.sample("thumbs_up", scale: scale)) == "thumbs_up", "thumbs up at hand size \(scale)")
+            precondition(HandShape.classify(HandShape.sample("open", scale: scale)) == "open_palm", "open palm at hand size \(scale)")
+            precondition(HandShape.classify(HandShape.sample("fist", scale: scale)) == nil, "a fist is no gesture at \(scale)")
+        }
+        let mouth = CGRect(x: 0.4, y: 0.5, width: 0.1, height: 0.2)
+        let atMouth = (0..<10).map { CGPoint(x: 0.42 + CGFloat($0) * 0.005, y: 0.52 + CGFloat($0) * 0.01) }
+        let beside = atMouth.enumerated().map { $0.offset < 2 ? $0.element : CGPoint(x: 0.6, y: 0.55) }
+        precondition(GestureGate.atHead(atMouth, head: mouth), "a hand at the mouth is at the head")
+        precondition(!GestureGate.atHead(beside, head: mouth), "a fingertip grazing it is not")
         let head = GestureGate.head(face, hair: 0.9, chin: 0.6)
         precondition(head.contains(CGPoint(x: 0.49, y: 0.56)), "a fork at the mouth, under the chin, is in the head zone")
         precondition(!head.contains(CGPoint(x: 0.6, y: 0.50)), "a thumbs up beside the chest is not")
@@ -242,6 +252,14 @@ private enum GestureGate {
         return abs(yaw ?? 0) <= radians && abs(pitch ?? 0) <= radians
     }
 
+    /// Whether a hand is *at* the head: a good share of its joints (not one
+    /// fingertip clipping it) inside the zone. Eating puts most of the hand at
+    /// the mouth; a thumbs-up beside the shoulder only grazes it.
+    static func atHead(_ points: [CGPoint], head: CGRect, share: CGFloat = 0.4) -> Bool {
+        guard !points.isEmpty else { return false }
+        return CGFloat(points.filter(head.contains).count) / CGFloat(points.count) >= share
+    }
+
     /// Whether a wrist held still: every recent position within `tolerance`
     /// of their average. Hand-to-mouth eating never settles; a held pose does.
     static func isSteady(_ points: [CGPoint], tolerance: CGFloat) -> Bool {
@@ -275,6 +293,69 @@ private enum Mood {
         default:
             return (0, 0)
         }
+    }
+}
+
+/// Hand shapes from joint positions, measured in hand sizes (not frame
+/// fractions) so the same gesture reads the same at any zoom or distance.
+/// Joints are named like Vision's: "thumbTip", "indexPIP", "wrist"...
+private enum HandShape {
+    static func classify(_ p: [String: CGPoint]) -> String? {
+        func d(_ a: String, _ b: String) -> CGFloat {
+            guard let x = p[a], let y = p[b] else { return 0 }
+            return hypot(x.x - y.x, x.y - y.y)
+        }
+        guard let thumbTip = p["thumbTip"], let thumbIP = p["thumbIP"], let thumbMP = p["thumbMP"] else { return nil }
+        // Hand size: palm length (wrist to middle knuckle), or palm width.
+        let palmWidth = max(0.002, d("indexMCP", "littleMCP"))
+        let size = max(palmWidth, d("wrist", "middleMCP"))
+        let fingers = [("indexTip", "indexPIP", "indexMCP"), ("middleTip", "middlePIP", "middleMCP"),
+                       ("ringTip", "ringPIP", "ringMCP"), ("littleTip", "littlePIP", "littleMCP")]
+        let curled = fingers.filter { d($0.0, $0.2) < d($0.1, $0.2) * 1.35 }.count
+        let extended = fingers.filter { f in
+            guard let tip = p[f.0], let pip = p[f.1] else { return false }
+            return d(f.0, f.2) > d(f.1, f.2) * 1.35 && tip.y > pip.y + size * 0.03
+        }.count
+        switch extended {
+        case 1: return "number_1"
+        case 2: return "number_2"
+        case 3: return "number_3"
+        default: break
+        }
+        let thumbToPalm = d("thumbTip", "indexMCP")
+        let thumbToBase = d("thumbTip", "thumbMP")
+        // Vision y grows upward. The tip must rise above both thumb joints, by a
+        // share of the hand, so a sideways thumb is not a thumbs-up.
+        let thumbRaised = thumbTip.y > thumbIP.y + size * 0.10 && thumbTip.y > thumbMP.y + size * 0.25
+        // Thumbs-down only needs the thumb angled downward (x scaled for 16:9).
+        let dx = (thumbTip.x - thumbMP.x) * 16 / 9, dy = thumbTip.y - thumbMP.y
+        let thumbLowered = dy / max(0.0001, hypot(dx, dy)) < -0.2
+        if thumbRaised && curled >= 3 && thumbToPalm > palmWidth * 0.78 && thumbToBase > palmWidth * 0.52 { return "thumbs_up" }
+        if thumbLowered && curled >= 3 && thumbToPalm > palmWidth * 0.55 && thumbToBase > palmWidth * 0.35 { return "thumbs_down" }
+        if extended == 4 && thumbToPalm > palmWidth * 0.78 && d("indexTip", "littleTip") > palmWidth * 0.95 { return "open_palm" }
+        return nil
+    }
+
+    /// A synthetic right hand at `scale` (fraction of the frame), for tests.
+    static func sample(_ pose: String, scale s: CGFloat, at o: CGPoint = CGPoint(x: 0.6, y: 0.5)) -> [String: CGPoint] {
+        func pt(_ x: CGFloat, _ y: CGFloat) -> CGPoint { CGPoint(x: o.x + x * s, y: o.y + y * s) }
+        var p: [String: CGPoint] = ["wrist": pt(0, 0)]
+        let knuckles: [(String, CGFloat)] = [("index", -0.3), ("middle", -0.1), ("ring", 0.1), ("little", 0.3)]
+        for (name, x) in knuckles {
+            p[name + "MCP"] = pt(x, 1)
+            p[name + "PIP"] = pt(x, 1.4)
+            // Curled fingers fold back toward the knuckle; extended ones reach up.
+            p[name + "Tip"] = pose == "open" ? pt(x * 1.3, 2.0) : pt(x, 1.1)
+        }
+        switch pose {
+        case "thumbs_up":
+            p["thumbMP"] = pt(-0.5, 0.9); p["thumbIP"] = pt(-0.55, 1.3); p["thumbTip"] = pt(-0.55, 1.7)
+        case "open":
+            p["thumbMP"] = pt(-0.6, 0.6); p["thumbIP"] = pt(-0.85, 0.8); p["thumbTip"] = pt(-1.05, 1.0)
+        default:  // a fist: thumb tucked across
+            p["thumbMP"] = pt(-0.45, 0.7); p["thumbIP"] = pt(-0.35, 0.85); p["thumbTip"] = pt(-0.2, 0.9)
+        }
+        return p
     }
 }
 
@@ -377,7 +458,7 @@ private final class CameraService {
         "searchDegrees": (10...120, 45),
         "searchTilt": (-60...30, -20),
         "holdSeconds": (0.3...2.0, 0.8),
-        "handConfidence": (0.1...0.8, 0.35),
+        "handConfidence": (0.1...0.8, 0.25),
         "lookAngle": (10...60, 25),
         "framingFill": (0.4...1.0, 0.7),
     ]
@@ -1612,7 +1693,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             hair: CGFloat(defaults.object(forKey: "hairReach") as? Double ?? 0.9),
             chin: CGFloat(defaults.object(forKey: "chinReach") as? Double ?? 0.6)
         )
-        return points.contains(where: head.contains)
+        return GestureGate.atHead(points, head: head)
     }
 
     private func applyHardwareZoom(_ factor: CGFloat) {
@@ -1998,7 +2079,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         }
         // Calibration knob: how sure Vision must be of every finger joint. A
         // hand around a phone or in the dog's fur is mostly guessed joints.
-        let handConfidence = Float(UserDefaults.standard.object(forKey: "handConfidence") as? Double ?? 0.35)
+        let handConfidence = Float(UserDefaults.standard.object(forKey: "handConfidence") as? Double ?? 0.25)
 
         guard let thumbTip = point(.thumbTip),
               let thumbIP = point(.thumbIP),
@@ -2015,55 +2096,18 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             return nil
         }
 
-        func distance(_ a: VNRecognizedPoint, _ b: VNRecognizedPoint) -> CGFloat {
-            hypot(a.location.x - b.location.x, a.location.y - b.location.y)
-        }
-        let fingerTriples = [
-            (indexTip, indexPIP, indexMCP), (middleTip, middlePIP, middleMCP),
-            (ringTip, ringPIP, ringMCP), (littleTip, littlePIP, littleMCP)
+        let joints: [VNHumanHandPoseObservation.JointName: String] = [
+            .wrist: "wrist", .thumbTip: "thumbTip", .thumbIP: "thumbIP", .thumbMP: "thumbMP",
+            .indexTip: "indexTip", .indexPIP: "indexPIP", .indexMCP: "indexMCP",
+            .middleTip: "middleTip", .middlePIP: "middlePIP", .middleMCP: "middleMCP",
+            .ringTip: "ringTip", .ringPIP: "ringPIP", .ringMCP: "ringMCP",
+            .littleTip: "littleTip", .littlePIP: "littlePIP", .littleMCP: "littleMCP",
         ]
-        let curled = fingerTriples.map { tip, pip, mcp in
-            distance(tip, mcp) < distance(pip, mcp) * 1.35
+        var points: [String: CGPoint] = [:]
+        for (joint, name) in joints {
+            if let found = point(joint), found.confidence > 0.1 { points[name] = found.location }
         }
-        let extended = fingerTriples.map { tip, pip, mcp in
-            distance(tip, mcp) > distance(pip, mcp) * 1.35 && tip.location.y > pip.location.y + 0.005
-        }
-        let curledFingers = curled.filter { $0 }.count
-        let palmWidth = max(0.04, distance(indexMCP, littleMCP))
-
-        // Vision coordinates increase upward. Requiring lift beyond both
-        // thumb joints prevents a sideways thumb from counting as a thumbs-up.
-        let thumbRaised = thumbTip.location.y > thumbIP.location.y + 0.025
-            && thumbTip.location.y > thumbMCP.location.y + 0.055
-        // Thumbs-down only needs the thumb angled downward, not straight down:
-        // measure the base-to-tip angle (x scaled for the 16:9 frame) so it
-        // works at any distance. -0.2 ≈ 12° below horizontal; raise toward 0 to loosen.
-        let thumbDX = (thumbTip.location.x - thumbMCP.location.x) * 16 / 9
-        let thumbDY = thumbTip.location.y - thumbMCP.location.y
-        let thumbLowered = thumbDY / max(0.001, hypot(thumbDX, thumbDY)) < -0.2
-        let extendedCount = extended.filter { $0 }.count
-        let thumbToPalm = distance(thumbTip, indexMCP)
-        let thumbToBase = distance(thumbTip, thumbMCP)
-        switch extendedCount {
-        case 1: return "number_1"
-        case 2: return "number_2"
-        case 3: return "number_3"
-        default: break
-        }
-
-        if thumbRaised && curledFingers >= 3
-            && thumbToPalm > palmWidth * 0.78 && thumbToBase > palmWidth * 0.52 {
-            return "thumbs_up"
-        }
-        // A tilted thumb sits closer to the palm in the image, so allow a shorter reach.
-        if thumbLowered && curledFingers >= 3
-            && thumbToPalm > palmWidth * 0.55 && thumbToBase > palmWidth * 0.35 {
-            return "thumbs_down"
-        }
-        let fingertipSpan = distance(indexTip, littleTip)
-        if extendedCount == 4 && thumbToPalm > palmWidth * 0.78
-            && fingertipSpan > palmWidth * 0.95 { return "open_palm" }
-        return nil
+        return HandShape.classify(points)
     }
 }
 
