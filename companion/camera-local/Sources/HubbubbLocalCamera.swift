@@ -192,6 +192,14 @@ private struct RoomMap {
         precondition(HandShape.classify(upright) == "thumbs_up", "a thumbs-up lying down reads as one")
         precondition(GestureGate.isRaised(wrist: CGPoint(x: 0.44, y: 0.51), elbow: CGPoint(x: 0.5, y: 0.5), up: lying), "forearm up toward the head, lying down")
         precondition(!GestureGate.isRaised(wrist: CGPoint(x: 0.5, y: 0.6), elbow: CGPoint(x: 0.5, y: 0.5), up: lying), "an arm resting along the couch is not raised")
+        // Reclining, the arm held straight up: raised by the room's up, even if
+        // not by the body's - the live check accepts either.
+        let straightUp = (wrist: CGPoint(x: 0.5, y: 0.6), elbow: CGPoint(x: 0.5, y: 0.5))
+        precondition(GestureGate.isRaised(wrist: straightUp.wrist, elbow: straightUp.elbow)
+                     || GestureGate.isRaised(wrist: straightUp.wrist, elbow: straightUp.elbow, up: lying), "reclining, a hand held straight up counts")
+        let flat = (wrist: CGPoint(x: 0.6, y: 0.5), elbow: CGPoint(x: 0.5, y: 0.5))
+        precondition(!(GestureGate.isRaised(wrist: flat.wrist, elbow: flat.elbow)
+                       || GestureGate.isRaised(wrist: flat.wrist, elbow: flat.elbow, up: lying)), "a forearm lying flat on the blanket, away from the head, does not")
         let head = GestureGate.head(face, hair: 0.9, chin: 0.25)
         precondition(head.contains(CGPoint(x: 0.49, y: 0.58)), "a fork at the mouth, just under the chin, is in the head zone")
         precondition(!head.contains(CGPoint(x: 0.6, y: 0.50)), "a thumbs up beside the chest is not")
@@ -1369,12 +1377,16 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 let track = tracks[index]
                 var raised = (handsByTrack[track.id] ?? []).filter { hand in
                     guard let wrist = try? hand.recognizedPoint(.wrist), wrist.confidence > 0.1 else { return false }
+                    // Lifted against gravity or toward their head: reclining, people
+                    // hold a hand straight up; lying flat, toward the head works too.
                     if let elbow = GestureGate.elbow(for: wrist.location, arms: arms) {
-                        return GestureGate.isRaised(wrist: wrist.location, elbow: elbow, up: track.up)
+                        return GestureGate.isRaised(wrist: wrist.location, elbow: elbow)
+                            || GestureGate.isRaised(wrist: wrist.location, elbow: elbow, up: track.up)
                     }
                     if let face = track.face {
                         let c = CGPoint(x: face.midX, y: face.midY)
-                        return GestureGate.isRaised(wrist: Upright.point(wrist.location, around: c, up: track.up),
+                        return GestureGate.isRaised(wrist: wrist.location, face: face, body: track.body, reach: reach)
+                            || GestureGate.isRaised(wrist: Upright.point(wrist.location, around: c, up: track.up),
                                                     face: Upright.rect(face, up: track.up), body: track.body, reach: reach)
                     }
                     return GestureGate.isRaised(wrist: wrist.location, face: nil, body: track.body, reach: reach)
@@ -2425,9 +2437,16 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         for (joint, name) in joints {
             if let found = point(joint), found.confidence > 0.1 { points[name] = found.location }
         }
-        // Judge the hand as if the person were upright (lying down included).
+        // Judge the hand as if the person were upright, and also as the room
+        // sees it: lying back, a thumbs-up may point at the ceiling or the head.
+        let picture = points
         if let wrist = points["wrist"] { points = points.mapValues { Upright.point($0, around: wrist, up: up) } }
-        // Taught samples first; the rules only speak for gestures nobody taught.
+        if abs(up.dx) > 0.2, let found = shape(points) ?? shape(picture) { return found }
+        return shape(points)
+    }
+
+    /// Taught samples first; the rules only speak for gestures nobody taught.
+    private func shape(_ points: [String: CGPoint]) -> String? {
         let limit = UserDefaults.standard.object(forKey: "gestureMatch") as? Double ?? 0.35
         if let taught = templates.match(points, within: limit) { return taught }
         let ruled = HandShape.classify(points)
