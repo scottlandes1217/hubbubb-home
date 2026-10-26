@@ -863,6 +863,10 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     private var latestAnimals: [String] = []
     private var followPausedUntil = Date.distantPast
     private var nobodyInView = true  // under settingsLock; read by the mood engine
+    // Vision thread only: no re-framing until then (a hand is raised to gesture).
+    private var framingHoldUntil = Date.distantPast
+    // Vision thread only: the last classify failed for unclear finger joints.
+    private var fingersUnclear = false
     private let lookQueue = DispatchQueue(label: "com.hubbubb.camera.look")
     private var itemBook = ItemBook.load()  // lookQueue only
     // Jarvis's body language (moodQueue only).
@@ -1041,6 +1045,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 }
             }
 
+            if raisedHands > 0 { framingHoldUntil = now.addingTimeInterval(1.2) }
             let people = visible.map { $0.name ?? "someone" }
             let idle = visible.isEmpty
                 ? "No one in view. Preview and gesture analysis stay local."
@@ -1117,6 +1122,10 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 self.roomMap.save()
             }
         }
+        // Someone is making a gesture: hold the shot still. Zooming or turning
+        // under a held hand makes it look like it moved, and raising an arm
+        // reshapes the body box the framing follows.
+        if now < framingHoldUntil { return }
         settingsLock.lock()
         let current = currentZoomFactor
         settingsLock.unlock()
@@ -1172,11 +1181,16 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         }
         // Held still or it doesn't count. Tolerance scales with the face, so it
         // means the same up close and across the room.
-        let wrist = primaryHand.flatMap { try? $0.recognizedPoint(.wrist) }.flatMap { $0.confidence > 0.1 ? $0.location : nil }
+        // Measured from the face, not the frame: the camera moving must not make
+        // a still hand look like it moved.
+        let anchor = face.map { CGPoint(x: $0.midX, y: $0.midY) } ?? .zero
+        let wrist = primaryHand.flatMap { try? $0.recognizedPoint(.wrist) }
+            .flatMap { $0.confidence > 0.1 ? CGPoint(x: $0.location.x - anchor.x, y: $0.location.y - anchor.y) : nil }
         if let wrist { votes.wrists.append(wrist) } else { votes.wrists.removeAll() }
         if votes.wrists.count > 5 { votes.wrists.removeFirst() }
         let tolerance = (face?.height ?? 0.1) * CGFloat(UserDefaults.standard.object(forKey: "steadiness") as? Double ?? 0.35)
         let steady = votes.wrists.count >= 3 && GestureGate.isSteady(votes.wrists, tolerance: tolerance)
+        fingersUnclear = false
         let rawGesture = steady ? primaryHand.flatMap { classifyGesture($0) } : nil
         // Calibration knob: seconds a gesture must be held (about 10 analysed
         // frames a second). A pose a hand only passes through never gets there.
@@ -1199,7 +1213,13 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             if votes.missed >= 8 { votes.latched = nil }
             let previousGesture = votes.recent.compactMap { $0 }.last
             let previousHits = previousGesture.map { g in votes.recent.filter { $0 == g }.count } ?? 0
-            guard previousHits > 0 && votes.missed < 8, let previousGesture else { return (nil, nil) }
+            guard previousHits > 0 && votes.missed < 8, let previousGesture else {
+                // Say why a raised hand isn't counting, so it can be fixed.
+                guard primaryHand != nil else { return (nil, nil) }
+                if votes.wrists.count >= 3 && !steady { return ("Hand moving - hold it still for a moment.", nil) }
+                if fingersUnclear { return ("Fingers not clear - turn your palm or the back of your hand to the camera.", nil) }
+                return (nil, nil)
+            }
             return ("\(gestureTitle(previousGesture)): \(min(previousHits, requiredHits))/\(requiredHits) frames. Keep holding…", nil)
         }
         let gestureHits = gestureVotes[detectedGesture] ?? 0
@@ -1981,7 +2001,10 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
               let littleTip = point(.littleTip), let littlePIP = point(.littlePIP), let littleMCP = point(.littleMCP),
               [thumbTip, thumbIP, thumbMCP, indexTip, indexPIP, indexMCP, middleTip, middlePIP, middleMCP,
                ringTip, ringPIP, ringMCP, littleTip, littlePIP, littleMCP]
-                .allSatisfy({ $0.confidence > handConfidence }) else { return nil }
+                .allSatisfy({ $0.confidence > handConfidence }) else {
+            fingersUnclear = true
+            return nil
+        }
 
         func distance(_ a: VNRecognizedPoint, _ b: VNRecognizedPoint) -> CGFloat {
             hypot(a.location.x - b.location.x, a.location.y - b.location.y)

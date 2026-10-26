@@ -117,7 +117,7 @@ def reapply(entity_id: str, state: str, attributes: dict) -> tuple[str, dict]:
     """The light service call that puts a light back to a recorded state."""
     if state != "on":
         return "turn_off", {"entity_id": entity_id}
-    data: dict = {"entity_id": entity_id, "transition": 1}
+    data: dict = {"entity_id": entity_id, "transition": 0.5}
     if attributes.get("brightness") is not None:
         data["brightness"] = attributes["brightness"]
     mode = attributes.get("color_mode")
@@ -431,11 +431,11 @@ class JarvisPresence:
         # command set. Otherwise the scene they were in, else the colours.
         asked = self._active_scene(entities, since=self._started) if self._started else None
         if asked:
-            calls = [("scene", "turn_on", {"entity_id": asked, "transition": 1})]
+            calls = [("scene", "turn_on", {"entity_id": asked, "transition": 0.5})]
         elif self._foreign:
             calls = [("light", *reapply(e, st.state, dict(st.attributes))) for e, st in self._foreign.items()]
         else:
-            calls = [("scene", "turn_on", {"entity_id": self._scene or f"scene.{SNAPSHOT_SCENE}", "transition": 1})]
+            calls = [("scene", "turn_on", {"entity_id": self._scene or f"scene.{SNAPSHOT_SCENE}", "transition": 0.5})]
 
         async def _run() -> None:
             for domain, service, data in calls:
@@ -496,11 +496,11 @@ class JarvisPresence:
     async def _lights(self, mood: str, config: dict) -> None:
         entities = config["light_entities"]
         if mood == "idle":
-            # Not yet: a follow-up question goes idle -> listening within a
-            # second. Restoring then and re-snapshotting would save Jarvis's
+            # Not yet: a follow-up question goes idle -> listening within the
+            # same second (a later one is caught by the 15 s rule below). Restoring then and re-snapshotting would save Jarvis's
             # own colour as "before" - the lights would never come back.
             if self._snapshot and not self._pending_restore:
-                self._pending_restore = async_call_later(self.hass, 2.5, self._restore)
+                self._pending_restore = async_call_later(self.hass, 1.0, self._restore)
             return
         if self._pending_restore:
             self._pending_restore()  # still the same conversation
