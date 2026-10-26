@@ -20,6 +20,7 @@ long searchCenterPan = 0;
 bool searchCenterValid = false;
 constexpr long initialSearchRadius = 5L * 3600L;
 long searchRadius = initialSearchRadius;
+long maxSearchRadius = 45L * 3600L;
 }
 
 extern "C" int HubbubbLinkCameraZoomInitialize(long *minimum, long *maximum, long *step, long *current) {
@@ -66,12 +67,13 @@ extern "C" int HubbubbLinkCameraPanStep(int direction) {
     return cameraController->SetPanTiltAbsolute(targetPan, tiltRange.cur) ? 1 : 0;
 }
 
-extern "C" int HubbubbLinkCameraSearchBegin() {
+extern "C" int HubbubbLinkCameraSearchBegin(int maxDegrees) {
     std::lock_guard<std::mutex> lock(cameraMutex);
     if (!cameraController || !cameraController->GetPanTiltAbsoluteRange(panRange, tiltRange)) return 0;
     searchCenterPan = panRange.cur;
     searchCenterValid = true;
     searchRadius = initialSearchRadius;
+    maxSearchRadius = std::max(5, maxDegrees) * 3600L;
     return 1;
 }
 
@@ -92,7 +94,7 @@ extern "C" int HubbubbLinkCameraSearchStep(int direction) {
     const long high = std::min(panRange.max, searchCenterPan + searchRadius);
     const long targetPan = std::clamp(panRange.cur + direction * step, low, high);
     if (targetPan == panRange.cur) {
-        searchRadius = std::min(searchRadius * 2, panRange.max - panRange.min);
+        searchRadius = std::min(searchRadius * 2, maxSearchRadius);
         return -direction;
     }
     return cameraController->SetPanTiltAbsolute(targetPan, tiltRange.cur) ? direction : 0;

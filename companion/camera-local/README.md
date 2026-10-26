@@ -78,3 +78,5 @@ This is a capture and local-inference prototype, not yet a virtual webcam.
   (`~/.claude/hooks/.voice-token`). A look asks the local Ollama vision model
   (`visionModel` default), panning to `lookPanOffsets` (default ±0.35 of the
   pan range around the current view) if needed, then returns to where it was.
+- With nobody in view it searches in bursts (20 s on, 25 s off) up to
+  `searchDegrees` (default 45) either side of the last sighting.

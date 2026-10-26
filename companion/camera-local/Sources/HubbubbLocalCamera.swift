@@ -20,7 +20,7 @@ private func hubbubbLinkCameraPanStep(_ direction: Int32) -> Int32
 @_silgen_name("HubbubbLinkCameraSearchStep")
 private func hubbubbLinkCameraSearchStep(_ direction: Int32) -> Int32
 @_silgen_name("HubbubbLinkCameraSearchBegin")
-private func hubbubbLinkCameraSearchBegin() -> Int32
+private func hubbubbLinkCameraSearchBegin(_ maxDegrees: Int32) -> Int32
 
 @_silgen_name("HubbubbLinkCameraPanTo")
 private func hubbubbLinkCameraPanTo(_ fraction: Float) -> Int32
@@ -1684,9 +1684,11 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         let autoZoom = autoZoomEnabled
         let current = currentZoomFactor
         settingsLock.unlock()
-        // An empty room is not a reason to pan forever: give up after 20 s and
-        // wait for someone to walk into view.
-        guard following, lostFor > 0.45, lostFor < 20 else { return }
+        // Search in bursts: sweep for 20 s, rest 25 s, sweep again. Never giving
+        // up is how it kept looking for someone out of frame; never resting is
+        // a camera panning all day in an empty room.
+        let searchCycle = lostFor.truncatingRemainder(dividingBy: 45)
+        guard following, lostFor > 0.45, searchCycle < 20 else { return }
 
         // Widen in small steps first; this usually reacquires someone who simply
         // stepped outside the tightly zoomed face box without moving the gimbal.
@@ -1705,7 +1707,10 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             guard let self else { return }
             if self.searchNeedsBegin {
                 self.searchDirection = suggestedDirection
-                guard hubbubbLinkCameraSearchBegin() == 1 else { return }
+                // Calibration knob: how far either side of the last sighting to
+                // search. The camera sits on the TV, so much wider looks at the wall.
+                let degrees = UserDefaults.standard.object(forKey: "searchDegrees") as? Int ?? 45
+                guard hubbubbLinkCameraSearchBegin(Int32(degrees)) == 1 else { return }
                 self.searchNeedsBegin = false
             }
             let next = hubbubbLinkCameraSearchStep(self.searchDirection)
