@@ -179,6 +179,7 @@ sys.modules["hubbubb_home"] = _pkg
 from hubbubb_home.memory import Memory  # noqa: E402
 from hubbubb_home.recipes import Recipes, as_lines, recipe_from_html  # noqa: E402
 from hubbubb_home.speakers import SpeakerBook  # noqa: E402
+from hubbubb_home import eyes  # noqa: E402
 from hubbubb_home.eyes import gesture_allowed, mood_for  # noqa: E402
 from hubbubb_home.timers import TimerPool  # noqa: E402
 from hubbubb_home.nightly import FindingsReport, _days  # noqa: E402
@@ -505,6 +506,45 @@ def test_jarvis_mood_follows_the_busiest_puck():
     assert mood_for(["processing"]) == "thinking"
     assert mood_for(["listening", "responding"]) == "speaking"
     assert mood_for(["processing", "listening", "idle"]) == "thinking"
+
+
+def test_jarvis_lights_survive_a_follow_up_question():
+    """idle -> listening within a second must not re-snapshot Jarvis's colour."""
+    import asyncio
+
+    calls, timers = [], []
+
+    class Services:
+        async def async_call(self, domain, service, data, blocking=False):
+            calls.append(f"{domain}.{service}")
+
+    class Hass:
+        services = Services()
+        states = types.SimpleNamespace(is_state=lambda *a: False)
+
+        def async_create_background_task(self, coro, name):
+            return asyncio.ensure_future(coro)
+
+    def call_later(hass, delay, action):
+        timers.append(action)
+        return lambda: timers.remove(action)
+
+    eyes.async_call_later = call_later
+    link = types.SimpleNamespace(jarvis={"move": False, "lights": True, "light_entities": ["light.bar"]})
+    presence = eyes.JarvisPresence(Hass(), link)
+
+    async def run():
+        for mood in ("listening", "thinking", "speaking", "idle", "listening", "speaking", "idle"):
+            await presence.async_apply(mood)
+        restore = [t for t in timers if getattr(t, "__name__", "") == "_restore"]
+        assert len(restore) == 1, timers  # one pending restore, after the last idle
+        restore[0]()
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+    assert calls.count("scene.create") == 1, calls  # saved once, before any colour
+    assert calls[-1] == "scene.turn_on", calls  # and put back once, at the end
+    assert calls.count("scene.turn_on") == 1, calls
 
 
 def test_speaker_prompt_line_three_cases():

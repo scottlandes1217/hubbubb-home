@@ -308,6 +308,10 @@ class JarvisPresence:
         self._unsub: Callable[[], None] | None = None
         self._watchdog: Callable[[], None] | None = None
         self._snapshot = False
+        # A restore waiting out the gap between Jarvis finishing and listening
+        # again for a follow-up; and one mood change at a time.
+        self._pending_restore: Callable[[], None] | None = None
+        self._lock = asyncio.Lock()
 
     @property
     def satellites(self) -> list[str]:
@@ -335,6 +339,10 @@ class JarvisPresence:
             self.hass.async_create_background_task(self.async_apply(mood), f"{DOMAIN} jarvis {mood}")
 
     async def async_apply(self, mood: str) -> None:
+        async with self._lock:
+            await self._apply(mood)
+
+    async def _apply(self, mood: str) -> None:
         self.mood = mood
         if self._watchdog:
             self._watchdog()
@@ -352,6 +360,17 @@ class JarvisPresence:
             await self._lights(mood, config)
 
     @callback
+    def _restore(self, _now=None) -> None:
+        self._pending_restore = None
+        if self.mood != "idle" or not self._snapshot:
+            return
+        self._snapshot = False
+        self.hass.async_create_background_task(
+            self.hass.services.async_call("scene", "turn_on", {"entity_id": f"scene.{SNAPSHOT_SCENE}", "transition": 1}),
+            f"{DOMAIN} jarvis lights restore",
+        )
+
+    @callback
     def _reset(self, _now=None) -> None:
         self._watchdog = None
         self.hass.async_create_background_task(self.async_apply("idle"), f"{DOMAIN} jarvis reset")
@@ -359,10 +378,15 @@ class JarvisPresence:
     async def _lights(self, mood: str, config: dict) -> None:
         entities = config["light_entities"]
         if mood == "idle":
-            if self._snapshot:
-                self._snapshot = False
-                await self.hass.services.async_call("scene", "turn_on", {"entity_id": f"scene.{SNAPSHOT_SCENE}", "transition": 1}, blocking=False)
+            # Not yet: a follow-up question goes idle -> listening within a
+            # second. Restoring then and re-snapshotting would save Jarvis's
+            # own colour as "before" - the lights would never come back.
+            if self._snapshot and not self._pending_restore:
+                self._pending_restore = async_call_later(self.hass, 2.5, self._restore)
             return
+        if self._pending_restore:
+            self._pending_restore()  # still the same conversation
+            self._pending_restore = None
         pause = config.get("pause_while")
         if pause and self.hass.states.is_state(pause, "on"):
             return
