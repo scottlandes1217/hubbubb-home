@@ -23,6 +23,7 @@ const TABS = [
 
 /* What each knob means, in the words a person would use. */
 export const KNOBS = [
+  ["gestureMatch", "Gesture match strictness", "How close a hand must be to the gestures you taught it. Lower is stricter (fewer accidents); raise it if taught gestures are missed.", 0.01],
   ["framingFill", "Framing", "How much of the frame one person's upper body fills when auto-zoom is on. Lower shows more of the room; the face never fills more than a quarter.", 0.05],
   ["holdSeconds", "Hold time", "Seconds a gesture must be held before it counts. Longer means fewer accidents.", 0.1],
   ["handConfidence", "Hand clarity", "How clearly every finger must be seen. Higher ignores hands holding a phone or petting the dog.", 0.05],
@@ -213,7 +214,7 @@ class HubbubbCamera extends LitElement {
       this._state = { connected: false, status: e?.message || String(e) };
     }
     if (this._tab === "jarvis") this._loadJarvis(false);
-    const fast = ["live", "people", "jarvis"].includes(this._tab) || this._state?.enrolling;
+    const fast = ["live", "people", "jarvis"].includes(this._tab) || this._state?.enrolling || this._state?.gestures?.teaching;
     this._timer = setTimeout(() => this._poll(), fast ? 1500 : 6000);
   }
 
@@ -403,13 +404,14 @@ class HubbubbCamera extends LitElement {
     const open = this._open === c.id;
     const form = open ? this._form : gestureForm(config);
     const lit = this._flash?.gesture === c.id;
+    const taught = this._state?.gestures?.taught?.[c.id];
     const last = this._gestures.last?.gesture === c.id ? this._gestures.last : null;
     return html`
       <section class="card gesture ${open ? "open" : ""} ${lit ? "lit" : ""} ${form.enabled ? "" : "disabled"}">
         <button class="ghead" aria-expanded=${open} @click=${() => this._toggleGesture(c.id, config)}>
           <span class="gicon"><ha-icon .icon=${c.icon}></ha-icon></span>
           <span class="gtext">
-            <span class="name">${c.title}</span>
+            <span class="name">${c.title} <span class="badge ${taught ? "on" : ""}">${taught ? "Taught" : "Built-in shape"}</span></span>
             <span class="muted">${c.how}</span>
             <span class="summary">${form.enabled ? summarizeActions(config?.actions) : "Turned off"}${config?.repeat ? " · repeats while held" : ""}${config?.people?.length ? ` · only ${config.people.join(", ")}` : ""}</span>
           </span>
@@ -431,6 +433,41 @@ class HubbubbCamera extends LitElement {
     this._form = gestureForm(config);
   }
 
+  _renderTeach(c) {
+    const training = this._state?.gestures || {};
+    const now = training.teaching;
+    const taught = training.taught?.[c.id];
+    if (now?.gesture === c.id)
+      return html`<div class="teach-box">
+        <div class="teach-row">
+          <div class="teach-view">${this._renderView(true)}</div>
+          <div>
+            <div class="name">Teaching ${c.title}…</div>
+            <div class="progress"><div style=${`width:${Math.round((100 * now.samples) / now.target)}%`}></div></div>
+            <p class="muted">${this._state?.status || ""}</p>
+            <p class="muted small">Look at the camera, hold ${c.title.toLowerCase()} at chest height, and move it around a little — closer, further, tilted — so it learns your hand from every angle.</p>
+          </div>
+        </div>
+      </div>`;
+    return html`<div class="teach-box">
+      <div class="teach-row-inline">
+        <div class="grow">
+          <div class="name">${taught ? `Taught from your hand (${taught} samples)` : "Using the built-in shape"}</div>
+          <div class="muted small">${taught ? "Re-teach it if it's being missed or mistaken for another gesture." : "Teach it your way of doing it — it takes 3 seconds and makes it far more reliable."}</div>
+        </div>
+        <button class="primary" ?disabled=${this._busy || !!now} @click=${() => this._try(() => this._call("camera_gesture_teach", { gesture: c.id })).then(() => this._poll())}>${taught ? "Re-teach" : "Teach it"}</button>
+        ${taught ? html`<button ?disabled=${this._busy || !!now} @click=${() => this._forgetTeach(c.id)}>${this._confirm === `g:${c.id}` ? "Really forget?" : "Forget"}</button>` : nothing}
+      </div>
+    </div>`;
+  }
+
+  async _forgetTeach(id) {
+    if (this._confirm !== `g:${id}`) return (this._confirm = `g:${id}`);
+    this._confirm = null;
+    await this._try(() => this._call("camera_gesture_forget", { gesture: id }));
+    this._poll();
+  }
+
   _renderGestureEditor(c) {
     const enrolled = (this._state?.enrolled || []).map((p) => p.name);
     const config = this._gestures.gestures[c.id];
@@ -438,6 +475,7 @@ class HubbubbCamera extends LitElement {
     if (!this._formReady) return html`<div class="empty">Loading the editor…</div>`;
     return html`
       <div class="editor">
+        ${this._renderTeach(c)}
         <ha-form
           .hass=${this.hass}
           .data=${this._form}
@@ -920,6 +958,12 @@ class HubbubbCamera extends LitElement {
     .summary { font-size: 13px; }
     .when { font-size: 12px; white-space: nowrap; }
     .chev { color: var(--secondary-text-color); }
+    .badge { font-size: 11px; font-weight: 500; padding: 2px 8px; border-radius: 999px; margin-left: 6px; background: var(--divider-color); color: var(--secondary-text-color); vertical-align: 1px; }
+    .badge.on { background: rgba(var(--rgb-success-color, 67, 160, 71), 0.18); color: var(--success-color, #43a047); }
+    .teach-box { margin-bottom: 12px; padding: 12px; border-radius: 10px; background: var(--primary-background-color); }
+    .teach-row { display: grid; grid-template-columns: minmax(0, 260px) minmax(0, 1fr); gap: 16px; align-items: start; }
+    .teach-row-inline { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+    @media (max-width: 600px) { .teach-row { grid-template-columns: minmax(0, 1fr); } }
     .editor { padding: 0 16px 16px; border-top: 1px solid var(--divider-color); padding-top: 12px; }
     code { font-size: 12px; background: var(--primary-background-color); padding: 1px 4px; border-radius: 4px; }
 

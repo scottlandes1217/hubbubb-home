@@ -217,3 +217,5 @@ jarvis_presence_test:
     mood:
       required: true
       selector: { select: { options: [listening, thinking, speaking] } }
+camera_gesture_teach:
+camera_gesture_forget:

@@ -57,6 +57,8 @@ PASSTHROUGH = {
     "camera_learn": ("POST", "learn"),
     "camera_room_reset": ("POST", "room_reset"),
     "camera_look": ("POST", "look"),
+    "camera_gesture_teach": ("POST", "gesture_teach"),
+    "camera_gesture_forget": ("POST", "gesture_forget"),
 }
 
 GESTURE_SCHEMA = vol.Schema(
