@@ -29,7 +29,7 @@ export const KNOBS = [
   ["handConfidence", "Hand clarity", "How clearly every finger must be seen. Higher ignores hands holding a phone or petting the dog.", 0.05],
   ["lookTurn", "Looking at the camera", "How far your face may turn from the camera and still count as looking (0 = straight at it, 0.5 = side-on). Works with your head tilted, lying down. Raise it if you're refused while looking at the camera; lower it if glancing at your phone counts.", 0.01],
   ["followGain", "Following speed", "How quickly the camera turns to keep you centred. Higher is snappier; too high and it wobbles.", 0.05],
-  ["gestureReach", "Gesture height (fallback)", "A hand counts as raised when its wrist is above its elbow. Only when the elbow can't be seen: how far below your chin a hand still counts, in face-heights.", 0.1],
+  ["gestureReach", "Gesture height", "A hand counts as raised when its wrist is above its elbow, or when it is no more than this many face-heights below your chin. Raise it if chest-height gestures are missed; lower it if a phone or keyboard sets gestures off.", 0.1],
   ["hairReach", "Head zone: above the face", "Hands this far above your face (hair) pause gestures, in face-heights.", 0.1],
   ["chinReach", "Head zone: below the chin", "Hands this far below your chin (eating, drinking) pause gestures, in face-heights.", 0.1],
   ["steadiness", "Hold-still tolerance", "How still a hand must be for a gesture to count. Lower is stricter.", 0.05],
