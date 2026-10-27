@@ -26,6 +26,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 from homeassistant.helpers.script import SCRIPT_MODE_PARALLEL, Script, async_validate_actions_config
 from homeassistant.helpers.storage import Store
+from homeassistant.util.ulid import ulid_now
 
 from .companion import CAMERA_PORT
 from .const import DOMAIN
@@ -81,7 +82,10 @@ GESTURE_SCHEMA = vol.Schema(
 # The puck's states, as the camera's moods.
 SATELLITE_MOODS = {"listening": "listening", "processing": "thinking", "responding": "speaking"}
 MOOD_ORDER = ("speaking", "thinking", "listening")
-MOOD_COLORS = {"listening": [0, 120, 255], "thinking": [255, 150, 0], "speaking": [0, 220, 200]}
+# No colour, ever: a tint that leaked into a snapshot or restore came back as
+# a green lamp minutes later. Listening brightens, thinking dims, speaking
+# breathes between the two; the lamp keeps whatever colour it had.
+PULSE_SECONDS = 0.7
 SNAPSHOT_SCENE = "hubbubb_jarvis_lights_before"
 
 JARVIS_SCHEMA = vol.Schema(
@@ -92,11 +96,10 @@ JARVIS_SCHEMA = vol.Schema(
         vol.Optional("lights", default=False): bool,
         vol.Optional("light_entities", default=[]): [cv.entity_id],
         vol.Optional("pause_while"): vol.Any(None, cv.entity_id),
+        # Only used when the light was off: the level it comes on at.
         vol.Optional("brightness", default=80): vol.All(vol.Coerce(int), vol.Range(1, 100)),
-        vol.Optional("colors", default=MOOD_COLORS): {
-            vol.In(tuple(MOOD_COLORS)): vol.All([vol.All(vol.Coerce(int), vol.Range(0, 255))], vol.Length(3, 3))
-        },
-    }
+    },
+    extra=vol.REMOVE_EXTRA,  # stored configs still carry the old "colors"
 )
 
 
@@ -138,10 +141,10 @@ def reapply(entity_id: str, state: str, attributes: dict) -> tuple[str, dict]:
     return "turn_on", data
 
 
-def is_tint(attributes: dict, rgb: list | None) -> bool:
-    """Whether a light shows the colour this feature last set (its own echo)."""
-    shown = attributes.get("rgb_color")
-    return bool(rgb and shown) and all(abs(a - b) <= 40 for a, b in zip(shown, rgb))
+def mood_levels(base: int) -> tuple[int, int]:
+    """(bright, dim) brightness_pct around the light's own level, so a lamp
+    dimmed for the night stays dim-ish and a bright one still visibly moves."""
+    return min(100, base + 30), max(5, base // 2)
 
 
 def commands_lights(data: dict, targets: set[str]) -> bool:
@@ -420,9 +423,9 @@ class JarvisPresence:
     """The camera's body language and the room's lights, following the pucks.
 
     Listening, thinking and speaking move the camera a few degrees and, when
-    chosen, tint some lights; idle puts both back. The lights are snapshotted
-    into a scene first and restored from it, so they return to exactly what
-    they were - including off.
+    chosen, dim and brighten some lights (never their colour); idle puts both
+    back. The lights are snapshotted into a scene first and restored from it,
+    so they return to exactly what they were - including off.
     """
 
     def __init__(self, hass: HomeAssistant, link: CameraLink) -> None:
@@ -444,7 +447,8 @@ class JarvisPresence:
         # anything else that changed the lights - a command to them wins.
         self._started: datetime | None = None
         self._ours: set[str] = set()
-        self._tint: list | None = None
+        self._base = 80  # the lights' brightness_pct when the conversation began
+        self._pulse_task: asyncio.Task | None = None
         self._foreign: dict = {}
         self._commanded = False
         self._handback = False  # "natural": they gave the lights back to Adaptive Lighting
@@ -503,6 +507,7 @@ class JarvisPresence:
             return
         self._snapshot = False
         self._restored_at = time.monotonic()
+        self._stop_pulse()
         if self._watch_lights:
             self._watch_lights()
             self._watch_lights = None
@@ -528,8 +533,12 @@ class JarvisPresence:
         self.hass.async_create_background_task(_run(), f"{DOMAIN} jarvis lights restore")
 
     def _context(self) -> Context:
-        """A context for our own light calls, remembered so their echoes are ours."""
-        context = Context()
+        """A context for our own light calls, remembered so their echoes are ours.
+
+        ':jv:' in the id (like Adaptive Lighting's ':al:') lets the
+        brightness-pauses-Adaptive-Lighting automation skip our calls.
+        """
+        context = Context(id=f"{ulid_now()[:22]}:jv:")
         self._ours.add(context.id)
         if len(self._ours) > 200:
             self._ours = set(list(self._ours)[-100:])
@@ -587,11 +596,11 @@ class JarvisPresence:
         """A light we tint changed. Ours, or someone's command?"""
         new = event.data.get("new_state")
         context = event.context
-        if new is None or is_tint(dict(new.attributes), self._tint) or is_adaptive_lighting(context):
-            return  # gone, (a late echo of) our own colour, or Adaptive Lighting's routine pass
+        if new is None or is_adaptive_lighting(context):
+            return  # gone, or Adaptive Lighting's routine pass
         # A group command's change reaches the light under the context of our
         # last call to it (HA keeps an entity's context for 5 s), so after a
-        # command any colour that isn't our tint is theirs.
+        # command a change under our context is theirs.
         if not self._commanded and (context.id in self._ours or context.parent_id in self._ours):
             return
         self._foreign[new.entity_id] = new
@@ -639,6 +648,7 @@ class JarvisPresence:
         if self._pending_restore:
             self._pending_restore()  # still the same conversation
             self._pending_restore = None
+        self._stop_pulse()
         pause = config.get("pause_while")
         if pause and self.hass.states.is_state(pause, "on"):
             return
@@ -658,6 +668,10 @@ class JarvisPresence:
                     "scene", "create", {"scene_id": SNAPSHOT_SCENE, "snapshot_entities": entities},
                     blocking=True, context=self._context(),
                 )
+                # ponytail: one level for all the lights (the first one on), per-light if several differ a lot
+                lit = next((st for st in map(self.hass.states.get, entities)
+                            if st and st.state == "on" and st.attributes.get("brightness")), None)
+                self._base = round(lit.attributes["brightness"] * 100 / 255) if lit else config.get("brightness", 80)
             self._snapshot = True
             self._started = datetime.now(UTC)
             self._foreign = {}
@@ -668,22 +682,36 @@ class JarvisPresence:
                 self.hass.bus.async_listen("call_service", self._light_call),
             )
             self._watch_lights = lambda: [u() for u in unsubs]
-        if self._foreign or self._handback:
+        if self._left_alone():
             return  # they changed these lights mid-conversation; leave them be
-        self._tint = (config.get("colors") or MOOD_COLORS).get(mood, MOOD_COLORS[mood])
+        bright, dim = mood_levels(self._base)
+        if mood == "speaking":
+            self._pulse_task = self.hass.async_create_background_task(
+                self._pulse(entities, bright, dim), f"{DOMAIN} jarvis lights pulse")
+        else:
+            await self._set_level(entities, bright if mood == "listening" else dim)
+
+    def _left_alone(self) -> bool:
+        return bool(self._foreign or self._handback)
+
+    async def _set_level(self, entities: list[str], pct: int) -> None:
         await self.hass.services.async_call(
-            "light",
-            "turn_on",
-            {
-                "entity_id": entities,
-                "rgb_color": self._tint,
-                "brightness_pct": config.get("brightness", 80),
-                "transition": 0.4,
-            },
-            blocking=False,
-            context=self._context(),
+            "light", "turn_on", {"entity_id": entities, "brightness_pct": pct, "transition": PULSE_SECONDS - 0.1},
+            blocking=False, context=self._context(),
         )
 
+    async def _pulse(self, entities: list[str], bright: int, dim: int) -> None:
+        """Breathe while Jarvis speaks, until the mood changes or someone takes the lights."""
+        level = bright
+        while not self._left_alone():
+            await self._set_level(entities, level)
+            level = dim if level == bright else bright
+            await asyncio.sleep(PULSE_SECONDS)
+
+    def _stop_pulse(self) -> None:
+        if self._pulse_task:
+            self._pulse_task.cancel()
+            self._pulse_task = None
 
 def async_register_services(hass: HomeAssistant, link: CameraLink, presence: JarvisPresence) -> list[str]:
     """The panel's calls, plus the two actions a gesture or automation may use."""

@@ -68,8 +68,8 @@ _stub(
 )
 _stub(
     "homeassistant.core",
-    Context=type("Context", (), {"__init__": lambda self, parent_id=None: (
-        setattr(self, "id", f"ctx{id(self)}"), setattr(self, "parent_id", parent_id))[0]}),
+    Context=type("Context", (), {"__init__": lambda self, parent_id=None, id=None: (
+        setattr(self, "id", id or f"ctx{__builtins__.id(self)}"), setattr(self, "parent_id", parent_id))[0]}),
     Event=object,
     HomeAssistant=object,
     CALLBACK_TYPE=object,
@@ -95,6 +95,7 @@ except ImportError:
         All=lambda *a, **k: None,
         Length=lambda *a, **k: None,
         Range=lambda *a, **k: None,
+        REMOVE_EXTRA=None,
         Any=lambda *a, **k: None,
         Invalid=Exception,
     )
@@ -169,6 +170,7 @@ _stub(
     start_of_local_day=lambda d: _NOW,
 )
 _stub("homeassistant.util.json", JsonObjectType=dict)
+_stub("homeassistant.util.ulid", ulid_now=lambda: __import__("uuid").uuid4().hex[:26].upper())
 
 # The package's __init__ imports most of Home Assistant, and none of it is
 # needed to exercise the logic. Register hubbubb_home as a package by path so
@@ -549,6 +551,55 @@ def test_jarvis_lights_survive_a_follow_up_question():
     assert calls.count("scene.create") == 1, calls  # saved once, before any colour
     assert calls[-1] == "scene.turn_on", calls  # and put back once, at the end
     assert calls.count("scene.turn_on") == 1, calls
+
+
+def test_jarvis_only_dims_and_brightens_never_colours():
+    """No rgb ever (a leaked tint came back green); speaking breathes, the restore stops it."""
+    import asyncio
+
+    calls, timers = [], []
+
+    class Services:
+        async def async_call(self, domain, service, data, blocking=False, context=None):
+            calls.append((f"{domain}.{service}", data, context))
+
+    lamp = types.SimpleNamespace(entity_id="light.bar", state="on", attributes={"brightness": 102}, last_changed=None)  # 40%
+
+    class Hass:
+        services = Services()
+        bus = types.SimpleNamespace(async_listen=lambda *a: (lambda: None))
+        config_entries = types.SimpleNamespace(async_entries=lambda d: [])
+        states = types.SimpleNamespace(is_state=lambda *a: False, get=lambda e: lamp, async_all=lambda d: [])
+
+        def async_create_background_task(self, coro, name):
+            return asyncio.ensure_future(coro)
+
+    def call_later(hass, delay, action):
+        timers.append(action)
+        return lambda: timers.remove(action)
+
+    eyes.async_call_later = call_later
+    eyes.async_track_state_change_event = lambda *a: (lambda: None)
+    eyes.PULSE_SECONDS = 0.01
+    link = types.SimpleNamespace(jarvis={"move": False, "lights": True, "light_entities": ["light.bar"]})
+    presence = eyes.JarvisPresence(Hass(), link)
+
+    async def run():
+        await presence.async_apply("listening")
+        await presence.async_apply("speaking")
+        await asyncio.sleep(0.05)
+        await presence.async_apply("idle")
+        [t for t in timers if getattr(t, "__name__", "") == "_restore"][0]()
+        await asyncio.sleep(0.05)
+        return len(calls)
+
+    after_restore = asyncio.run(run())
+    levels = [d["brightness_pct"] for c, d, _ in calls if c == "light.turn_on"]
+    assert not any(k in d for _, d, _ in calls for k in ("rgb_color", "xy_color", "hs_color")), calls
+    assert levels[0] == 70 and {70, 20} <= set(levels[1:]), levels  # around the lamp's own 40%
+    assert calls[-1][0] == "scene.turn_on" and len(calls) == after_restore, "pulse stopped at the restore"
+    assert all(":jv:" in ctx.id for _, _, ctx in calls), "marked so the AL-pause automation skips us"
+    assert eyes.mood_levels(90) == (100, 45) and eyes.mood_levels(6) == (36, 5)
 
 
 def test_jarvis_puts_back_the_scene_the_lights_were_in():
