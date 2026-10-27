@@ -2763,6 +2763,8 @@ def test_same_request_spots_a_repeat_not_a_new_command():
     assert not same_request("add milk to my list", "add eggs to my list")
     assert not same_request("what is the weather", "turn on the bedroom fan")
     assert not same_request("the", "a")
+    # A confirmation is an answer to the house, not the earlier ask again.
+    assert not same_request("Yes, what color are the lights?", "Yes.")
 
 
 def test_named_list_match():
