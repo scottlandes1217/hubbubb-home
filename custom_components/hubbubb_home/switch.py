@@ -55,6 +55,7 @@ async def async_setup_entry(
             CameraSwitch(entry, runtime, key, label, icon)
             for key, label, icon in CAMERA_SWITCHES
         )
+        async_add_entities([GesturesSwitch(entry, runtime)])
 
 
 class HubbubbSwitch(HubbubbEntity, SwitchEntity, RestoreEntity):
@@ -116,3 +117,28 @@ class CameraSwitch(HubbubbEntity, SwitchEntity):
 
     async def async_turn_off(self, **kwargs) -> None:
         await self._link.async_settings({self._key: False})
+
+
+class GesturesSwitch(HubbubbEntity, SwitchEntity):
+    """Every camera gesture on or off - off for meetings. Kept in Home Assistant."""
+
+    _attr_name = "Camera gestures"
+    _attr_icon = "mdi:hand-wave"
+
+    def __init__(self, entry: ConfigEntry, runtime) -> None:
+        super().__init__(entry, runtime.name)
+        self._link = runtime.camera
+        self._attr_unique_id = f"{entry.entry_id}_camera_gestures"
+
+    async def async_added_to_hass(self) -> None:
+        self.async_on_remove(self._link.async_add_listener(self.async_write_ha_state))
+
+    @property
+    def is_on(self) -> bool:
+        return self._link.gestures_on
+
+    async def async_turn_on(self, **kwargs) -> None:
+        await self._link.async_set_gestures_on(True)
+
+    async def async_turn_off(self, **kwargs) -> None:
+        await self._link.async_set_gestures_on(False)

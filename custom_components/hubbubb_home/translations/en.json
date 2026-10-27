@@ -398,6 +398,16 @@
         }
       }
     },
+    "gestures_enable": {
+      "name": "Turn camera gestures on or off",
+      "description": "Off ignores every camera gesture, for meetings or talking with your hands.",
+      "fields": {
+        "on": {
+          "name": "On",
+          "description": "On listens for gestures again; off ignores them all."
+        }
+      }
+    },
     "gesture_test": {
       "name": "Run a gesture's actions",
       "description": "Run the actions assigned to a camera gesture, as if someone had made it.",

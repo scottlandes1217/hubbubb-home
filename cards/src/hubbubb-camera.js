@@ -436,10 +436,20 @@ class HubbubbCamera extends LitElement {
     if (!g) return html`<div class="empty">Loading gestures…</div>`;
     return html`
       <p class="intro">Look at the camera and hold a gesture steady at chest height for about a second. Assign each one any Home Assistant actions — the same editor automations use. Hands at the keyboard, near your face, or while you look elsewhere never count.</p>
-      <div class="gestures">
+      <section class="card">
+        <ha-formfield label="Gestures on — turn off for meetings or when talking with your hands">
+          <ha-switch .checked=${g.on !== false} ?disabled=${this._busy} @change=${(e) => this._gesturesOn(e.target.checked)}></ha-switch>
+        </ha-formfield>
+      </section>
+      <div class="gestures ${g.on === false ? "disabled" : ""}">
         ${g.catalog.map((c) => this._renderGesture(c, g.gestures[c.id]))}
       </div>
     `;
+  }
+
+  async _gesturesOn(on) {
+    await this._try(() => this._call("gestures_enable", { on }, false));
+    this._loadGestures();
   }
 
   _renderGesture(c, config) {
@@ -1044,6 +1054,7 @@ class HubbubbCamera extends LitElement {
     .answer { margin: 12px 0 0; padding: 10px 12px; border-radius: 8px; background: var(--primary-background-color); line-height: 1.5; }
 
     .gestures { display: grid; gap: 12px; }
+    .gestures.disabled { opacity: 0.5; }
     .gesture { padding: 0; transition: border-color 160ms; }
     .gesture.lit { border-color: var(--primary-color); box-shadow: 0 0 0 2px rgba(var(--rgb-primary-color, 3, 169, 244), 0.3); }
     .gesture.disabled .gicon { opacity: 0.4; }

@@ -190,6 +190,11 @@ mac_screen_sharing:
     "on":
       required: true
       selector: { boolean: }
+gestures_enable:
+  fields:
+    "on":
+      required: true
+      selector: { boolean: }
 gesture_test:
   fields:
     gesture:

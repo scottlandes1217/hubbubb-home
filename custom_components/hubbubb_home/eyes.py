@@ -217,6 +217,8 @@ class CameraLink:
         self._speakers = speakers
         self._store = Store(hass, 1, f"{DOMAIN}.gestures")
         self.gestures: dict[str, dict] = {}
+        # Master switch: off (a meeting, talking with your hands) ignores every gesture.
+        self.gestures_on = True
         self._scripts: dict[str, Script] = {}
         self.state: dict = {}
         self.connected = False
@@ -272,6 +274,7 @@ class CameraLink:
     async def async_load(self) -> None:
         stored = await self._store.async_load() or {}
         self.gestures = stored.get("gestures") or {}
+        self.gestures_on = stored.get("gestures_on", True)
         self.jarvis = JARVIS_SCHEMA(stored.get("jarvis") or {})
         if "pause_while" not in (stored.get("jarvis") or {}):
             # A Hue Sync Box owns its lights while syncing; stay out of its way.
@@ -306,8 +309,15 @@ class CameraLink:
         await self._save()
         return config
 
+    async def async_set_gestures_on(self, on: bool) -> None:
+        self.gestures_on = on
+        await self._save()
+        self._changed()
+
     async def _save(self) -> None:
-        await self._store.async_save({"gestures": self.gestures, "imported": True, "jarvis": self.jarvis})
+        await self._store.async_save(
+            {"gestures": self.gestures, "gestures_on": self.gestures_on, "imported": True, "jarvis": self.jarvis}
+        )
 
     async def _script(self, gesture: str) -> Script | None:
         if gesture not in self._scripts:
@@ -342,7 +352,7 @@ class CameraLink:
 
     async def _gesture(self, event: dict) -> None:
         gesture = event.get("gesture")
-        if gesture not in TITLES:
+        if gesture not in TITLES or not self.gestures_on:
             return
         person = event.get("person") or None
         held = bool(event.get("held"))
@@ -693,7 +703,11 @@ def async_register_services(hass: HomeAssistant, link: CameraLink, presence: Jar
             "catalog": [{"id": g, "title": t, "how": how, "icon": icon} for g, t, how, icon in GESTURES],
             "gestures": link.gestures,
             "last": link.last_gesture,
+            "on": link.gestures_on,
         }
+
+    async def gestures_enable(call: ServiceCall):
+        await link.async_set_gestures_on(call.data["on"])
 
     async def gesture_save(call: ServiceCall):
         return {"saved": await link.async_save_gesture(dict(call.data))}
@@ -733,6 +747,9 @@ def async_register_services(hass: HomeAssistant, link: CameraLink, presence: Jar
     hass.services.async_register(DOMAIN, "gestures_get", gestures_get, supports_response=SupportsResponse.ONLY)
     hass.services.async_register(DOMAIN, "gesture_save", gesture_save, supports_response=SupportsResponse.ONLY)
     hass.services.async_register(
+        DOMAIN, "gestures_enable", gestures_enable, schema=vol.Schema({vol.Required("on"): cv.boolean})
+    )
+    hass.services.async_register(
         DOMAIN, "gesture_test", gesture_test,
         schema=vol.Schema({vol.Required("gesture"): vol.In(TITLES), vol.Optional("person"): str}),
     )
@@ -741,5 +758,5 @@ def async_register_services(hass: HomeAssistant, link: CameraLink, presence: Jar
         schema=vol.Schema({vol.Required("on"): cv.boolean}),
         supports_response=SupportsResponse.OPTIONAL,
     )
-    return [*PASSTHROUGH, "gestures_get", "gesture_save", "gesture_test", "mac_screen_sharing",
+    return [*PASSTHROUGH, "gestures_get", "gesture_save", "gestures_enable", "gesture_test", "mac_screen_sharing",
             "jarvis_presence_get", "jarvis_presence_save", "jarvis_presence_test"]
