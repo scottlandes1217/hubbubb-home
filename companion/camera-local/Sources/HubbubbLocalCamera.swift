@@ -186,12 +186,9 @@ private struct RoomMap {
         let beside = atMouth.enumerated().map { $0.offset < 2 ? $0.element : CGPoint(x: 0.6, y: 0.55) }
         precondition(GestureGate.atHead(atMouth, head: mouth), "a hand at the mouth is at the head")
         precondition(!GestureGate.atHead(beside, head: mouth), "a fingertip grazing it is not")
-        precondition(GestureGate.pausesAtHead(atHead: true, pose: nil, counting: []), "a hand at the head pauses")
-        precondition(GestureGate.pausesAtHead(atHead: true, pose: "number_3", counting: []), "even a pose not yet started")
-        precondition(!GestureGate.pausesAtHead(atHead: true, pose: "number_3", counting: ["number_3", nil]),
-                     "a held pose drifting to the head keeps counting")
-        precondition(GestureGate.pausesAtHead(atHead: true, pose: "number_1", counting: ["number_3"]), "a different pose there pauses")
-        precondition(!GestureGate.pausesAtHead(atHead: false, pose: nil, counting: []), "away from the head never pauses")
+        precondition(GestureGate.pausesAtHead(atHead: true, pose: nil), "a hand at the head pauses")
+        precondition(!GestureGate.pausesAtHead(atHead: true, pose: "number_3"), "three fingers beside the head counts")
+        precondition(!GestureGate.pausesAtHead(atHead: false, pose: nil), "away from the head never pauses")
         // Elbows: a forearm up is raised; a hand in the lap is not, even when
         // the camera's angle puts it close to the face in the picture.
         let arm = [(wrist: CGPoint(x: 0.6, y: 0.4), elbow: CGPoint(x: 0.62, y: 0.3))]
@@ -463,13 +460,12 @@ private enum GestureGate {
         return CGFloat(points.filter(head.contains).count) / CGFloat(points.count) >= share
     }
 
-    /// A hand at the head pauses gestures - unless it is still making the pose
-    /// already being counted. Three fingers held up beside the head drifts into
-    /// the hair zone; resetting there kept the count stuck at its first frames.
-    static func pausesAtHead(atHead: Bool, pose: String?, counting: [String?]) -> Bool {
-        guard atHead else { return false }
-        guard let pose else { return true }
-        return !counting.contains(pose)
+    /// A hand at the head pauses gestures - unless it is clearly making one.
+    /// Three fingers held up beside the head sits in the hair zone from its
+    /// first frame, so pausing there meant it never counted at all. Eating and
+    /// scratching are not gesture shapes; a pose still has to be held still.
+    static func pausesAtHead(atHead: Bool, pose: String?) -> Bool {
+        atHead && pose == nil
     }
 
     /// How far a face is turned from the camera, from where the nose sits
@@ -1868,8 +1864,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         // for two seconds; a meal keeps renewing that, so it stays off.
         if let face, GestureGate.pausesAtHead(
             atHead: hands.contains(where: { handOverlapsFace($0, faceBounds: face, up: up) }),
-            pose: primaryHand.flatMap { classifyGesture($0) },
-            counting: votes.recent
+            pose: primaryHand.flatMap { classifyGesture($0) }
         ) {
             votes = GestureVotes(lastVolumeRepeat: votes.lastVolumeRepeat, pausedUntil: now.addingTimeInterval(1.2))
             return ("Gestures paused: a hand is at a face, mouth or hair.", nil)
