@@ -1764,7 +1764,7 @@ class HubbubbRingCard extends LitElement {
     e.preventDefault();
     const cancelled = e.type !== "pointerup";
     if (!cancelled) this._screenPointerMove(e);
-    if (!gesture.up(e.pointerId, cancelled)) return;
+    if (!gesture.up(e.pointerId, cancelled)) { this._screenLastTap = null; return; }
     const img = e.currentTarget.querySelector(".screen-image");
     if (!img) return;
     const last = this._screenLastTap, now = performance.now();
@@ -1831,6 +1831,26 @@ class HubbubbRingCard extends LitElement {
     this._settlePin();
   }
 
+  _screenTapCommand(point, count) {
+    const pending = this._screenPendingTap;
+    if (pending) {
+      clearTimeout(pending.timer);
+      this._screenPendingTap = null;
+      pending.finish(count === 2 ? 2 : 1);
+      if (count === 2) return pending.request;
+    }
+    let finish;
+    const ready = new Promise(resolve => { finish = resolve; });
+    // Reserve queue order now, but combine two taps before sending any click.
+    const request = this._screenCommand("agent_screen_click", point, ready);
+    const tap = { finish, request, timer: setTimeout(() => {
+      if (this._screenPendingTap === tap) this._screenPendingTap = null;
+      finish(1);
+    }, 400) };
+    this._screenPendingTap = tap;
+    return request;
+  }
+
   async _screenClick(e) {
     const img = e.currentTarget;
     const point = screenPoint(img.getBoundingClientRect(), img.naturalWidth,
@@ -1855,7 +1875,7 @@ class HubbubbRingCard extends LitElement {
     // request. iOS will not reliably open a keyboard from its later reply.
     if (screenFieldAt(this._view.fields, point)) this._showScreenKeyboard();
     try {
-      const result = await this._screenCommand("agent_screen_click", { ...point, count: e.detail === 2 ? 2 : 1 });
+      const result = await this._screenTapCommand(point, e.detail === 2 ? 2 : 1);
       marker.classList.add("accepted");
       if (run && this._screenRun === run) {
         run.urgent = true;
@@ -1974,11 +1994,12 @@ class HubbubbRingCard extends LitElement {
     if (this._screenGesture) this._screenGesture.pose = this._screenPose;
   }
 
-  _screenCommand(service, data) {
+  _screenCommand(service, data, tapReady = null) {
     const run = this._screenRun;
     // Mouse focus and keyboard events must reach the Mac in the same order
     // as the phone gestures, including when the network is slow.
     const request = (this._screenCommandTail || Promise.resolve()).then(async () => {
+      if (tapReady) data = { ...data, count: await tapReady };
       if (this._screenRun !== run || !this._view?.screen) throw new Error("Screen view closed.");
       if (service === "agent_screen_input" && !data.scroll && !data.action && run.focusFailed) {
         throw new Error("Tap the Mac input again before typing.");
@@ -2139,6 +2160,36 @@ class HubbubbRingCard extends LitElement {
     } finally { this._screenMissionBusy = false; }
   }
 
+  async _screenSpotlight() {
+    if (this._screenSpotlightBusy || !this._view?.screen) return;
+    this._screenSpotlightBusy = true;
+    this._screenEditorRequest = null;
+    this._screenEditor = null;
+    this._screenEditorLoading = false;
+    this._screenPendingEnter = null;
+    this._screenAnchor = { x: .5, y: .5 };
+    const entry = this.renderRoot.querySelector(".screen-entry");
+    if (entry) entry.value = "";
+    // iOS requires focus inside the button gesture, before awaiting the Mac.
+    // Keep a plain draft: a later focus read must not overwrite typed text.
+    this._showScreenKeyboard();
+    const run = this._screenRun;
+    this._screenLastTap = null;
+    try {
+      await this._screenCommand("agent_screen_input", { action: "spotlight" });
+      if (run && this._screenRun === run) {
+        run.focusFailed = false;
+        run.urgent = true;
+        run.wake?.();
+      }
+    } catch (err) {
+      if (this._screenRun === run) {
+        run.focusFailed = true;
+        this._toast(this._errText(err));
+      }
+    } finally { this._screenSpotlightBusy = false; }
+  }
+
   _renderViewer() {
     const v = this._view;
     const name = v.path.replace(/\/$/, "").split("/").pop() || v.path;
@@ -2148,6 +2199,8 @@ class HubbubbRingCard extends LitElement {
         ${v.screen ? html`<button class="hbtn screen-tool" data-ai="screen-mission-control"
           title="Mission Control" aria-label="Mission Control" ?disabled=${this._screenMissionBusy}
           @click=${this._screenMissionControl}><ha-icon icon="mdi:view-dashboard-outline"></ha-icon></button>
+          <button class="hbtn screen-tool" data-ai="screen-spotlight" title="Search Mac (Spotlight)" aria-label="Search Mac (Spotlight)"
+            @click=${this._screenSpotlight}><ha-icon icon="mdi:magnify"></ha-icon></button>
           <button class="hbtn screen-tool" data-ai="screen-keyboard" title="Keyboard" aria-label="Keyboard"
             @click=${() => this._openScreenKeyboard()}><ha-icon icon="mdi:keyboard-outline"></ha-icon></button>
           <button class="hbtn screen-tool" data-ai="screen-drag-mode"
@@ -2160,7 +2213,7 @@ class HubbubbRingCard extends LitElement {
           title="Close screen" aria-label="Close screen" @click=${() => this._closeViewer()}>
           ${v.screen ? html`<ha-icon icon="mdi:close"></ha-icon>` : "✕"}</button>
       </div>
-      <div class="vpath">${v.screen ? "Tap to click · Pinch to zoom · Switch Drag to scroll or pan" : v.path}</div>
+      <div class="vpath">${v.screen ? "Tap to click · Double-tap to double-click · Pinch to zoom · Switch Drag to scroll or pan" : v.path}</div>
       <div class="vbody"
         @wheel=${v.screen ? this._screenWheel : null}
         @pointerdown=${v.screen ? this._screenPointerDown : null}
