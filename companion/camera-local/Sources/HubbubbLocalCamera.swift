@@ -1103,9 +1103,9 @@ private final class CameraService {
             var reply: [String: Any] = [:]
             DispatchQueue.main.async {
                 if on {
-                    self.startScreenSharing { success, message in reply = ["ok": success, "detail": message]; done.signal() }
+                    self.startScreenSharing(attempt: 1) { success, message in reply = ["ok": success, "detail": message]; done.signal() }
                 } else {
-                    self.stopScreenSharing { note in reply = ["ok": true, "detail": note.trimmingCharacters(in: .whitespaces)]; done.signal() }
+                    self.stopScreenSharing(attempt: 1) { note in reply = ["ok": true, "detail": note.trimmingCharacters(in: .whitespaces)]; done.signal() }
                 }
             }
             done.wait()
@@ -1141,6 +1141,25 @@ private final class CameraService {
             ]]]
         }
         return gestures
+    }
+
+    /// After the Sync Box switches to the Mac, the Samsung takes a few seconds
+    /// to come back as Connected in Screen Mirroring: retry for about ten.
+    /// Already extended is success, not an error.
+    private func startScreenSharing(attempt: Int, completion: @escaping (Bool, String) -> Void) {
+        if NSScreen.screens.contains(where: { $0.localizedName.localizedCaseInsensitiveContains("samsung") }) {
+            completion(true, "The Samsung is already extended.")
+            return
+        }
+        startScreenSharing { success, message in
+            if success || attempt >= 5 {
+                completion(success, message)
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                self.startScreenSharing(attempt: attempt + 1, completion: completion)
+            }
+        }
     }
 
     private func startScreenSharing(completion: @escaping (Bool, String) -> Void) {
@@ -1232,6 +1251,22 @@ private final class CameraService {
             }
         }
     }
+    /// Right after the Sync Box switches away, the Samsung blinks out and back
+    /// and Screen Mirroring briefly lists it without Stop Extending: after each
+    /// try, look again two seconds later and retry while macOS still draws to it.
+    private func stopScreenSharing(attempt: Int, completion: @escaping (String) -> Void) {
+        stopScreenSharing { note in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                let extending = NSScreen.screens.contains { $0.localizedName.localizedCaseInsensitiveContains("samsung") }
+                if !extending || attempt >= 5 {
+                    completion(extending ? note : " Samsung screen sharing stopped.")
+                } else {
+                    self.stopScreenSharing(attempt: attempt + 1, completion: completion)
+                }
+            }
+        }
+    }
+
     private func stopScreenSharing(completion: @escaping (String) -> Void) {
         // Screen Mirroring rows are identified by CoreGraphics display ID ("Display:4").
         guard let samsung = NSScreen.screens.first(where: { $0.localizedName.localizedCaseInsensitiveContains("samsung") }),
@@ -1301,6 +1336,8 @@ private struct GestureVotes {
     // One gesture at a time: after one fires, a different one waits.
     var lastFired: String?
     var quietUntil = Date.distantPast
+    // Frames in a row with no raised hand.
+    var handless = 0
 }
 
 /// A person followed across frames: matched frame to frame by position, so
@@ -1871,6 +1908,15 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         }
         if now < votes.pausedUntil {
             return ("Gestures paused for a moment: a hand was just at a face (eating?).", nil)
+        }
+        // A dropped hand ends the gesture, so the same one can fire again on
+        // the next raise. Waiting for its old votes to age out took seconds.
+        // Calibration knob: a few frames, so one missed detection mid-hold
+        // doesn't re-fire it.
+        votes.handless = primaryHand == nil ? votes.handless + 1 : 0
+        if votes.handless >= (UserDefaults.standard.object(forKey: "dropFrames") as? Int ?? 5) {
+            votes.recent.removeAll()
+            votes.latched = nil
         }
         // Held still or it doesn't count. Tolerance scales with the face, so it
         // means the same up close and across the room.
