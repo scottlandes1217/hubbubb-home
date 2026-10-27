@@ -129,6 +129,20 @@ class HubbubbAPI(llm.API):
             "with a brightness or other light change unless the speaker asked "
             "for one - natural follows the sun by itself."
         )
+        # A short, specific route for the common single-light colour command.
+        # The all-house tone intent is also exposed as a tool, and can look
+        # tempting beside HassLightSet even though it targets every light and
+        # only accepts a small set of colour temperatures.
+        prompt += (
+            "\n\nFor a direct request to change one named light to a colour "
+            "such as red, use the Assist HassLightSet tool for that light "
+            "and the requested colour. Do not use JarvisAllLightsTone unless "
+            "the speaker explicitly asks to set all the house lights to a "
+            "supported tone. Say the light changed only after HassLightSet "
+            "succeeds. When asked what colour a light is now, report a colour "
+            "only if live context includes colour data; never infer it from "
+            "brightness or call a white light warm or cool without evidence."
+        )
         # The persona's "say you can't" reads, to a 3B model, as license to
         # improvise a sentence of filler. When the companion exists, the rule
         # is escalate - never guess.
@@ -151,8 +165,13 @@ class HubbubbAPI(llm.API):
                 "tool returned an error; the speaker says you were wrong; "
                 "or the speaker asks for Claude. When the job needs the "
                 "computer itself - files, apps, coding, multi-step work - "
-                "call use_computer instead. Never guess and never apologize "
-                "at length."
+                "call use_computer instead. Opening or bringing up a website "
+                "or app (Netflix, YouTube) on the Mac or Mac mini is always "
+                "use_computer: media_player.mac_mini is only a music speaker, "
+                "and screen mirroring is only for when the speaker says "
+                "mirror, screen share or AirPlay. Say something is done only "
+                "when its tool succeeded; if it returned an error, say what "
+                "failed. Never guess and never apologize at length."
             )
         return llm.APIInstance(
             api=self,
@@ -641,7 +660,8 @@ class UseComputerTool(_RuntimeTool):
     name = "use_computer"
     description = (
         "Do a job on the companion computer: open, find, read or organize "
-        "files, run apps, look something up on it, make or edit a project. "
+        "files, run apps, look something up on it, make or edit a project, "
+        "or open a website such as Netflix or YouTube in its browser. "
         "A worker on this same local model does it and speaks the result "
         "when finished; anything risky it asks the speaker to confirm first. "
         "After calling this just say it's being done."
