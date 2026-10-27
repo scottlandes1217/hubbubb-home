@@ -23,7 +23,6 @@ from aiohttp import web
 
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import (
     HomeAssistant,
     callback,
@@ -319,16 +318,10 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         runtime.camera.announce = runtime.announce_message
         presence = eyes.JarvisPresence(hass, runtime.camera)
         runtime.camera_services = eyes.async_register_services(hass, runtime.camera, presence)
-        # The pucks come up with their own integration; with "every puck"
-        # chosen, look for them once Home Assistant has finished starting.
-        @callback
-        def _start(_event=None) -> None:
-            presence.async_start()
-
-        if hass.is_running:
-            _start()
-        else:
-            hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _start)
+        # Straight away: it listens by domain, so pucks that connect later
+        # count, and a slow integration holding up "started" (iCloud) cannot
+        # leave the lamp deaf for minutes after a restart.
+        presence.async_start()
         runtime.unsubscribe.append(presence.async_stop)
         # Cancelled with the entry; reconnects by itself if the Mac sleeps.
         entry.async_create_background_task(hass, runtime.camera.async_run(), f"{DOMAIN} camera feed")

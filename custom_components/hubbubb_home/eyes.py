@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
+import re
 import time
+from array import array
 from datetime import UTC, datetime, timedelta
 from collections.abc import Awaitable, Callable
 from urllib.parse import urlsplit
@@ -26,6 +29,7 @@ from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.event import async_call_later, async_track_state_change_event
 from homeassistant.helpers.script import SCRIPT_MODE_PARALLEL, Script, async_validate_actions_config
 from homeassistant.helpers.storage import Store
+from homeassistant.util.ulid import ulid_now
 
 from .companion import CAMERA_PORT
 from .const import DOMAIN
@@ -81,7 +85,16 @@ GESTURE_SCHEMA = vol.Schema(
 # The puck's states, as the camera's moods.
 SATELLITE_MOODS = {"listening": "listening", "processing": "thinking", "responding": "speaking"}
 MOOD_ORDER = ("speaking", "thinking", "listening")
-MOOD_COLORS = {"listening": [0, 120, 255], "thinking": [255, 150, 0], "speaking": [0, 220, 200]}
+# No colour, ever: a tint that leaked into a snapshot or restore came back as
+# a green lamp minutes later. Listening dims, thinking breathes, speaking
+# follows the loudness of Jarvis's own voice; the lamp keeps its colour.
+PULSE_SECONDS = 0.7
+VOICE_STEP = 0.2  # one lamp change per 200 ms of speech - the Hue bridge takes ~10 commands/s
+# Calibration knobs: from the reply being ready (TTS_END) to sound out of the
+# puck; announcements play the 2.1 s preannounce chime first. Tune by eye.
+VOICE_DELAY = 0.4
+PREANNOUNCE_SECONDS = 2.1
+TTS_TOKEN = re.compile(r"(?:tts_proxy|-stream-)/([A-Za-z0-9_-]+)")
 SNAPSHOT_SCENE = "hubbubb_jarvis_lights_before"
 
 JARVIS_SCHEMA = vol.Schema(
@@ -92,11 +105,10 @@ JARVIS_SCHEMA = vol.Schema(
         vol.Optional("lights", default=False): bool,
         vol.Optional("light_entities", default=[]): [cv.entity_id],
         vol.Optional("pause_while"): vol.Any(None, cv.entity_id),
+        # Only used when the light was off: the level it comes on at.
         vol.Optional("brightness", default=80): vol.All(vol.Coerce(int), vol.Range(1, 100)),
-        vol.Optional("colors", default=MOOD_COLORS): {
-            vol.In(tuple(MOOD_COLORS)): vol.All([vol.All(vol.Coerce(int), vol.Range(0, 255))], vol.Length(3, 3))
-        },
-    }
+    },
+    extra=vol.REMOVE_EXTRA,  # stored configs still carry the old "colors"
 )
 
 
@@ -138,10 +150,22 @@ def reapply(entity_id: str, state: str, attributes: dict) -> tuple[str, dict]:
     return "turn_on", data
 
 
-def is_tint(attributes: dict, rgb: list | None) -> bool:
-    """Whether a light shows the colour this feature last set (its own echo)."""
-    shown = attributes.get("rgb_color")
-    return bool(rgb and shown) and all(abs(a - b) <= 40 for a, b in zip(shown, rgb))
+def envelope(pcm: bytes, rate: int, step: float = VOICE_STEP) -> list[float]:
+    """Loudness 0..1 per step of 16-bit mono PCM, against the clip's own loud
+    parts (90th percentile), so a quiet voice still swings the lamp fully."""
+    n = int(rate * step) * 2
+    rms = []
+    for i in range(0, len(pcm) - 1, n):
+        chunk = array("h", pcm[i:i + n - (len(pcm[i:i + n]) % 2)])
+        rms.append(math.sqrt(sum(x * x for x in chunk) / len(chunk)) if chunk else 0.0)
+    loud = sorted(rms)[int(len(rms) * 0.9)] if rms else 0
+    return [min(1.0, r / loud) if loud else 0.0 for r in rms]
+
+
+def mood_levels(base: int) -> tuple[int, int]:
+    """(bright, dim) brightness_pct around the light's own level, so a lamp
+    dimmed for the night stays dim-ish and a bright one still visibly moves."""
+    return min(100, base + 30), max(5, base // 2)
 
 
 def commands_lights(data: dict, targets: set[str]) -> bool:
@@ -420,9 +444,9 @@ class JarvisPresence:
     """The camera's body language and the room's lights, following the pucks.
 
     Listening, thinking and speaking move the camera a few degrees and, when
-    chosen, tint some lights; idle puts both back. The lights are snapshotted
-    into a scene first and restored from it, so they return to exactly what
-    they were - including off.
+    chosen, dim and brighten some lights (never their colour); idle puts both
+    back. The lights are snapshotted into a scene first and restored from it,
+    so they return to exactly what they were - including off.
     """
 
     def __init__(self, hass: HomeAssistant, link: CameraLink) -> None:
@@ -444,7 +468,9 @@ class JarvisPresence:
         # anything else that changed the lights - a command to them wins.
         self._started: datetime | None = None
         self._ours: set[str] = set()
-        self._tint: list | None = None
+        self._base = 80  # the lights' brightness_pct when the conversation began
+        self._pulse_task: asyncio.Task | None = None
+        self._voice_task: asyncio.Task | None = None
         self._foreign: dict = {}
         self._commanded = False
         self._handback = False  # "natural": they gave the lights back to Adaptive Lighting
@@ -456,10 +482,19 @@ class JarvisPresence:
 
     @callback
     def async_start(self) -> Callable[[], None]:
-        """(Re)subscribe to the chosen pucks. Returns the unsubscribe."""
+        """(Re)subscribe to the chosen pucks. Returns the unsubscribe.
+
+        "Every puck" listens by domain: an ESPHome puck can connect after
+        Home Assistant has started, and a list taken then would be empty.
+        """
         self.async_stop()
-        if self.satellites:
-            self._unsub = async_track_state_change_event(self.hass, self.satellites, self._changed)
+        if chosen := self.link.jarvis.get("satellites"):
+            self._unsub = async_track_state_change_event(self.hass, chosen, self._changed)
+        else:
+            self._unsub = self.hass.bus.async_listen(
+                "state_changed", self._changed,
+                event_filter=callback(lambda data: data["entity_id"].startswith("assist_satellite.")),
+            )
         return self.async_stop
 
     @callback
@@ -469,7 +504,95 @@ class JarvisPresence:
             self._unsub = None
 
     @callback
+    def _hook_voices(self) -> None:
+        """Hear each puck's replies and announcements as they are handed over.
+
+        Core has no event carrying the reply's audio, so the satellite
+        entity's two hand-over methods are wrapped. ponytail: a monkeypatch
+        on core's entity, the clean seam if core ever fires a TTS event. The
+        wrapper looks up the live JarvisPresence on the entity, so a reload of
+        this integration re-points it instead of stacking wrappers.
+        """
+        from homeassistant.components.assist_pipeline import PipelineEventType
+        from homeassistant.helpers.entity_component import DATA_INSTANCES
+
+        component = self.hass.data.get(DATA_INSTANCES, {}).get("assist_satellite")
+        for entity_id in self.satellites:
+            entity = component.get_entity(entity_id) if component else None
+            if entity is None:
+                continue
+            already = hasattr(entity, "_hubbubb_presence")
+            entity._hubbubb_presence = self
+            if already:
+                continue
+            on_event, announce = entity.on_pipeline_event, entity.async_announce
+
+            def on_pipeline_event(event, entity=entity, on_event=on_event):
+                output = (event.data or {}).get("tts_output") if event.type is PipelineEventType.TTS_END else None
+                if output and output.get("token"):
+                    entity._hubbubb_presence.voice(output["token"], VOICE_DELAY)
+                on_event(event)
+
+            async def async_announce(announcement, entity=entity, announce=announce):
+                token = announcement.tts_token or next(iter(TTS_TOKEN.findall(announcement.media_id or "")), None)
+                if token:
+                    chime = PREANNOUNCE_SECONDS if announcement.preannounce_media_id else 0
+                    entity._hubbubb_presence.voice(token, VOICE_DELAY + chime)
+                await announce(announcement)
+
+            entity.on_pipeline_event = on_pipeline_event
+            entity.async_announce = async_announce
+
+    @callback
+    def voice(self, token: str, delay: float) -> None:
+        """Jarvis's reply is about to play: follow its loudness on the lights."""
+        if self._voice_task:
+            self._voice_task.cancel()
+        self._voice_task = self.hass.async_create_background_task(
+            self._follow_voice(token, time.monotonic() + delay), f"{DOMAIN} jarvis lights voice")
+
+    async def _follow_voice(self, token: str, start: float) -> None:
+        from homeassistant.components import tts
+        from homeassistant.components.ffmpeg import get_ffmpeg_manager
+
+        stream = tts.async_get_stream(self.hass, token)
+        entities = self.link.jarvis.get("light_entities") or []
+        if stream is None or not entities or not self.link.jarvis.get("lights"):
+            return
+        # ponytail: waits for the whole clip; a long streamed reply skips the
+        # steps already played (the pulse covers them). Decode chunk by chunk if that shows.
+        audio = b"".join([chunk async for chunk in stream.async_stream_result()])
+        proc = await asyncio.create_subprocess_exec(
+            get_ffmpeg_manager(self.hass).binary, "-v", "error", "-i", "pipe:0",
+            "-f", "s16le", "-ac", "1", "-ar", "8000", "pipe:1",
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        pcm, _ = await proc.communicate(audio)
+        levels = await self.hass.async_add_executor_job(envelope, pcm, 8000)
+        last = None
+        for i, loudness in enumerate(levels):
+            wait = start + i * VOICE_STEP - time.monotonic()
+            if wait < 0:
+                continue
+            await asyncio.sleep(wait)
+            if self._left_alone():
+                return  # someone took the lights
+            if not self._snapshot:
+                continue  # not saved yet (an announcement's first moments), or paused
+            bright, dim = mood_levels(self._base)
+            if self._pulse_task:  # the voice takes over from the thinking pulse
+                self._pulse_task.cancel()
+                self._pulse_task = None
+            level = round((dim + (bright - dim) * loudness) / 5) * 5  # 5 % steps: fewer repeat calls
+            if level != last:
+                await self._set_level(entities, level, VOICE_STEP)
+                last = level
+        if self._snapshot and not self._left_alone():
+            await self._set_level(entities, mood_levels(self._base)[1], VOICE_STEP)
+
+    @callback
     def _changed(self, event) -> None:
+        self._hook_voices()  # the pucks exist by the time they change state
         states = [getattr(self.hass.states.get(e), "state", "") for e in self.satellites]
         mood = mood_for(states)
         if mood != self.mood:
@@ -503,6 +626,7 @@ class JarvisPresence:
             return
         self._snapshot = False
         self._restored_at = time.monotonic()
+        self._stop_pulse()
         if self._watch_lights:
             self._watch_lights()
             self._watch_lights = None
@@ -528,8 +652,12 @@ class JarvisPresence:
         self.hass.async_create_background_task(_run(), f"{DOMAIN} jarvis lights restore")
 
     def _context(self) -> Context:
-        """A context for our own light calls, remembered so their echoes are ours."""
-        context = Context()
+        """A context for our own light calls, remembered so their echoes are ours.
+
+        ':jv:' in the id (like Adaptive Lighting's ':al:') lets the
+        brightness-pauses-Adaptive-Lighting automation skip our calls.
+        """
+        context = Context(id=f"{ulid_now()[:22]}:jv:")
         self._ours.add(context.id)
         if len(self._ours) > 200:
             self._ours = set(list(self._ours)[-100:])
@@ -587,11 +715,11 @@ class JarvisPresence:
         """A light we tint changed. Ours, or someone's command?"""
         new = event.data.get("new_state")
         context = event.context
-        if new is None or is_tint(dict(new.attributes), self._tint) or is_adaptive_lighting(context):
-            return  # gone, (a late echo of) our own colour, or Adaptive Lighting's routine pass
+        if new is None or is_adaptive_lighting(context):
+            return  # gone, or Adaptive Lighting's routine pass
         # A group command's change reaches the light under the context of our
         # last call to it (HA keeps an entity's context for 5 s), so after a
-        # command any colour that isn't our tint is theirs.
+        # command a change under our context is theirs.
         if not self._commanded and (context.id in self._ours or context.parent_id in self._ours):
             return
         self._foreign[new.entity_id] = new
@@ -658,6 +786,10 @@ class JarvisPresence:
                     "scene", "create", {"scene_id": SNAPSHOT_SCENE, "snapshot_entities": entities},
                     blocking=True, context=self._context(),
                 )
+                # ponytail: one level for all the lights (the first one on), per-light if several differ a lot
+                lit = next((st for st in map(self.hass.states.get, entities)
+                            if st and st.state == "on" and st.attributes.get("brightness")), None)
+                self._base = round(lit.attributes["brightness"] * 100 / 255) if lit else config.get("brightness", 80)
             self._snapshot = True
             self._started = datetime.now(UTC)
             self._foreign = {}
@@ -668,22 +800,41 @@ class JarvisPresence:
                 self.hass.bus.async_listen("call_service", self._light_call),
             )
             self._watch_lights = lambda: [u() for u in unsubs]
-        if self._foreign or self._handback:
+        if self._left_alone():
             return  # they changed these lights mid-conversation; leave them be
-        self._tint = (config.get("colors") or MOOD_COLORS).get(mood, MOOD_COLORS[mood])
+        bright, dim = mood_levels(self._base)
+        if mood == "listening":
+            self._stop_pulse()
+            await self._set_level(entities, dim)
+        elif not self._pulse_task and not self._voice_task:
+            # Thinking breathes; so does speaking until the voice itself
+            # arrives and takes over (see _follow_voice).
+            self._pulse_task = self.hass.async_create_background_task(
+                self._pulse(entities, bright, dim), f"{DOMAIN} jarvis lights pulse")
+
+    def _left_alone(self) -> bool:
+        return bool(self._foreign or self._handback)
+
+    async def _set_level(self, entities: list[str], pct: int, transition: float = PULSE_SECONDS - 0.1) -> None:
         await self.hass.services.async_call(
-            "light",
-            "turn_on",
-            {
-                "entity_id": entities,
-                "rgb_color": self._tint,
-                "brightness_pct": config.get("brightness", 80),
-                "transition": 0.4,
-            },
-            blocking=False,
-            context=self._context(),
+            "light", "turn_on", {"entity_id": entities, "brightness_pct": pct, "transition": transition},
+            blocking=False, context=self._context(),
         )
 
+    async def _pulse(self, entities: list[str], bright: int, dim: int) -> None:
+        """Breathe while Jarvis speaks, until the mood changes or someone takes the lights."""
+        level = bright
+        while not self._left_alone():
+            await self._set_level(entities, level)
+            level = dim if level == bright else bright
+            await asyncio.sleep(PULSE_SECONDS)
+
+    def _stop_pulse(self) -> None:
+        """Stop the breathing and the voice-following."""
+        for task in (self._pulse_task, self._voice_task):
+            if task:
+                task.cancel()
+        self._pulse_task = self._voice_task = None
 
 def async_register_services(hass: HomeAssistant, link: CameraLink, presence: JarvisPresence) -> list[str]:
     """The panel's calls, plus the two actions a gesture or automation may use."""
