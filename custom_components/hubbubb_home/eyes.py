@@ -144,6 +144,18 @@ def is_tint(attributes: dict, rgb: list | None) -> bool:
     return bool(rgb and shown) and all(abs(a - b) <= 40 for a, b in zip(shown, rgb))
 
 
+def commands_lights(data: dict, targets: set[str]) -> bool:
+    """Whether a call_service event's call can change these lights."""
+    if data.get("domain") == "scene":
+        return data.get("service") in ("turn_on", "apply")
+    service_data = data.get("service_data") or {}
+    ids = service_data.get("entity_id")
+    if not ids:
+        return True  # an area, a device, or every light
+    ids = {ids} if isinstance(ids, str) else set(ids)
+    return bool(ids & targets) or "all" in ids
+
+
 def mood_for(states: list[str]) -> str:
     """The mood for several pucks at once: the busiest one wins."""
     moods = {SATELLITE_MOODS.get(s) for s in states}
@@ -403,6 +415,7 @@ class JarvisPresence:
         self._ours: set[str] = set()
         self._tint: list | None = None
         self._foreign: dict = {}
+        self._commanded = False
         self._watch_lights: Callable[[], None] | None = None
 
     @property
@@ -489,14 +502,36 @@ class JarvisPresence:
         return context
 
     @callback
+    def _light_call(self, event) -> None:
+        """Someone else's light or scene command during the conversation."""
+        data = event.data
+        context = event.context
+        if data.get("domain") not in ("light", "scene") or context.id in self._ours or context.parent_id in self._ours:
+            return
+        if commands_lights(data, self._light_targets()):
+            self._commanded = True
+
+    def _light_targets(self) -> set[str]:
+        """Our lights and the Hue groups holding them - a group command changes them too."""
+        entities = set(self.link.jarvis.get("light_entities") or [])
+        groups = {
+            g.entity_id for g in self.hass.states.async_all("light")
+            if set(g.attributes.get("entity_id") or []) & entities
+        }
+        return entities | groups
+
+    @callback
     def _lights_changed(self, event) -> None:
         """A light we tint changed. Ours, or someone's command?"""
         new = event.data.get("new_state")
         context = event.context
-        if new is None or context.id in self._ours or context.parent_id in self._ours:
+        if new is None or is_tint(dict(new.attributes), self._tint):
+            return  # gone, or (a late echo of) our own colour
+        # A group command's change reaches the light under the context of our
+        # last call to it (HA keeps an entity's context for 5 s), so after a
+        # command any colour that isn't our tint is theirs.
+        if not self._commanded and (context.id in self._ours or context.parent_id in self._ours):
             return
-        if is_tint(dict(new.attributes), self._tint):
-            return  # a late echo of our own colour
         self._foreign[new.entity_id] = new
 
     def _active_scene(self, entities: list[str], since: datetime | None = None) -> str | None:
@@ -558,7 +593,12 @@ class JarvisPresence:
             self._snapshot = True
             self._started = datetime.now(UTC)
             self._foreign = {}
-            self._watch_lights = async_track_state_change_event(self.hass, entities, self._lights_changed)
+            self._commanded = False
+            unsubs = (
+                async_track_state_change_event(self.hass, entities, self._lights_changed),
+                self.hass.bus.async_listen("call_service", self._light_call),
+            )
+            self._watch_lights = lambda: [u() for u in unsubs]
         if self._foreign:
             return  # they changed these lights mid-conversation; leave them be
         self._tint = (config.get("colors") or MOOD_COLORS).get(mood, MOOD_COLORS[mood])
