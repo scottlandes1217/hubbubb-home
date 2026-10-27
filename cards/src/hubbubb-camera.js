@@ -25,6 +25,7 @@ const TABS = [
 export const KNOBS = [
   ["gestureMatch", "Gesture match strictness", "How close a hand must be to the gestures you taught it. Lower is stricter (fewer accidents); raise it if taught gestures are missed.", 0.01],
   ["framingFill", "Framing", "How much of the frame one person's upper body fills when auto-zoom is on. Lower shows more of the room; the face never fills more than a quarter.", 0.05],
+  ["zoomMax", "Auto-zoom limit", "The furthest auto-zoom will zoom in, from 1× (never) to 4×. Pinching or scrolling the live view zooms by hand, past this limit.", 0.1],
   ["holdSeconds", "Hold time", "Seconds a gesture must be held before it counts. Longer means fewer accidents.", 0.1],
   ["handConfidence", "Hand clarity", "How clearly every finger must be seen. Higher ignores hands holding a phone or petting the dog.", 0.05],
   ["lookTurn", "Looking at the camera", "How far your face may turn from the camera and still count as looking (0 = straight at it, 0.5 = side-on). Works with your head tilted, lying down. Raise it if you're refused while looking at the camera; lower it if glancing at your phone counts.", 0.01],
@@ -302,8 +303,9 @@ class HubbubbCamera extends LitElement {
     const token = id && this.hass.states[id]?.attributes?.access_token;
     if (!id || !token) return html`<div class="view empty ${small ? "small" : ""}">No live view yet.</div>`;
     return html`<div class="view steer ${small ? "small" : ""}"
-        title="Drag to move the camera · click someone to follow them"
-        @pointerdown=${this._pointerDown} @pointermove=${this._pointerMove} @pointerup=${this._pointerUp} @pointercancel=${() => (this._drag = null)}>
+        title="Drag to move the camera · pinch or scroll to zoom · click someone to follow them"
+        @pointerdown=${this._pointerDown} @pointermove=${this._pointerMove} @pointerup=${this._pointerUp}
+        @pointercancel=${(e) => this._pointerUp(e, true)} @wheel=${this._wheel}>
       <img
         alt="Live camera view" draggable="false"
         src=${`/api/camera_proxy_stream/${id}?token=${token}&v=${this._viewKey}`}
@@ -321,19 +323,71 @@ class HubbubbCamera extends LitElement {
     const img = e.currentTarget.querySelector("img");
     if (!img || e.button) return;
     e.currentTarget.setPointerCapture(e.pointerId);
+    (this._touches ||= new Map()).set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (this._touches.size === 2) {
+      // Second finger: a pinch, not a drag or a click.
+      this._drag = null;
+      this._pinch = { span: this._span(), zoom: this._zoomNow() };
+      return;
+    }
     this._drag = { x: e.clientX, y: e.clientY, sentX: e.clientX, sentY: e.clientY, moved: false, last: 0, rect: img.getBoundingClientRect() };
   }
 
   _pointerMove(e) {
+    if (this._touches?.has(e.pointerId)) this._touches.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (this._pinch) {
+      if (this._touches.size === 2) this._zoomTo(this._pinch.zoom * this._span() / this._pinch.span);
+      return;
+    }
     const d = this._drag;
     if (!d || (!d.moved && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 8)) return;
     d.moved = true;
     if (Date.now() - d.last > 150) this._sendDrag(e);
   }
 
-  _pointerUp(e) {
+  _span() {
+    const [a, b] = [...this._touches.values()];
+    return Math.max(1, Math.hypot(a.x - b.x, a.y - b.y));
+  }
+
+  /* Pinch and scroll zoom by hand, which turns auto-zoom off - like the slider. */
+  _zoomNow() {
+    return this._zoomGoal ?? this._state?.hardware?.zoom_actual ?? this._state?.settings?.zoom ?? 1;
+  }
+
+  _wheel(e) {
+    e.preventDefault();
+    // A trackpad pinch arrives as a ctrl-wheel with small, fine deltas.
+    this._zoomTo(this._zoomNow() * Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.002)));
+  }
+
+  _zoomTo(zoom) {
+    this._zoomGoal = Math.round(Math.max(1, Math.min(4, zoom)) * 20) / 20;
+    if (this._zoomTimer) return;
+    // At most one setting change every 150 ms; the last goal always goes out.
+    const send = () => {
+      const goal = this._zoomGoal;
+      if (goal !== this._zoomSent) {
+        this._zoomSent = goal;
+        this._settings({ zoom: goal });
+        this._zoomTimer = setTimeout(send, 150);
+      } else {
+        this._zoomTimer = null;
+        clearTimeout(this._zoomIdle);
+        this._zoomIdle = setTimeout(() => (this._zoomGoal = this._zoomSent = undefined), 1000);
+      }
+    };
+    send();
+  }
+
+  _pointerUp(e, cancelled = false) {
+    this._touches?.delete(e.pointerId);
+    if (this._pinch) {
+      if (!this._touches?.size) this._pinch = null;
+      return;
+    }
     const d = this._drag;
-    if (!d) return;
+    if (!d || cancelled) return void (this._drag = null);
     if (d.moved) this._sendDrag(e);
     else {
       const x = (e.clientX - d.rect.left) / d.rect.width, y = (e.clientY - d.rect.top) / d.rect.height;
@@ -381,20 +435,22 @@ class HubbubbCamera extends LitElement {
           </section>
           <section class="card">
             <h3>Camera</h3>
-            <p class="muted">Drag the picture to move the camera. Click a person or animal to follow just them.</p>
+            <p class="muted">Drag the picture to move the camera; pinch or scroll to zoom. Click a person or animal to follow just them.</p>
             ${s.focus
               ? html`<div class="pan"><button @click=${() => this._try(() => this._call("camera_focus", {})).then(() => this._poll())}><ha-icon icon="mdi:account-group"></ha-icon> Follow everyone again</button></div>`
               : nothing}
             ${this._formReady
               ? html`<ha-form
                   .hass=${this.hass}
-                  .data=${{ follow: settings.follow, auto_zoom: settings.auto_zoom, zoom: settings.zoom ?? 1 }}
+                  .data=${{ follow: settings.follow, auto_zoom: settings.auto_zoom, zoom: settings.zoom ?? 1, zoomMax: settings.zoomMax ?? 4 }}
                   .schema=${[
                     { name: "follow", selector: { boolean: {} } },
                     { name: "auto_zoom", selector: { boolean: {} } },
-                    ...(settings.auto_zoom ? [] : [{ name: "zoom", selector: { number: { min: 1, max: 4, step: 0.1, mode: "slider" } } }]),
+                    settings.auto_zoom
+                      ? { name: "zoomMax", selector: { number: { min: 1, max: 4, step: 0.1, mode: "slider", unit_of_measurement: "×" } } }
+                      : { name: "zoom", selector: { number: { min: 1, max: 4, step: 0.1, mode: "slider" } } },
                   ]}
-                  .computeLabel=${(f) => ({ follow: "Follow people", auto_zoom: "Zoom to fit automatically", zoom: "Zoom" })[f.name]}
+                  .computeLabel=${(f) => ({ follow: "Follow people", auto_zoom: "Zoom to fit automatically", zoom: "Zoom", zoomMax: "Zoom in no further than" })[f.name]}
                   @value-changed=${(e) => this._settingsFrom(e.detail.value, settings)}
                 ></ha-form>`
               : nothing}
@@ -414,7 +470,7 @@ class HubbubbCamera extends LitElement {
 
   _settingsFrom(value, current) {
     const changes = {};
-    for (const k of ["follow", "auto_zoom", "zoom"]) if (value[k] !== undefined && value[k] !== current[k]) changes[k] = value[k];
+    for (const k of ["follow", "auto_zoom", "zoom", "zoomMax"]) if (value[k] !== undefined && value[k] !== current[k]) changes[k] = value[k];
     if (Object.keys(changes).length) this._settings(changes);
   }
 

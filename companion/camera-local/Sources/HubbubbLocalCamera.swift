@@ -802,6 +802,7 @@ private final class CameraService {
         "lookAngle": (10...60, 25),
         "lookTurn": (0.1...0.5, 0.33),
         "framingFill": (0.4...1.0, 0.7),
+        "zoomMax": (1.0...4.0, 4.0),
         "gestureMatch": (0.15...0.7, 0.35),
     ]
     private var follow: Bool {
@@ -2325,6 +2326,9 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     /// Ease the lens toward `target`, a little each update.
     private func easeZoom(to target: CGFloat, centeredOn point: CGPoint) {
         guard zoomRange != nil else { return }
+        // The furthest auto-zoom goes in (Tuning: "Auto-zoom limit").
+        let limit = CGFloat(UserDefaults.standard.object(forKey: "zoomMax") as? Double ?? 4)
+        let target = min(target, limit)
         let now = Date()
         guard now.timeIntervalSince(lastAutoZoomUpdate) > 0.20 else { return }
         lastAutoZoomUpdate = now
@@ -2340,6 +2344,8 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         zoomTrend = trend
         // Out fast (standing up leaves a tight frame in a second), in gently.
         let nearEdge = abs(point.x - 0.5) > 0.3 || abs(point.y - 0.5) > 0.3
+        // Past the limit (just lowered): it is a limit, not a target - no deadband.
+        if current > target + 0.04, target == limit { return applyHardwareZoom(limit) }
         guard let next = Framing.step(current: current, trend: nearEdge ? min(trend, target) : trend, nearEdge: nearEdge) else { return }
         applyHardwareZoom(next)
     }
