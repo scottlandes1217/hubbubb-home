@@ -186,9 +186,10 @@ private struct RoomMap {
         let beside = atMouth.enumerated().map { $0.offset < 2 ? $0.element : CGPoint(x: 0.6, y: 0.55) }
         precondition(GestureGate.atHead(atMouth, head: mouth), "a hand at the mouth is at the head")
         precondition(!GestureGate.atHead(beside, head: mouth), "a fingertip grazing it is not")
-        precondition(GestureGate.pausesAtHead(atHead: true, pose: nil), "a hand at the head pauses")
-        precondition(!GestureGate.pausesAtHead(atHead: true, pose: "number_3"), "three fingers beside the head counts")
-        precondition(!GestureGate.pausesAtHead(atHead: false, pose: nil), "away from the head never pauses")
+        precondition(GestureGate.pausesAtHead(atHead: true, onFace: false, pose: nil), "a hand at the head pauses")
+        precondition(!GestureGate.pausesAtHead(atHead: true, onFace: false, pose: "number_3"), "three fingers beside the head counts")
+        precondition(GestureGate.pausesAtHead(atHead: true, onFace: true, pose: "open_palm"), "a palm on the cheek pauses, whatever it looks like")
+        precondition(!GestureGate.pausesAtHead(atHead: false, onFace: false, pose: nil), "away from the head never pauses")
         // Elbows: a forearm up is raised; a hand in the lap is not, even when
         // the camera's angle puts it close to the face in the picture.
         let arm = [(wrist: CGPoint(x: 0.6, y: 0.4), elbow: CGPoint(x: 0.62, y: 0.3))]
@@ -460,12 +461,13 @@ private enum GestureGate {
         return CGFloat(points.filter(head.contains).count) / CGFloat(points.count) >= share
     }
 
-    /// A hand at the head pauses gestures - unless it is clearly making one.
-    /// Three fingers held up beside the head sits in the hair zone from its
-    /// first frame, so pausing there meant it never counted at all. Eating and
-    /// scratching are not gesture shapes; a pose still has to be held still.
-    static func pausesAtHead(atHead: Bool, pose: String?) -> Bool {
-        atHead && pose == nil
+    /// A hand on the face itself always pauses gestures: a palm on the cheek
+    /// or fingers at the mouth often look like a pose. In the zone around it
+    /// (hair, chin) only a hand that isn't a gesture shape pauses - three
+    /// fingers held up beside the head sits in the hair zone from its first
+    /// frame, so pausing there meant it never counted at all.
+    static func pausesAtHead(atHead: Bool, onFace: Bool, pose: String?) -> Bool {
+        onFace || (atHead && pose == nil)
     }
 
     /// How far a face is turned from the camera, from where the nose sits
@@ -831,6 +833,7 @@ private final class CameraService {
         "framingFill": (0.4...1.6, 0.7),
         "zoomMax": (1.0...4.0, 4.0),
         "gestureMatch": (0.15...0.7, 0.35),
+        "faceTouch": (0.1...1.0, 0.3),
     ]
     private var follow: Bool {
         get { UserDefaults.standard.object(forKey: "localAIFollowingEnabled") as? Bool ?? true }
@@ -1067,7 +1070,8 @@ private final class CameraService {
             return ok(["serial": parts.first ?? "", "firmware": parts.count > 1 ? parts[1] : ""])
         case ("POST", "/gesture_teach"):
             guard let processor, let gesture = body["gesture"] as? String,
-                  ["thumbs_up", "thumbs_down", "open_palm", "number_1", "number_2", "number_3"].contains(gesture) else {
+                  ["thumbs_up", "thumbs_down", "open_palm", "number_1", "number_2", "number_3"].contains(gesture)
+                    || gesture.range(of: "^custom_[a-z0-9_]{1,40}$", options: .regularExpression) != nil else {
                 return bad("unknown gesture")
             }
             processor.beginTeaching(gesture)
@@ -1959,8 +1963,10 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         let now = Date()
         // Any hand at the head - eating, a scratch, hair - turns gestures off
         // for two seconds; a meal keeps renewing that, so it stays off.
-        if let face, GestureGate.pausesAtHead(
-            atHead: hands.contains(where: { handOverlapsFace($0, faceBounds: face, up: up) }),
+        let touching = face.map { face in hands.map { handOverlapsFace($0, faceBounds: face, up: up) } } ?? []
+        if face != nil, GestureGate.pausesAtHead(
+            atHead: touching.contains { $0.atHead },
+            onFace: touching.contains { $0.onFace },
             pose: primaryHand.flatMap { classifyGesture($0) }
         ) {
             votes = GestureVotes(lastVolumeRepeat: votes.lastVolumeRepeat, pausedUntil: now.addingTimeInterval(1.2))
@@ -2423,7 +2429,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         case previewFailed
     }
 
-    private func handOverlapsFace(_ hand: VNHumanHandPoseObservation, faceBounds: CGRect, up: CGVector = Upright.vertical) -> Bool {
+    private func handOverlapsFace(_ hand: VNHumanHandPoseObservation, faceBounds: CGRect, up: CGVector = Upright.vertical) -> (atHead: Bool, onFace: Bool) {
         let joints: [VNHumanHandPoseObservation.JointName] = [
             .wrist, .thumbCMC, .thumbMP, .thumbIP, .thumbTip,
             .indexMCP, .indexPIP, .indexDIP, .indexTip,
@@ -2436,7 +2442,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             guard let point = try? hand.recognizedPoint(joint), point.confidence > 0.12 else { return nil }
             return Upright.point(point.location, around: c, up: up)  // hair is "above" in their frame
         }
-        guard !points.isEmpty else { return false }
+        guard !points.isEmpty else { return (false, false) }
         // Calibration knobs, in face heights: `hairReach` above the face box,
         // `chinReach` below it.
         let defaults = UserDefaults.standard
@@ -2445,7 +2451,11 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             hair: CGFloat(defaults.object(forKey: "hairReach") as? Double ?? 0.9),
             chin: CGFloat(defaults.object(forKey: "chinReach") as? Double ?? 0.25)
         )
-        return GestureGate.atHead(points, head: head)
+        // Calibration knob `faceTouch`: the share of the hand's joints on the
+        // face box itself that counts as touching the face. Lower is stricter.
+        let face = Upright.rect(faceBounds, up: up)
+        let share = CGFloat(defaults.object(forKey: "faceTouch") as? Double ?? 0.3)
+        return (GestureGate.atHead(points, head: head), GestureGate.atHead(points, head: face, share: share))
     }
 
     private func applyHardwareZoom(_ factor: CGFloat) {
@@ -2919,6 +2929,10 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         case "number_1": return "One finger"
         case "number_2": return "Two fingers"
         case "number_3": return "Three fingers"
+        // Your own gestures: "custom_peace_sign" -> "Peace sign".
+        case let id where id.hasPrefix("custom_"):
+            let words = id.dropFirst(7).replacingOccurrences(of: "_", with: " ")
+            return words.prefix(1).uppercased() + words.dropFirst()
         default: return "Gesture"
         }
     }

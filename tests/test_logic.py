@@ -183,7 +183,7 @@ from hubbubb_home.memory import Memory  # noqa: E402
 from hubbubb_home.recipes import Recipes, as_lines, recipe_from_html  # noqa: E402
 from hubbubb_home.speakers import SpeakerBook  # noqa: E402
 from hubbubb_home import eyes  # noqa: E402
-from hubbubb_home.eyes import gesture_allowed, mood_for, pet_message  # noqa: E402
+from hubbubb_home.eyes import gesture_allowed, mood_for, pet_message, valid_gesture  # noqa: E402
 from hubbubb_home.timers import TimerPool  # noqa: E402
 from hubbubb_home.nightly import FindingsReport, _days  # noqa: E402
 from hubbubb_home.review import ReviewReport, parse_proposals  # noqa: E402
@@ -482,6 +482,17 @@ def test_camera_presence_sits_between_sure_and_unsure_voice():
     # Junk in the event is dropped, not stored.
     book.saw(["", None, 3, "Scott"])
     assert book.in_view[0] == ["Scott"]
+
+
+def test_gestures_taught_from_scratch_are_accepted():
+    assert valid_gesture("thumbs_up") == "thumbs_up"
+    assert valid_gesture("custom_peace_sign") == "custom_peace_sign"
+    for bad in ("wave", "custom_", "custom_Peace", None):
+        try:
+            valid_gesture(bad)
+        except Exception:  # vol.Invalid
+            continue
+        raise AssertionError(bad)
 
 
 def test_gesture_runs_only_when_its_settings_allow():

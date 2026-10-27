@@ -1,6 +1,6 @@
 /* node cards/test/camera.mjs — the camera panel's pure parts. */
 import assert from "node:assert/strict";
-import { KNOBS, ago, changed, gestureForm, summarizeActions } from "../src/hubbubb-camera.js";
+import { KNOBS, ago, changed, customGestureId, gestureCatalog, gestureForm, summarizeActions } from "../src/hubbubb-camera.js";
 
 assert.equal(summarizeActions([]), "Does nothing yet");
 assert.equal(summarizeActions(undefined), "Does nothing yet");
@@ -24,6 +24,14 @@ assert.deepEqual(gestureForm(undefined), { enabled: true, repeat: false, people:
 const saved = { enabled: true, repeat: true, people: ["Scott"], actions: [{ action: "x.y" }] };
 assert.equal(changed(gestureForm(saved), saved), false);
 assert.equal(changed({ ...gestureForm(saved), repeat: false }, saved), true);
+
+// Your own gestures: named freely, listed after the built-ins.
+assert.equal(customGestureId("Peace sign!"), "custom_peace_sign");
+assert.equal(customGestureId("  ?? "), null);
+const builtIn = [{ id: "thumbs_up", title: "Thumbs up" }];
+const listed = gestureCatalog(builtIn, { thumbs_up: 25, custom_peace_sign: 25 }, { gesture: "custom_rock_on" });
+assert.deepEqual(listed.map((g) => g.id), ["thumbs_up", "custom_peace_sign", "custom_rock_on"]);
+assert.equal(listed[1].title, "Peace sign");
 
 // Every knob has a label, helper text and a slider step.
 for (const knob of KNOBS) assert.equal(knob.length, 4);
