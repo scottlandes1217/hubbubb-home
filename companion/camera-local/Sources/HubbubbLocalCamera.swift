@@ -154,6 +154,10 @@ private struct RoomMap {
         let standing = Framing.zoom(current: 2, face: CGRect(x: 0.45, y: 0.6, width: 0.1, height: 0.15), body: CGRect(x: 0.3, y: 0.05, width: 0.4, height: 0.9), fill: 0.7)
         precondition(standing < 2, "standing up close zooms out (\(standing))")
         // Whatever the body, the face never ends up taller than a quarter of the frame.
+        precondition(Framing.step(current: 2.3, trend: 2.5, nearEdge: false) == nil, "a small target change holds the zoom")
+        precondition(Framing.step(current: 2.3, trend: 2.1, nearEdge: false) == nil, "so does a small zoom-out")
+        precondition(Framing.step(current: 2, trend: 3, nearEdge: false).map { $0 > 2 } == true, "a real change still zooms in")
+        precondition(Framing.step(current: 2.3, trend: 2.1, nearEdge: true).map { $0 < 2.3 } == true, "near the edge it zooms out at once")
         let faceOnly = Framing.zoom(current: 1, face: CGRect(x: 0.45, y: 0.5, width: 0.08, height: 0.1), body: nil, fill: 0.7)
         precondition(0.1 * faceOnly <= 0.25, "face-only framing stays loose (\(faceOnly))")
         precondition(Framing.aim(face: CGRect(x: 0.4, y: 0.6, width: 0.1, height: 0.1), body: .zero).y < 0.5, "aim below the face, so it sits high")
@@ -683,6 +687,18 @@ private enum Framing {
         // about an eighth of the frame tall, not a head shot.
         if let face { target = min(target, current * (body == nil ? maxFace * 0.5 : maxFace) / max(face.height, 0.01)) }
         return min(4, max(1, target))
+    }
+
+    /// The next lens step toward `trend` (the smoothed framing target), or nil
+    /// to hold. Within `deadband` (a fraction of the zoom) the shot is framed:
+    /// chasing the exact zoom every frame is the in-and-out pumping, since the
+    /// body box jitters with every arm movement. Near the edge only the
+    /// zoom-out side matters, so that goes at once.
+    static func step(current: CGFloat, trend: CGFloat, nearEdge: Bool, deadband: CGFloat = 0.15) -> CGFloat? {
+        guard abs(trend - current) > current * deadband || (nearEdge && trend < current) else { return nil }
+        let rate: CGFloat = trend < current ? (nearEdge ? 0.7 : 0.35) : 0.12
+        let next = current + (trend - current) * rate
+        return abs(next - current) > 0.04 ? next : nil
     }
 
     /// Where to centre the camera: on the face across, and low enough that the
@@ -1367,6 +1383,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     private let zoomRange: (minimum: Int, maximum: Int, step: Int)?
     private let ptzQueue = DispatchQueue(label: "com.hubbubb.camera.ptz")
     private var lastAutoZoomUpdate = Date.distantPast
+    private var zoomTrend: CGFloat?
     private var lastAutoFollowUpdate = Date.distantPast
     private var smoothedFaceCenter: CGPoint?
     private var lastCenterTime = Date.distantPast
@@ -2318,12 +2335,13 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         guard enabled else { return }
         // Zooming out is always safe; zoom in only once the gimbal has them centred.
         guard target < current || (abs(point.x - 0.5) < 0.10 && abs(point.y - 0.5) < 0.12) else { return }
+        // Follow the target's trend (~1 s), not each frame's jittery body box.
+        let trend = zoomTrend.map { $0 + (target - $0) * 0.2 } ?? target
+        zoomTrend = trend
         // Out fast (standing up leaves a tight frame in a second), in gently.
         let nearEdge = abs(point.x - 0.5) > 0.3 || abs(point.y - 0.5) > 0.3
-        let rate: CGFloat = target < current ? (nearEdge ? 0.7 : 0.35) : 0.12
-        let smoothed = current + (target - current) * rate
-        guard abs(smoothed - current) > 0.04 else { return }
-        applyHardwareZoom(smoothed)
+        guard let next = Framing.step(current: current, trend: nearEdge ? min(trend, target) : trend, nearEdge: nearEdge) else { return }
+        applyHardwareZoom(next)
     }
 
     /// Pan span to search and tilt per pan. ptzQueue only. Learned from where
@@ -2351,7 +2369,10 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         // up is how it kept looking for someone out of frame; never resting is
         // a camera panning all day in an empty room.
         let searchCycle = lostFor.truncatingRemainder(dividingBy: 45)
-        guard following, lostFor > 0.3, searchCycle < 20 else { return }
+        // Lost dead centre is a turned head or a hand over the face, not a walk
+        // out of frame: give them as long as a track survives before zooming out.
+        let central = smoothedFaceCenter.map { abs($0.x - 0.5) < 0.25 && abs($0.y - 0.5) < 0.25 } ?? false
+        guard following, lostFor > (central ? 1.5 : 0.3), searchCycle < 20 else { return }
 
         // Chase first: they walked out of one side, so zoom out at once and jump
         // about half a frame that way - usually that is exactly where they are.
