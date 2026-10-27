@@ -236,3 +236,63 @@ console.log('Terminal Return sends draft plus Enter; zoomed keyboard focus and c
   assert.equal(calls.length,0,'Return queued for another click must not execute');
 }
 console.log('Terminal mode, Return during focus loading, mobile Return and unchanged-field Enter passed');
+{
+  const {card,calls} = setup();
+  const first = card._screenTapCommand({x:.5,y:.5},1);
+  await Promise.resolve();assert.equal(calls.length,0,'first tap waits for a possible second tap');
+  const second = card._screenTapCommand({x:.51,y:.5},2);
+  assert.equal(first,second,'double tap shares one remote request');
+  await second;
+  assert.deepEqual(calls.map(c=>c.data),[{x:.5,y:.5,count:2}],'one complete double-click, without an extra single click');
+  const single=card._screenTapCommand({x:.2,y:.2},1);
+  const key=card._screenCommand('agent_screen_input',{key:'enter'});
+  await single;await key;
+  assert.deepEqual(calls.slice(1).map(c=>c.data),[{x:.2,y:.2,count:1},{key:'enter'}]);
+  const a=card._screenTapCommand({x:.1,y:.1},1);
+  const b=card._screenTapCommand({x:.8,y:.8},1);
+  await a;await b;
+  assert.deepEqual(calls.slice(-2).map(c=>c.data.count),[1,1],'separate targets retain separate single clicks');
+  const pending=card._screenTapCommand({x:.5,y:.5},1);
+  card._screenRun=null;
+  await assert.rejects(pending,/Screen view closed/);
+}
+{
+  const {card,calls} = setup();
+  card._screenRun.focusFailed=true;
+  card._showScreenKeyboard = () => {};
+  await card._screenSpotlight();
+  assert.deepEqual(calls.map(c=>c.data),[{action:'spotlight'}]);
+  assert.equal(card._screenRun.focusFailed,false);
+  assert.equal(card._screenRun.urgent,true);
+}
+console.log('Atomic double tap, single tap, separate targets, input ordering, closed view and Spotlight passed');
+{
+  const {card,input,calls} = setup();
+  let release, focused=false;
+  input.value='old draft';card._screenEditor={value:'old field',target:'old'};
+  card._showScreenKeyboard=()=>{focused=true};
+  card._api=async(service,data)=>{
+    calls.push({service,data});
+    if(data.action) await new Promise(resolve=>{release=resolve});
+    return {ok:true};
+  };
+  const opening=card._screenSpotlight();
+  assert.equal(focused,true,'keyboard opens synchronously within the tap');
+  assert.equal(input.value,'');assert.equal(card._screenEditor,null);
+  input.value='Safari';
+  await Promise.resolve();await card._screenSpotlight();
+  assert.equal(input.value,'Safari','a repeated tap preserves the new draft');
+  const sending=card._screenSend();
+  await Promise.resolve();assert.equal(calls.length,1,'typing waits for Spotlight action');
+  release();await opening;await sending;
+  assert.deepEqual(calls.map(c=>c.data),[{action:'spotlight'},{text:'Safari'}]);
+}
+{
+  const {card,input,calls}=setup();
+  card._showScreenKeyboard=()=>{};
+  card._api=async(service,data)=>{calls.push({service,data});throw new Error('Unavailable')};
+  await card._screenSpotlight();input.value='search';await card._screenSend();
+  assert.equal(calls.length,1,'failed Spotlight must not type in the previous app');
+  assert.equal(input.value,'search','failed sends preserve the draft');
+}
+console.log('Spotlight opens keyboard immediately, preserves new drafts, queues typing and blocks typing after failure');
