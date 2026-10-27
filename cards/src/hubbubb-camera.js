@@ -31,6 +31,7 @@ export const KNOBS = [
   ["lookTurn", "Looking at the camera", "How far your face may turn from the camera and still count as looking (0 = straight at it, 0.5 = side-on). Works with your head tilted, lying down. Raise it if you're refused while looking at the camera; lower it if glancing at your phone counts.", 0.01],
   ["followGain", "Following speed", "How quickly the camera turns to keep you centred. Higher is snappier; too high and it wobbles.", 0.05],
   ["gestureReach", "Gesture height", "A hand counts as raised when its wrist is above its elbow, or when it is no more than this many face-heights below your chin. Raise it if chest-height gestures are missed; lower it if a phone or keyboard sets gestures off.", 0.1],
+  ["faceTouch", "Touching your face", "How much of a hand must be on your face (cheek, mouth, chin, forehead) to pause gestures, whatever shape it makes. Lower pauses sooner — lower it if resting a hand on your face still fires gestures; raise it if gestures held near your face are blocked.", 0.05],
   ["hairReach", "Head zone: above the face", "Hands this far above your face (hair) pause gestures, in face-heights.", 0.1],
   ["chinReach", "Head zone: below the chin", "Hands this far below your chin (eating, drinking) pause gestures, in face-heights.", 0.1],
   ["steadiness", "Hold-still tolerance", "How still a hand must be for a gesture to count. Lower is stricter.", 0.05],
@@ -38,6 +39,22 @@ export const KNOBS = [
   ["searchDegrees", "Search width", "Degrees either side of the last sighting to search, until the room is learned.", 1],
   ["searchTilt", "Search tilt", "Degrees up (+) or down (−) to search at, until the room is learned.", 1],
 ];
+
+/* A gesture you name yourself -> its id: "Peace sign!" -> "custom_peace_sign". */
+export const customGestureId = (name) => {
+  const slug = (name || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40).replace(/_+$/, "");
+  return slug ? `custom_${slug}` : null;
+};
+
+/* The built-in gestures, then every one taught from scratch (or being taught). */
+export const gestureCatalog = (catalog = [], taught = {}, teaching = null) => {
+  const ids = [...Object.keys(taught || {}), teaching?.gesture].filter((id) => id?.startsWith("custom_"));
+  const custom = [...new Set(ids)].sort().map((id) => {
+    const words = id.slice(7).replace(/_/g, " ");
+    return { id, title: words[0].toUpperCase() + words.slice(1), how: "Your own gesture", icon: "mdi:hand-wave", custom: true };
+  });
+  return [...catalog, ...custom];
+};
 
 /* "Select option, Mac screen mirroring" for a card's one-line summary. */
 export const summarizeActions = (actions) => {
@@ -126,6 +143,7 @@ class HubbubbCamera extends LitElement {
     _flash: { state: true },
     _items: { state: true },
     _enrollName: { state: true },
+    _newGesture: { state: true },
     _confirm: { state: true },
     _ask: { state: true },
     _teach: { state: true },
@@ -151,6 +169,7 @@ class HubbubbCamera extends LitElement {
     this._flash = null; // { gesture, person } briefly after one fires
     this._items = null;
     this._enrollName = "";
+    this._newGesture = "";
     this._pets = null; // { pets: {name: kind}, spots: {name: [pan, tilt]}, pets_at, wait_minutes }
     this._petForm = { name: "", kind: "dog", spot: "", result: "" };
     this._confirm = null; // what a second click will delete
@@ -406,11 +425,16 @@ class HubbubbCamera extends LitElement {
   }
 
   _titleFor(id) {
-    return this._gestures?.catalog?.find((g) => g.id === id)?.title || id;
+    return this._catalog.find((g) => g.id === id)?.title || id;
+  }
+
+  get _catalog() {
+    const training = this._state?.gestures || {};
+    return gestureCatalog(this._gestures?.catalog, training.taught, training.teaching);
   }
 
   _iconFor(id) {
-    return this._gestures?.catalog?.find((g) => g.id === id)?.icon || "mdi:hand-wave";
+    return this._catalog.find((g) => g.id === id)?.icon || "mdi:hand-wave";
   }
 
   _renderLive() {
@@ -498,9 +522,27 @@ class HubbubbCamera extends LitElement {
         </ha-formfield>
       </section>
       <div class="gestures ${g.on === false ? "disabled" : ""}">
-        ${g.catalog.map((c) => this._renderGesture(c, g.gestures[c.id]))}
+        ${this._catalog.map((c) => this._renderGesture(c, g.gestures[c.id]))}
       </div>
+      <section class="card">
+        <h3>New gesture</h3>
+        <p class="muted small">Name it, then hold it up to the camera for a few seconds so it learns your hand. Pick a shape that isn't close to another gesture.</p>
+        <form class="inline" @submit=${(e) => { e.preventDefault(); this._createGesture(); }}>
+          <input placeholder="Name, e.g. Peace sign" .value=${this._newGesture} @input=${(e) => (this._newGesture = e.target.value)} />
+          <button class="primary" ?disabled=${this._busy || !!this._state?.gestures?.teaching || !customGestureId(this._newGesture)}>Teach it</button>
+        </form>
+      </section>
     `;
+  }
+
+  async _createGesture() {
+    const id = customGestureId(this._newGesture);
+    if (!id) return;
+    await this._try(() => this._call("camera_gesture_teach", { gesture: id }));
+    this._newGesture = "";
+    this._open = id;
+    this._form = gestureForm(this._gestures?.gestures?.[id]);
+    this._poll();
   }
 
   async _gesturesOn(on) {
@@ -519,7 +561,7 @@ class HubbubbCamera extends LitElement {
         <button class="ghead" aria-expanded=${open} @click=${() => this._toggleGesture(c.id, config)}>
           <span class="gicon"><ha-icon .icon=${c.icon}></ha-icon></span>
           <span class="gtext">
-            <span class="name">${c.title} <span class="badge ${taught ? "on" : ""}">${taught ? "Taught" : "Built-in shape"}</span></span>
+            <span class="name">${c.title} <span class="badge ${taught ? "on" : ""}">${taught ? "Taught" : c.custom ? "Not taught yet" : "Built-in shape"}</span></span>
             <span class="muted">${c.how}</span>
             <span class="summary">${form.enabled ? summarizeActions(config?.actions) : "Turned off"}${config?.repeat ? " · repeats while held" : ""}${config?.people?.length ? ` · only ${config.people.join(", ")}` : ""}</span>
           </span>

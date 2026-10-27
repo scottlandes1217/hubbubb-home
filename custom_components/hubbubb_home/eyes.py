@@ -49,6 +49,15 @@ GESTURES = (
     ("number_3", "Three fingers", "Index, middle and ring fingers up", "mdi:numeric-3-circle"),
 )
 TITLES = {g[0]: g[1] for g in GESTURES}
+# Gestures someone taught the camera from scratch: "custom_peace_sign".
+CUSTOM_GESTURE = re.compile(r"^custom_[a-z0-9_]{1,40}$")
+
+
+def valid_gesture(gesture) -> str:
+    """A built-in gesture id or a taught custom one, for schemas."""
+    if gesture in TITLES or (isinstance(gesture, str) and CUSTOM_GESTURE.match(gesture)):
+        return gesture
+    raise vol.Invalid(f"unknown gesture {gesture!r}")
 
 # Panel calls passed straight to the Mac: service -> (method, path).
 PASSTHROUGH = {
@@ -73,7 +82,7 @@ PASSTHROUGH = {
 
 GESTURE_SCHEMA = vol.Schema(
     {
-        vol.Required("gesture"): vol.In(TITLES),
+        vol.Required("gesture"): valid_gesture,
         vol.Optional("enabled", default=True): bool,
         vol.Optional("repeat", default=False): bool,
         vol.Optional("people", default=[]): [str],
@@ -376,7 +385,11 @@ class CameraLink:
 
     async def _gesture(self, event: dict) -> None:
         gesture = event.get("gesture")
-        if gesture not in TITLES or not self.gestures_on:
+        if not self.gestures_on:
+            return
+        try:
+            valid_gesture(gesture)
+        except vol.Invalid:
             return
         person = event.get("person") or None
         held = bool(event.get("held"))
@@ -902,7 +915,7 @@ def async_register_services(hass: HomeAssistant, link: CameraLink, presence: Jar
     )
     hass.services.async_register(
         DOMAIN, "gesture_test", gesture_test,
-        schema=vol.Schema({vol.Required("gesture"): vol.In(TITLES), vol.Optional("person"): str}),
+        schema=vol.Schema({vol.Required("gesture"): valid_gesture, vol.Optional("person"): str}),
     )
     hass.services.async_register(
         DOMAIN, "mac_screen_sharing", mac_screen_sharing,
