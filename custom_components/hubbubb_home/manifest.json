@@ -1,13 +1,13 @@
 {
   "domain": "hubbubb_home",
   "name": "Hubbubb Home",
+  "after_dependencies": [
+    "lovelace"
+  ],
   "codeowners": [
     "@scottlandes1217"
   ],
   "config_flow": true,
-  "after_dependencies": [
-    "lovelace"
-  ],
   "dependencies": [
     "conversation",
     "http",

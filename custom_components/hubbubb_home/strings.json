@@ -134,7 +134,7 @@
               "household_list": "Household list"
             },
             "data_description": {
-              "voice_service_url": "Where the voice service answers, like http://mac.local:10301. Blank turns speaker identification off.",
+              "voice_service_url": "Where the voice service answers: the Mac's address, port 10301. Blank turns speaker identification off.",
               "speaker_map": "A fallback when the voice is not recognised: the assist device in someone's own room probably hears them. Device IDs are on each device's page.",
               "approvers": "Each person's own device, for tap-to-approve. With any line here, Hubbubb requests by voice need the speaker recognized (90% or a spoken \"this is...\") and then approved on their device. Blank turns the gate off.",
               "token": "A shared secret between this integration and the voice service. Speaker events without it are dropped, so nothing else on the network can claim to be a voice. Blank skips the check.",
