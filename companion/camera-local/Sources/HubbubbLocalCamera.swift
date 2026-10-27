@@ -1465,11 +1465,22 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 let holding = wrists.count >= 2 && GestureGate.together(wrists[0], wrists[1], handLength: handLength)
                 var raised = holding ? [] : own.filter { hand in
                     guard let wrist = try? hand.recognizedPoint(.wrist), wrist.confidence > 0.1 else { return false }
+                    // Chest height or above by the face (and by their own up, lying down).
+                    let nearFace = track.face.map { face in
+                        let c = CGPoint(x: face.midX, y: face.midY)
+                        return GestureGate.isRaised(wrist: wrist.location, face: face, body: track.body, reach: reach)
+                            || GestureGate.isRaised(wrist: Upright.point(wrist.location, around: c, up: track.up),
+                                                    face: Upright.rect(face, up: track.up), body: track.body, reach: reach)
+                    } ?? false
                     // Lifted against gravity or toward their head: reclining, people
                     // hold a hand straight up; lying flat, toward the head works too.
+                    // A forearm held toward the camera at chest height looks flat or
+                    // even drooping from up on the TV, so chest height by the face
+                    // counts too; laps and keyboards sit well below it.
                     if let elbow = GestureGate.elbow(for: wrist.location, arms: arms) {
                         let ok = GestureGate.isRaised(wrist: wrist.location, elbow: elbow)
                             || GestureGate.isRaised(wrist: wrist.location, elbow: elbow, up: track.up)
+                            || nearFace
                         handNotes.append(["wrist": [Double(wrist.location.x), Double(wrist.location.y)].map { Double(Int($0 * 100)) / 100 },
                                           "elbow": [Double(elbow.x), Double(elbow.y)].map { Double(Int($0 * 100)) / 100 },
                                           "by": "elbow", "raised": ok])
@@ -1477,12 +1488,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                     }
                     handNotes.append(["wrist": [Double(wrist.location.x), Double(wrist.location.y)].map { Double(Int($0 * 100)) / 100 },
                                       "by": track.face == nil ? "body" : "face", "arms_seen": arms.count])
-                    if let face = track.face {
-                        let c = CGPoint(x: face.midX, y: face.midY)
-                        return GestureGate.isRaised(wrist: wrist.location, face: face, body: track.body, reach: reach)
-                            || GestureGate.isRaised(wrist: Upright.point(wrist.location, around: c, up: track.up),
-                                                    face: Upright.rect(face, up: track.up), body: track.body, reach: reach)
-                    }
+                    if track.face != nil { return nearFace }
                     return GestureGate.isRaised(wrist: wrist.location, face: nil, body: track.body, reach: reach)
                 }
                 if requireLooking && !track.facing && !raised.isEmpty {
