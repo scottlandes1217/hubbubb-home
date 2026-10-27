@@ -14,7 +14,7 @@ import asyncio
 import logging
 import time
 from datetime import UTC, datetime, timedelta
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from urllib.parse import urlsplit
 
 import aiohttp
@@ -33,6 +33,7 @@ from .const import DOMAIN
 _LOGGER = logging.getLogger(__name__)
 
 GESTURE_EVENT = f"{DOMAIN}_gesture"
+PET_EVENT = f"{DOMAIN}_pet_waiting"
 
 # id, title, how to make it, icon. The Mac recognizes exactly these.
 GESTURES = (
@@ -59,6 +60,11 @@ PASSTHROUGH = {
     "camera_look": ("POST", "look"),
     "camera_gesture_teach": ("POST", "gesture_teach"),
     "camera_gesture_forget": ("POST", "gesture_forget"),
+    "camera_drag": ("POST", "drag"),
+    "camera_focus": ("POST", "focus"),
+    "camera_pets": ("GET", "pets"),
+    "camera_pets_save": ("POST", "pets"),
+    "camera_pet_spot": ("POST", "pet_spot"),
 }
 
 GESTURE_SCHEMA = vol.Schema(
@@ -158,6 +164,15 @@ def gesture_allowed(config: dict | None, person: str | None, held: bool) -> bool
     return not people or (person or "").lower() in people
 
 
+def pet_message(pet: str, spot: str, minutes) -> str:
+    """What Jarvis says when a pet has waited at a marked spot (a door)."""
+    place = spot.strip()
+    if not place.lower().startswith("the "):
+        place = f"the {place}"
+    waited = f" for {minutes} minutes" if minutes else ""
+    return f"{pet} has been waiting at {place}{waited}. {pet} may need to go out."
+
+
 class CameraLink:
     """One Mac camera: its latest state, its event feed, and the gestures' actions."""
 
@@ -175,6 +190,8 @@ class CameraLink:
         self.last_gesture: dict | None = None
         self._listeners: list[Callable[[], None]] = []
         self.jarvis: dict = {}
+        # Speaks through the house's announcement policy; set by the entry.
+        self.announce: Callable[[str], Awaitable[None]] | None = None
 
     def url(self, path: str) -> str:
         return f"{self._base}/{path.lstrip('/')}"
@@ -305,6 +322,12 @@ class CameraLink:
         if gesture_allowed(self.gestures.get(gesture), person, held):
             await self.async_run_gesture(gesture, person, held)
 
+    async def _pet_waiting(self, event: dict) -> None:
+        pet, spot = event.get("pet") or "Your pet", event.get("spot") or "door"
+        self.hass.bus.async_fire(PET_EVENT, {"pet": pet, "spot": spot, "minutes": event.get("minutes")})
+        if self.announce:
+            await self.announce(pet_message(pet, spot, event.get("minutes")))
+
     # --- the feed -------------------------------------------------------------
 
     async def async_run(self) -> None:
@@ -337,8 +360,11 @@ class CameraLink:
                     await self._gesture(event)
                 elif kind == "presence":
                     self._speakers.saw(event.get("people") or [])
-                    self.state = {**self.state, "people": event.get("people") or [], "animals": event.get("animals") or []}
+                    self.state = {**self.state, "people": event.get("people") or [], "animals": event.get("animals") or [],
+                                  "pets_at": event.get("pets_at") or {}}
                     self._changed()
+                elif kind == "pet_waiting":
+                    await self._pet_waiting(event)
                 elif kind == "settings":
                     try:
                         self.state = await self.async_request("GET", "state")

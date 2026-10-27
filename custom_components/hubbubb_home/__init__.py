@@ -316,6 +316,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             companion_conf.get(CONF_COMPANION_TOKEN), speakers,
         )
         await runtime.camera.async_load()
+        runtime.camera.announce = runtime.announce_message
         presence = eyes.JarvisPresence(hass, runtime.camera)
         runtime.camera_services = eyes.async_register_services(hass, runtime.camera, presence)
         # The pucks come up with their own integration; with "every puck"

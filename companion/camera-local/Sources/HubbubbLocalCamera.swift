@@ -275,6 +275,74 @@ private struct ItemBook {
     }
 }
 
+/// Pets: their names, the spots they wait at (a door, as camera pan/tilt),
+/// and how long each has been waiting there. Pure, so `--self-test` checks it.
+private enum Pets {
+    struct Wait { var spot: String; var since: Date; var seen: Date; var told = false }
+
+    /// Where in the room a box in the frame is, in camera degrees. Link 2:
+    /// about 70° x 43° across the frame at 1x (as in Gimbal.step).
+    static func direction(of box: CGRect, pan: Float, tilt: Float, zoom: CGFloat) -> (pan: Float, tilt: Float) {
+        (pan + Float((box.midX - 0.5) * 70 / zoom), tilt + Float((box.midY - 0.5) * 43 / zoom))
+    }
+
+    /// The marked spot a direction is at, if any is within `within` degrees.
+    static func spot(at d: (pan: Float, tilt: Float), spots: [String: [Double]], within: Float = 10) -> String? {
+        spots.compactMap { name, v -> (String, Float)? in
+            v.count == 2 ? (name, hypot(Float(v[0]) - d.pan, Float(v[1]) - d.tilt)) : nil
+        }.filter { $0.1 <= within }.min { $0.1 < $1.1 }?.0
+    }
+
+    /// The name to show for an animal Vision labelled `kind`: the pet's, when
+    /// exactly one pet of that kind is registered.
+    // ponytail: by kind, not by look; two dogs both read "dog" until we match
+    // them by feature print like faces.
+    static func name(kind: String, pets: [String: String]) -> String {
+        let matches = pets.filter { $0.value == kind }.map(\.key)
+        return matches.count == 1 ? matches[0] : kind
+    }
+
+    /// Advance the waits with this frame's sightings (pet -> spot). A pet out
+    /// of view for a while (the camera followed someone else, or it left)
+    /// starts over; one at a spot for `wait` seconds is told once per wait.
+    static func update(_ waits: inout [String: Wait], at: [String: String], now: Date, wait: TimeInterval, gap: TimeInterval = 90) -> [(pet: String, spot: String)] {
+        for (pet, spot) in at {
+            if waits[pet]?.spot == spot { waits[pet]!.seen = now } else { waits[pet] = Wait(spot: spot, since: now, seen: now) }
+        }
+        waits = waits.filter { now.timeIntervalSince($0.value.seen) <= gap }
+        var due: [(String, String)] = []
+        for (pet, w) in waits where !w.told && now.timeIntervalSince(w.since) >= wait {
+            waits[pet]!.told = true
+            due.append((pet, w.spot))
+        }
+        return due
+    }
+
+    static var registry: [String: String] { UserDefaults.standard.dictionary(forKey: "pets") as? [String: String] ?? [:] }
+    static var spots: [String: [Double]] { UserDefaults.standard.dictionary(forKey: "petSpots") as? [String: [Double]] ?? [:] }
+
+    static func selfTest() {
+        let d = direction(of: CGRect(x: 0.0, y: 0.4, width: 0.2, height: 0.2), pan: -30, tilt: -10, zoom: 1)
+        precondition(abs(d.pan - (-58)) < 0.01 && abs(d.tilt - (-10)) < 0.01, "left edge at 1x is 28° left: \(d)")
+        precondition(spot(at: (-55, -12), spots: ["back door": [-58, -10], "kitchen": [10, 0]]) == "back door", "near the door")
+        precondition(spot(at: (-20, -12), spots: ["back door": [-58, -10]]) == nil, "not near any spot")
+        precondition(name(kind: "dog", pets: ["Vader": "dog"]) == "Vader", "the one dog is Vader")
+        precondition(name(kind: "dog", pets: ["Vader": "dog", "Luna": "dog"]) == "dog", "two dogs: can't tell")
+        var waits: [String: Wait] = [:]
+        let t0 = Date(timeIntervalSince1970: 0)
+        precondition(update(&waits, at: ["Vader": "back door"], now: t0, wait: 180).isEmpty, "just arrived")
+        precondition(update(&waits, at: [:], now: t0 + 60, wait: 180).isEmpty, "out of view a minute: still waiting")
+        let due = update(&waits, at: ["Vader": "back door"], now: t0 + 181, wait: 180)
+        precondition(due.count == 1 && due[0].pet == "Vader", "three minutes at the door: tell")
+        precondition(update(&waits, at: ["Vader": "back door"], now: t0 + 400, wait: 180).isEmpty, "told once per wait")
+        _ = update(&waits, at: [:], now: t0 + 600, wait: 180)
+        precondition(waits.isEmpty, "gone for over 90 s: the wait is over")
+        _ = update(&waits, at: ["Vader": "back door"], now: t0 + 700, wait: 180)
+        _ = update(&waits, at: ["Vader": "couch"], now: t0 + 800, wait: 180)
+        precondition(update(&waits, at: ["Vader": "couch"], now: t0 + 890, wait: 180).isEmpty, "moving spot restarts the clock")
+    }
+}
+
 /// A person's own "up" - hips to neck - and points seen in their frame, so
 /// every gesture rule reads the same lying on the couch as sitting up.
 /// Vectors are in aspect-corrected units (x scaled for 16:9).
@@ -663,6 +731,7 @@ private enum HubbubbLocalCameraApp {
     static func main() {
         if CommandLine.arguments.contains("--self-test") {
             RoomMap.selfTest()
+            Pets.selfTest()
             return
         }
         // `--replay file.jsonl`: run recorded real hands through the shape rules.
@@ -802,8 +871,11 @@ private final class CameraService {
                 gesture: { [weak self] gesture, person, held in
                     self?.server?.push(["type": "gesture", "gesture": gesture, "person": person ?? NSNull(), "held": held])
                 },
-                presence: { [weak self] people, animals in
-                    self?.server?.push(["type": "presence", "people": people, "animals": animals])
+                presence: { [weak self] people, animals, petsAt in
+                    self?.server?.push(["type": "presence", "people": people, "animals": animals, "pets_at": petsAt])
+                },
+                petWaiting: { [weak self] pet, spot, minutes in
+                    self?.server?.push(["type": "pet_waiting", "pet": pet, "spot": spot, "minutes": minutes])
                 }
             )
             output.setSampleBufferDelegate(processor, queue: DispatchQueue(label: "com.hubbubb.camera.vision"))
@@ -905,6 +977,38 @@ private final class CameraService {
                 return bad("direction is 1 or -1")
             }
             return ok(["ok": hubbubbLinkCameraPanStep(direction) == 1])
+        case ("POST", "/drag"):
+            guard let processor, let dx = (body["dx"] as? NSNumber)?.doubleValue, let dy = (body["dy"] as? NSNumber)?.doubleValue,
+                  abs(dx) <= 1, abs(dy) <= 1 else { return bad("send {\"dx\": ..., \"dy\": ...} in frame fractions") }
+            processor.drag(dx: dx, dy: dy)
+            return ok(["ok": true])
+        case ("POST", "/focus"):
+            guard let processor else { return bad("camera not running") }
+            if let x = (body["x"] as? NSNumber)?.doubleValue, let y = (body["y"] as? NSNumber)?.doubleValue,
+               (0...1).contains(x), (0...1).contains(y) {
+                processor.focus(at: CGPoint(x: x, y: y))
+            } else {
+                processor.focus(at: nil)
+            }
+            return ok(["ok": true])
+        case ("GET", "/pets"):
+            return ok(processor?.petInfo() ?? [:])
+        case ("POST", "/pets"):
+            guard let processor else { return bad("camera not running") }
+            if let minutes = (body["wait_minutes"] as? NSNumber)?.doubleValue {
+                UserDefaults.standard.set(min(60, max(0.5, minutes)), forKey: "petWaitMinutes")
+            }
+            if !name.isEmpty {
+                guard name.count <= 40 else { return bad("names are up to 40 characters") }
+                let kind = body["kind"] as? String
+                guard body["forget"] as? Bool == true || ["dog", "cat"].contains(kind ?? "") else { return bad("kind is dog or cat") }
+                processor.savePet(name: name, kind: body["forget"] as? Bool == true ? nil : kind)
+            }
+            return ok(processor.petInfo())
+        case ("POST", "/pet_spot"):
+            guard let processor, !name.isEmpty, name.count <= 40 else { return bad("send a spot name, up to 40 characters") }
+            if body["forget"] as? Bool == true { return ok(["ok": processor.forgetSpot(name: name)]) }
+            return ok(processor.markSpot(name: name))
         case ("POST", "/mood"):
             guard let processor, let mood = body["mood"] as? String,
                   ["listening", "thinking", "speaking", "idle"].contains(mood) else {
@@ -1201,7 +1305,8 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     private let context = CIContext(options: [.useSoftwareRenderer: false])
     private let preview: (CGImage?, String) -> Void
     private let gesture: (String, String?, Bool) -> Void
-    private let presence: ([String], [String]) -> Void
+    private let presence: ([String], [String], [String: String]) -> Void
+    private let petWaiting: (String, String, Int) -> Void
     private var frameNumber = 0
     private var tracks: [Track] = []
     private var nextTrackID = 1
@@ -1225,6 +1330,17 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     private var latestFrame: CGImage?
     private var latestNames: [String] = []
     private var latestAnimals: [String] = []
+    // Each animal in view: its name and where in the room it is (camera degrees).
+    private var latestAnimalSpots: [(name: String, pan: Float, tilt: Float)] = []
+    private var latestPetsAt: [String: String] = [:]
+    // Where the camera points, polled about once a second off the Vision thread.
+    private var knownPosition: (pan: Float, tilt: Float)?
+    private var lastPositionPoll = Date.distantPast
+    private var petWaits: [String: Pets.Wait] = [:]  // Vision thread only
+    // What a click on the live view asked to follow (Vision coords), and when
+    // it was last seen (under settingsLock / Vision thread).
+    private var focusPoint: CGPoint?
+    private var focusSeen = Date.distantPast
     private var latestHeads: [[String: Any]] = []
     private var latestHandNotes: [[String: Any]] = []
     private var followPausedUntil = Date.distantPast
@@ -1276,11 +1392,13 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         zoomRange: (Int, Int, Int, Int)?,
         preview: @escaping (CGImage?, String) -> Void,
         gesture: @escaping (String, String?, Bool) -> Void,
-        presence: @escaping ([String], [String]) -> Void
+        presence: @escaping ([String], [String], [String: String]) -> Void,
+        petWaiting: @escaping (String, String, Int) -> Void
     ) {
         self.preview = preview
         self.gesture = gesture
         self.presence = presence
+        self.petWaiting = petWaiting
         if let (minimum, maximum, step, current) = zoomRange, maximum > minimum {
             self.zoomRange = (minimum, maximum, max(1, step))
             self.currentZoomFactor = 1 + CGFloat(current - minimum) / CGFloat(maximum - minimum) * 3
@@ -1393,7 +1511,9 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             settingsLock.lock()
             nobodyInView = visible.isEmpty
             settingsLock.unlock()
-            if visible.isEmpty {
+            if followFocus(visible, animals: animals.map(\.boundingBox), now: now) {
+                faceLostSince = nil
+            } else if visible.isEmpty {
                 // Jarvis's nodding pauses following; never let it keep the camera
                 // still while the person is out of view.
                 if let lostSince = faceLostSince, now.timeIntervalSince(lostSince) > 0.8 { endMood(reason: "lost sight of them") }
@@ -1415,8 +1535,39 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 throw CameraVisionError.previewFailed
             }
             let names = Array(Set(visible.compactMap(\.name))).sorted()
-            let animalNames = animals.compactMap { $0.labels.first?.identifier.lowercased() }
+            // Animals by name ("Vader", not "dog") and, for registered pets, the
+            // marked spot they are at.
+            let pets = Pets.registry, spots = Pets.spots
             settingsLock.lock()
+            let position = knownPosition, zoomNow = currentZoomFactor
+            settingsLock.unlock()
+            if now.timeIntervalSince(lastPositionPoll) > 1 {
+                lastPositionPoll = now
+                ptzQueue.async { [weak self] in
+                    guard let self, let p = cameraPosition() else { return }
+                    self.settingsLock.lock(); self.knownPosition = p; self.settingsLock.unlock()
+                }
+            }
+            let animalSpots: [(name: String, pan: Float, tilt: Float)] = animals.compactMap { animal in
+                guard let kind = animal.labels.first?.identifier.lowercased() else { return nil }
+                let name = Pets.name(kind: kind, pets: pets)
+                guard let position else { return (name, .nan, .nan) }
+                let d = Pets.direction(of: animal.boundingBox, pan: position.pan, tilt: position.tilt, zoom: zoomNow)
+                return (name, d.pan, d.tilt)
+            }
+            let animalNames = animalSpots.map(\.name)
+            var petsAt: [String: String] = [:]
+            for a in animalSpots where pets[a.name] != nil && !a.pan.isNaN {
+                if let spot = Pets.spot(at: (a.pan, a.tilt), spots: spots) { petsAt[a.name] = spot }
+            }
+            let waitMinutes = UserDefaults.standard.object(forKey: "petWaitMinutes") as? Double ?? 3
+            for due in Pets.update(&petWaits, at: petsAt, now: now, wait: waitMinutes * 60) {
+                note("Hubbubb camera: %@ has waited at %@ for %.0f min", due.pet, due.spot, waitMinutes)
+                petWaiting(due.pet, due.spot, Int(waitMinutes.rounded()))
+            }
+            settingsLock.lock()
+            latestAnimalSpots = animalSpots
+            latestPetsAt = petsAt
             latestFrame = fullFrame
             latestNames = names
             latestAnimals = animalNames
@@ -1426,7 +1577,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                                         "turn": track.turn.map { Double(Int($0 * 100)) / 100 } ?? NSNull()] }
             }
             settingsLock.unlock()
-            reportPresence(names, animals: animalNames, now: now)
+            reportPresence(names, animals: animalNames, petsAt: petsAt, now: now)
 
             // Gestures, per person: each visible track votes with its own hands.
             let hands = handRequest.results ?? []
@@ -2072,12 +2223,12 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
 
     /// Tell Home Assistant who is in view when that changes, and every 20 s
     /// so it knows the answer is still current.
-    private func reportPresence(_ names: [String], animals: [String], now: Date) {
-        let seen = names + ["|"] + animals.sorted()
+    private func reportPresence(_ names: [String], animals: [String], petsAt: [String: String], now: Date) {
+        let seen = names + ["|"] + animals.sorted() + ["|"] + petsAt.map { "\($0.key)@\($0.value)" }.sorted()
         guard seen != lastPresence || now.timeIntervalSince(lastPresenceSent) > 20 else { return }
         lastPresence = seen
         lastPresenceSent = now
-        presence(names, animals)
+        presence(names, animals, petsAt)
     }
 
     /// The preview, half size, with people and animals boxed and labeled.
@@ -2256,10 +2407,10 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         }
     }
 
-    private func adjustGimbal(forFace face: CGRect) {
+    private func adjustGimbal(forFace face: CGRect, force: Bool = false) {
         let now = Date()
         settingsLock.lock()
-        let enabled = autoFollowEnabled && now > followPausedUntil
+        let enabled = (autoFollowEnabled || force) && now > followPausedUntil
         let zoom = currentZoomFactor
         settingsLock.unlock()
         // Light smoothing against detection jitter; heavier smoothing is lag.
@@ -2284,13 +2435,101 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         ptzQueue.async { _ = hubbubbLinkCameraNudge(step.pan, step.tilt) }
     }
 
+    // MARK: - Steering by hand (the live view in Home Assistant)
+
+    /// Follow whoever or whatever is at `point` (top-left frame fractions, as
+    /// clicked), instead of everyone; nil goes back to following everyone.
+    func focus(at point: CGPoint?) {
+        settingsLock.lock()
+        focusPoint = point.map { CGPoint(x: $0.x, y: 1 - $0.y) }
+        focusSeen = Date()
+        if followPausedUntil != .distantFuture { followPausedUntil = Date() }  // a drag's pause ends
+        settingsLock.unlock()
+        ptzQueue.async { [weak self] in self?.searchPan = nil }
+    }
+
+    /// Move the camera as if dragging the picture by (dx, dy) frame fractions,
+    /// right and down positive: drag right to see more of the left. Following
+    /// rests for 20 s so it doesn't pull straight back.
+    func drag(dx: CGFloat, dy: CGFloat) {
+        settingsLock.lock()
+        focusPoint = nil
+        if followPausedUntil != .distantFuture { followPausedUntil = Date().addingTimeInterval(20) }
+        let zoom = currentZoomFactor
+        settingsLock.unlock()
+        let pan = Float(-dx * 70 / zoom), tilt = Float(dy * 43 / zoom)
+        ptzQueue.async { _ = hubbubbLinkCameraNudge(pan, tilt) }
+    }
+
+    /// While a click's focus is on: keep that one subject (a person's face,
+    /// an animal) centred and framed, tracking it frame to frame by position.
+    /// Returns false when there is no focus, so normal framing runs.
+    private func followFocus(_ visible: [Track], animals: [CGRect], now: Date) -> Bool {
+        settingsLock.lock()
+        let point = focusPoint, current = currentZoomFactor
+        settingsLock.unlock()
+        guard let point else { return false }
+        // (where to aim, what to fit in the frame)
+        let subjects = visible.map { ($0.aim, $0.body) } + animals.map { ($0, $0) }
+        func gap(_ r: CGRect) -> CGFloat { hypot((r.midX - point.x) * 16 / 9, r.midY - point.y) }
+        if let (aim, size) = subjects.min(by: { gap($0.0) < gap($1.0) }), gap(aim) < 0.3 {
+            focusSeen = now
+            settingsLock.lock()
+            if focusPoint != nil { focusPoint = CGPoint(x: aim.midX, y: aim.midY) }
+            settingsLock.unlock()
+            easeZoom(to: min(4, max(1, current * 0.6 / max(size.width, size.height, 0.01))), centeredOn: CGPoint(x: aim.midX, y: aim.midY))
+            adjustGimbal(forFace: aim, force: true)
+            return true
+        }
+        // Briefly lost (turned, walked behind something): hold. Gone: let go.
+        if now.timeIntervalSince(focusSeen) < 5 { return true }
+        settingsLock.lock(); focusPoint = nil; settingsLock.unlock()
+        note("Hubbubb camera: lost the clicked subject, following everyone again")
+        return false
+    }
+
+    // MARK: - Pets
+
+    func petInfo() -> [String: Any] {
+        settingsLock.lock(); defer { settingsLock.unlock() }
+        return ["pets": Pets.registry, "spots": Pets.spots, "pets_at": latestPetsAt,
+                "wait_minutes": UserDefaults.standard.object(forKey: "petWaitMinutes") as? Double ?? 3]
+    }
+
+    func savePet(name: String, kind: String?) {
+        var pets = Pets.registry
+        pets[name] = kind
+        UserDefaults.standard.set(pets, forKey: "pets")
+    }
+
+    /// Mark the spot where an animal is right now (the dog sitting at the
+    /// back door) under `name`; nil when no animal is in view.
+    func markSpot(name: String) -> [String: Any] {
+        settingsLock.lock()
+        let animal = latestAnimalSpots.first { !$0.pan.isNaN }
+        settingsLock.unlock()
+        guard let animal else { return ["error": "No pet in view right now. Mark the spot while your pet is standing there."] }
+        var spots = Pets.spots
+        spots[name] = [Double(animal.pan), Double(animal.tilt)]
+        UserDefaults.standard.set(spots, forKey: "petSpots")
+        return ["marked": name, "by": animal.name]
+    }
+
+    func forgetSpot(name: String) -> Bool {
+        var spots = Pets.spots
+        guard spots.removeValue(forKey: name) != nil else { return false }
+        UserDefaults.standard.set(spots, forKey: "petSpots")
+        return true
+    }
+
     // MARK: - Looking for things
 
     /// Who and what the camera sees right now.
     func inView() -> [String: Any] {
         settingsLock.lock()
         defer { settingsLock.unlock() }
-        return ["people": latestNames, "animals": latestAnimals, "heads": latestHeads, "hands": latestHandNotes]
+        return ["people": latestNames, "animals": latestAnimals, "pets_at": latestPetsAt, "focus": focusPoint != nil,
+                "heads": latestHeads, "hands": latestHandNotes]
     }
 
     /// Answer a question about the room from the camera, panning to search when

@@ -217,5 +217,10 @@ jarvis_presence_test:
     mood:
       required: true
       selector: { select: { options: [listening, thinking, speaking] } }
+camera_drag:
+camera_focus:
+camera_pets:
+camera_pets_save:
+camera_pet_spot:
 camera_gesture_teach:
 camera_gesture_forget:

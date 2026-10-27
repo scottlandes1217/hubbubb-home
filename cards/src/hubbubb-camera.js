@@ -132,6 +132,8 @@ class HubbubbCamera extends LitElement {
     _viewKey: { state: true },
     _jarvis: { state: true },
     _jarvisForm: { state: true },
+    _pets: { state: true },
+    _petForm: { state: true },
   };
 
   constructor() {
@@ -148,6 +150,8 @@ class HubbubbCamera extends LitElement {
     this._flash = null; // { gesture, person } briefly after one fires
     this._items = null;
     this._enrollName = "";
+    this._pets = null; // { pets: {name: kind}, spots: {name: [pan, tilt]}, pets_at, wait_minutes }
+    this._petForm = { name: "", kind: "dog", spot: "", result: "" };
     this._confirm = null; // what a second click will delete
     this._ask = { q: "", answer: null, busy: false };
     this._teach = { name: "", where: "", result: null, busy: false };
@@ -214,6 +218,7 @@ class HubbubbCamera extends LitElement {
       this._state = { connected: false, status: e?.message || String(e) };
     }
     if (this._tab === "jarvis") this._loadJarvis(false);
+    if (this._tab === "people") this._pets = await this._call("camera_pets").catch(() => this._pets);
     const fast = ["live", "people", "jarvis"].includes(this._tab) || this._state?.enrolling || this._state?.gestures?.teaching;
     this._timer = setTimeout(() => this._poll(), fast ? 1500 : 6000);
   }
@@ -296,9 +301,11 @@ class HubbubbCamera extends LitElement {
     const id = this._cameraEntity;
     const token = id && this.hass.states[id]?.attributes?.access_token;
     if (!id || !token) return html`<div class="view empty ${small ? "small" : ""}">No live view yet.</div>`;
-    return html`<div class="view ${small ? "small" : ""}">
+    return html`<div class="view steer ${small ? "small" : ""}"
+        title="Drag to move the camera · click someone to follow them"
+        @pointerdown=${this._pointerDown} @pointermove=${this._pointerMove} @pointerup=${this._pointerUp} @pointercancel=${() => (this._drag = null)}>
       <img
-        alt="Live camera view"
+        alt="Live camera view" draggable="false"
         src=${`/api/camera_proxy_stream/${id}?token=${token}&v=${this._viewKey}`}
         @error=${() => { clearTimeout(this._retry); this._retry = setTimeout(() => this._viewKey++, 2000); }}
       />
@@ -306,6 +313,42 @@ class HubbubbCamera extends LitElement {
         ? html`<div class="toast"><ha-icon .icon=${this._iconFor(this._flash.gesture)}></ha-icon>${this._titleFor(this._flash.gesture)}${this._flash.person ? html` · ${this._flash.person}` : nothing}</div>`
         : nothing}
     </div>`;
+  }
+
+  /* Drag the picture to move the camera (like a map); a click without a drag
+     follows whoever or whatever was clicked. */
+  _pointerDown(e) {
+    const img = e.currentTarget.querySelector("img");
+    if (!img || e.button) return;
+    e.currentTarget.setPointerCapture(e.pointerId);
+    this._drag = { x: e.clientX, y: e.clientY, sentX: e.clientX, sentY: e.clientY, moved: false, last: 0, rect: img.getBoundingClientRect() };
+  }
+
+  _pointerMove(e) {
+    const d = this._drag;
+    if (!d || (!d.moved && Math.hypot(e.clientX - d.x, e.clientY - d.y) < 8)) return;
+    d.moved = true;
+    if (Date.now() - d.last > 150) this._sendDrag(e);
+  }
+
+  _pointerUp(e) {
+    const d = this._drag;
+    if (!d) return;
+    if (d.moved) this._sendDrag(e);
+    else {
+      const x = (e.clientX - d.rect.left) / d.rect.width, y = (e.clientY - d.rect.top) / d.rect.height;
+      if (x >= 0 && x <= 1 && y >= 0 && y <= 1) this._call("camera_focus", { x, y }).then(() => this._poll()).catch((err) => (this._err = err?.message || String(err)));
+    }
+    this._drag = null;
+  }
+
+  _sendDrag(e) {
+    const d = this._drag;
+    const clamp = (v) => Math.max(-1, Math.min(1, v));
+    const dx = clamp((e.clientX - d.sentX) / d.rect.width), dy = clamp((e.clientY - d.sentY) / d.rect.height);
+    if (!dx && !dy) return;
+    Object.assign(d, { sentX: e.clientX, sentY: e.clientY, last: Date.now() });
+    this._call("camera_drag", { dx, dy }).catch((err) => (this._err = err?.message || String(err)));
   }
 
   _titleFor(id) {
@@ -338,11 +381,10 @@ class HubbubbCamera extends LitElement {
           </section>
           <section class="card">
             <h3>Camera</h3>
-            <div class="pan">
-              <button class="round" title="Pan left" aria-label="Pan left" @click=${() => this._try(() => this._call("camera_pan", { direction: -1 }))}><ha-icon icon="mdi:chevron-left"></ha-icon></button>
-              <span class="muted">Pan</span>
-              <button class="round" title="Pan right" aria-label="Pan right" @click=${() => this._try(() => this._call("camera_pan", { direction: 1 }))}><ha-icon icon="mdi:chevron-right"></ha-icon></button>
-            </div>
+            <p class="muted">Drag the picture to move the camera. Click a person or animal to follow just them.</p>
+            ${s.focus
+              ? html`<div class="pan"><button @click=${() => this._try(() => this._call("camera_focus", {})).then(() => this._poll())}><ha-icon icon="mdi:account-group"></ha-icon> Follow everyone again</button></div>`
+              : nothing}
             ${this._formReady
               ? html`<ha-form
                   .hass=${this.hass}
@@ -560,7 +602,78 @@ class HubbubbCamera extends LitElement {
         </section>
         <div>${this._renderView(true)}<div class="status">${s.status || ""}</div></div>
       </div>
+      ${this._renderPets()}
     `;
+  }
+
+  _renderPets() {
+    const p = this._pets || {};
+    const pets = Object.entries(p.pets || {});
+    const spots = Object.keys(p.spots || {});
+    const at = p.pets_at || {};
+    const inView = this._state?.animals || [];
+    const f = this._petForm;
+    return html`
+      <section class="card">
+        <h3>Pets</h3>
+        <p class="muted">Name your pet, then mark the door they wait at. When they wait there a while, Jarvis tells you they may need to go out.</p>
+        ${pets.map(
+          ([name, kind]) => html`<div class="row">
+            <ha-icon icon=${kind === "cat" ? "mdi:cat" : "mdi:dog"}></ha-icon>
+            <div class="grow"><div class="name">${name}</div><div class="muted">${kind}${at[name] ? ` · at the ${at[name]} now` : inView.includes(name) ? " · in view now" : ""}</div></div>
+            <button class="danger" ?disabled=${this._busy} @click=${() => this._petSave({ name, forget: true }, `pet:${name}`)}>${this._confirm === `pet:${name}` ? "Really forget?" : "Forget"}</button>
+          </div>`
+        )}
+        <form class="inline wrap" @submit=${(e) => { e.preventDefault(); this._petSave({ name: f.name.trim(), kind: f.kind }); }}>
+          <input placeholder="Pet's name, e.g. Vader" .value=${f.name} @input=${(e) => (this._petForm = { ...f, name: e.target.value })} />
+          <select .value=${f.kind} @change=${(e) => (this._petForm = { ...f, kind: e.target.value })}>
+            <option value="dog">Dog</option><option value="cat">Cat</option>
+          </select>
+          <button class="primary" ?disabled=${this._busy || !f.name.trim()}>Add pet</button>
+        </form>
+        <h3>Doors they wait at</h3>
+        ${spots.map(
+          (name) => html`<div class="row">
+            <ha-icon icon="mdi:door"></ha-icon>
+            <div class="grow"><div class="name">${name}</div></div>
+            <button class="danger" ?disabled=${this._busy} @click=${() => this._petSpot({ name, forget: true }, `spot:${name}`)}>${this._confirm === `spot:${name}` ? "Really forget?" : "Forget"}</button>
+          </div>`
+        )}
+        <form class="inline wrap" @submit=${(e) => { e.preventDefault(); this._petSpot({ name: f.spot.trim() }); }}>
+          <input placeholder="Spot name, e.g. back door" .value=${f.spot} @input=${(e) => (this._petForm = { ...f, spot: e.target.value })} />
+          <button class="primary" ?disabled=${this._busy || !f.spot.trim()}>Mark where my pet is now</button>
+        </form>
+        <p class="muted">Do this while your pet stands at the door, in the camera's view.</p>
+        ${f.result ? html`<p class="answer">${f.result}</p>` : nothing}
+        <label class="inline">Tell me after
+          <input type="number" min="0.5" max="60" step="0.5" style="width:5em" .value=${String(p.wait_minutes ?? 3)}
+            @change=${(e) => this._petSave({ wait_minutes: Number(e.target.value) })} />
+          minutes at a door</label>
+      </section>
+    `;
+  }
+
+  async _petSave(data, confirmKey) {
+    if (confirmKey && this._confirm !== confirmKey) return (this._confirm = confirmKey);
+    this._confirm = null;
+    const res = await this._try(() => this._call("camera_pets_save", data));
+    if (res) {
+      this._pets = res;
+      if (data.kind) this._petForm = { ...this._petForm, name: "" };
+    }
+  }
+
+  async _petSpot(data, confirmKey) {
+    if (confirmKey && this._confirm !== confirmKey) return (this._confirm = confirmKey);
+    this._confirm = null;
+    const res = await this._try(() => this._call("camera_pet_spot", data));
+    if (!res) return;
+    this._petForm = {
+      ...this._petForm,
+      spot: res.marked ? "" : this._petForm.spot,
+      result: res.error || (res.marked ? `Marked "${res.marked}" where ${res.by} is.` : ""),
+    };
+    this._pets = await this._call("camera_pets").catch(() => this._pets);
   }
 
   async _enroll(name) {
@@ -860,7 +973,9 @@ class HubbubbCamera extends LitElement {
       main { padding: 12px; }
     }
     .view { position: relative; aspect-ratio: 16 / 9; background: #000; border-radius: var(--ha-card-border-radius, 12px); overflow: hidden; }
-    .view img { width: 100%; height: 100%; object-fit: contain; display: block; }
+    .view img { width: 100%; height: 100%; object-fit: contain; display: block; user-select: none; }
+    .view.steer { cursor: grab; touch-action: none; }
+    .view.steer:active { cursor: grabbing; }
     .view.empty { display: flex; align-items: center; justify-content: center; color: #bbb; padding: 0; }
     .status { color: var(--secondary-text-color); padding: 8px 4px 0; min-height: 20px; }
     .toast {

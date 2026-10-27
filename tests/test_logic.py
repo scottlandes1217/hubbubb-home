@@ -181,7 +181,7 @@ from hubbubb_home.memory import Memory  # noqa: E402
 from hubbubb_home.recipes import Recipes, as_lines, recipe_from_html  # noqa: E402
 from hubbubb_home.speakers import SpeakerBook  # noqa: E402
 from hubbubb_home import eyes  # noqa: E402
-from hubbubb_home.eyes import gesture_allowed, mood_for  # noqa: E402
+from hubbubb_home.eyes import gesture_allowed, mood_for, pet_message  # noqa: E402
 from hubbubb_home.timers import TimerPool  # noqa: E402
 from hubbubb_home.nightly import FindingsReport, _days  # noqa: E402
 from hubbubb_home.review import ReviewReport, parse_proposals  # noqa: E402
@@ -2486,6 +2486,11 @@ def test_named_list_match():
     assert match_list(names, "house projects list") == "todo.house_projects"
     assert match_list(names, "my project") == "todo.house_projects"
     assert match_list(names, "christmas") is None
+
+
+def test_pet_message_reads_naturally():
+    assert pet_message("Vader", "back door", 3) == "Vader has been waiting at the back door for 3 minutes. Vader may need to go out."
+    assert pet_message("Vader", "The front door", None) == "Vader has been waiting at The front door. Vader may need to go out."
 
 
 if __name__ == "__main__":
