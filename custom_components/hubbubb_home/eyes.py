@@ -393,8 +393,9 @@ class JarvisPresence:
         # again for a follow-up; and one mood change at a time.
         self._pending_restore: Callable[[], None] | None = None
         self._lock = asyncio.Lock()
-        # What to put back: a scene to re-activate, else the colour snapshot.
-        self._scene: str | None = None
+        # The calls that put the lights back to "before". A restore replaces
+        # them, so a follow-up within 15 s returns to what the last one set.
+        self._before: list[tuple] = []
         self._restored_at = 0.0
         # During a conversation: when it began, our own calls (by context), and
         # anything else that changed the lights - a command to them wins.
@@ -470,7 +471,8 @@ class JarvisPresence:
         elif self._foreign:
             calls = [("light", *reapply(e, st.state, dict(st.attributes))) for e, st in self._foreign.items()]
         else:
-            calls = [("scene", "turn_on", {"entity_id": self._scene or f"scene.{SNAPSHOT_SCENE}", "transition": 0.5})]
+            calls = self._before
+        self._before = calls
 
         async def _run() -> None:
             for domain, service, data in calls:
@@ -547,7 +549,8 @@ class JarvisPresence:
             # Back within 15 s of putting them back: they may still be fading
             # from Jarvis's colour, so keep what was saved rather than save that.
             if time.monotonic() - self._restored_at > 15:
-                self._scene = self._active_scene(entities)
+                scene = self._active_scene(entities) or f"scene.{SNAPSHOT_SCENE}"
+                self._before = [("scene", "turn_on", {"entity_id": scene, "transition": 0.5})]
                 await self.hass.services.async_call(
                     "scene", "create", {"scene_id": SNAPSHOT_SCENE, "snapshot_entities": entities},
                     blocking=True, context=self._context(),

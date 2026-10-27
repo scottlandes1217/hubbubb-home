@@ -621,6 +621,52 @@ def test_a_light_command_during_the_conversation_wins():
     assert not any(c == "scene.turn_on" for c, _ in calls), "never back to the old snapshot"
 
 
+def test_a_light_command_survives_a_quick_next_conversation():
+    """Green, 'make it red', then another question within 15 s: back to red, not green."""
+    import asyncio
+
+    calls, timers = [], []
+
+    class Services:
+        async def async_call(self, domain, service, data, blocking=False, context=None):
+            calls.append((f"{domain}.{service}", data))
+
+    class Hass:
+        services = Services()
+        states = types.SimpleNamespace(is_state=lambda *a: False, get=lambda e: None, async_all=lambda d: [])
+
+        def async_create_background_task(self, coro, name):
+            return asyncio.ensure_future(coro)
+
+    def call_later(hass, delay, action):
+        timers.append(action)
+        return lambda: timers.remove(action)
+
+    eyes.async_call_later = call_later
+    eyes.async_track_state_change_event = lambda *a: (lambda: None)
+    link = types.SimpleNamespace(jarvis={"move": False, "lights": True, "light_entities": ["light.bar"]})
+    presence = eyes.JarvisPresence(Hass(), link)
+    red = types.SimpleNamespace(entity_id="light.bar", state="on", attributes={"color_mode": "xy", "xy_color": [0.7, 0.3], "brightness": 255})
+
+    async def restore():
+        [t for t in timers if getattr(t, "__name__", "") == "_restore"][0]()
+        await asyncio.sleep(0)
+
+    async def run():
+        await presence.async_apply("listening")
+        presence._lights_changed(types.SimpleNamespace(data={"new_state": red}, context=eyes.Context()))
+        await presence.async_apply("idle")
+        await restore()
+        for mood in ("listening", "speaking", "idle"):  # the next question, seconds later
+            await presence.async_apply(mood)
+        await restore()
+
+    asyncio.run(run())
+    last, data = calls[-1]
+    assert last == "light.turn_on" and data["xy_color"] == [0.7, 0.3], calls[-1]
+    assert not any(c == "scene.turn_on" for c, _ in calls), "never back to the old green"
+
+
 def test_speaker_prompt_line_three_cases():
     import time as _time
 
