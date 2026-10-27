@@ -157,7 +157,13 @@ private struct RoomMap {
         precondition(Framing.step(current: 2.3, trend: 2.5, nearEdge: false) == nil, "a small target change holds the zoom")
         precondition(Framing.step(current: 2.3, trend: 2.1, nearEdge: false) == nil, "so does a small zoom-out")
         precondition(Framing.step(current: 2, trend: 3, nearEdge: false).map { $0 > 2 } == true, "a real change still zooms in")
+        precondition(Framing.step(current: 3.7, trend: 4, nearEdge: false, moving: true).map { $0 > 3.7 } == true, "the last small gap still closes")
+        precondition(Framing.step(current: 3.5, trend: 4, nearEdge: false, moving: true).map { $0 > 3.5 } == true, "once moving, it reaches the target")
         precondition(Framing.step(current: 2.3, trend: 2.1, nearEdge: true).map { $0 < 2.3 } == true, "near the edge it zooms out at once")
+        // On the couch at 2x (face 0.12, body 0.6 of the frame): head and shoulders.
+        let close = Framing.zoom(current: 2, face: CGRect(x: 0.45, y: 0.5, width: 0.08, height: 0.12), body: CGRect(x: 0.35, y: 0.1, width: 0.3, height: 0.6), fill: 1.6)
+        precondition(Framing.zoom(current: 3.7, face: CGRect(x: 0.4, y: 0.4, width: 0.15, height: 0.25), body: nil, fill: 1.5) > 3.9, "body lost off the frame at tight framing still zooms in")
+        precondition(close > 3.4 && 0.12 * close / 2 <= 0.45, "tightest framing reaches head and shoulders (\(close))")
         let faceOnly = Framing.zoom(current: 1, face: CGRect(x: 0.45, y: 0.5, width: 0.08, height: 0.1), body: nil, fill: 0.7)
         precondition(0.1 * faceOnly <= 0.25, "face-only framing stays loose (\(faceOnly))")
         precondition(Framing.aim(face: CGRect(x: 0.4, y: 0.6, width: 0.1, height: 0.1), body: .zero).y < 0.5, "aim below the face, so it sits high")
@@ -679,13 +685,18 @@ private enum Framing {
     /// The zoom that frames them: the upper body fills `fill` of the frame's
     /// height, but the face never more than `maxFace` - so standing up close
     /// stays a half-body shot instead of a face filling the screen. No real
-    /// body box (only a face seen) frames by the face alone.
-    static func zoom(current: CGFloat, face: CGRect?, body: CGRect?, fill: CGFloat, maxFace: CGFloat = 0.25) -> CGFloat {
+    /// body box (only a face seen) frames by the face alone. `maxFace` grows
+    /// with `fill`: past 1 the body overflows the frame and it is a
+    /// head-and-shoulders shot (face up to 45%, the old app used 40%).
+    static func zoom(current: CGFloat, face: CGRect?, body: CGRect?, fill: CGFloat, maxFace: CGFloat? = nil) -> CGFloat {
+        let maxFace = maxFace ?? min(0.45, 0.25 * max(1, fill / 0.7))
         var target: CGFloat = 4
         if let body { target = min(target, current * fill / max(body.height, 0.01)) }
         // Only a face (body not found): assume a half-body shot means a face
         // about an eighth of the frame tall, not a head shot.
-        if let face { target = min(target, current * (body == nil ? maxFace * 0.5 : maxFace) / max(face.height, 0.01)) }
+        // (Tight framing loses the body box off the frame's edge: then the face
+        // alone is the normal case, not a hint to stay loose.)
+        if let face { target = min(target, current * (body == nil ? maxFace * min(1, 0.5 * fill / 0.7) : maxFace) / max(face.height, 0.01)) }
         return min(4, max(1, target))
     }
 
@@ -693,20 +704,25 @@ private enum Framing {
     /// to hold. Within `deadband` (a fraction of the zoom) the shot is framed:
     /// chasing the exact zoom every frame is the in-and-out pumping, since the
     /// body box jitters with every arm movement. Near the edge only the
-    /// zoom-out side matters, so that goes at once.
-    static func step(current: CGFloat, trend: CGFloat, nearEdge: Bool, deadband: CGFloat = 0.15) -> CGFloat? {
-        guard abs(trend - current) > current * deadband || (nearEdge && trend < current) else { return nil }
+    /// zoom-out side matters, so that goes at once. Once moving it carries on
+    /// to the target (`moving`), or it would stop a deadband short.
+    static func step(current: CGFloat, trend: CGFloat, nearEdge: Bool, moving: Bool = false, deadband: CGFloat = 0.15) -> CGFloat? {
+        guard abs(trend - current) > current * (moving ? 0.02 : deadband) || (nearEdge && trend < current) else { return nil }
         let rate: CGFloat = trend < current ? (nearEdge ? 0.7 : 0.35) : 0.12
-        let next = current + (trend - current) * rate
-        return abs(next - current) > 0.04 ? next : nil
+        // At least 0.04 a step (smaller is lost in the lens), but never past the target.
+        let delta = (trend - current) * rate
+        return current + (delta < 0 ? -1 : 1) * min(abs(trend - current), max(abs(delta), 0.04))
     }
 
     /// Where to centre the camera: on the face across, and low enough that the
     /// face sits a third from the top rather than dead centre.
-    static func aim(face: CGRect?, body: CGRect, up: CGVector = Upright.vertical) -> CGPoint {
+    /// `fill` past 0.7 (tighter framing) brings the face toward the centre, as
+    /// the old app did: head and shoulders, not a face over a chest.
+    static func aim(face: CGRect?, body: CGRect, up: CGVector = Upright.vertical, fill: CGFloat = 0.7) -> CGPoint {
         guard let face else { return CGPoint(x: body.midX, y: body.maxY - body.height * 0.3) }
         // Toward their body from the face, whichever way they are lying.
-        return CGPoint(x: face.midX - 0.17 * up.dx * 9 / 16, y: face.midY - 0.17 * up.dy)
+        let drop = 0.17 * min(1, 0.7 / fill)
+        return CGPoint(x: face.midX - drop * up.dx * 9 / 16, y: face.midY - drop * up.dy)
     }
 }
 
@@ -801,7 +817,7 @@ private final class CameraService {
         "handConfidence": (0.1...0.8, 0.25),
         "lookAngle": (10...60, 25),
         "lookTurn": (0.1...0.5, 0.33),
-        "framingFill": (0.4...1.0, 0.7),
+        "framingFill": (0.4...1.6, 0.7),
         "zoomMax": (1.0...4.0, 4.0),
         "gestureMatch": (0.15...0.7, 0.35),
     ]
@@ -1385,6 +1401,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     private let ptzQueue = DispatchQueue(label: "com.hubbubb.camera.ptz")
     private var lastAutoZoomUpdate = Date.distantPast
     private var zoomTrend: CGFloat?
+    private var zoomMoving = false
     private var lastAutoFollowUpdate = Date.distantPast
     private var smoothedFaceCenter: CGPoint?
     private var lastCenterTime = Date.distantPast
@@ -1789,7 +1806,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             // same framing seated or standing. Calibration knob: `framingFill`.
             let person = visible[0]
             let fill = CGFloat(UserDefaults.standard.object(forKey: "framingFill") as? Double ?? 0.7)
-            let point = Framing.aim(face: person.face, body: person.body, up: person.up)
+            let point = Framing.aim(face: person.face, body: person.body, up: person.up, fill: fill)
             if person.face != nil || person.bodySeen {
                 easeZoom(to: Framing.zoom(current: current, face: person.face, body: person.bodySeen ? person.body : nil, fill: fill), centeredOn: point)
             }
@@ -2346,7 +2363,9 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         let nearEdge = abs(point.x - 0.5) > 0.3 || abs(point.y - 0.5) > 0.3
         // Past the limit (just lowered): it is a limit, not a target - no deadband.
         if current > target + 0.04, target == limit { return applyHardwareZoom(limit) }
-        guard let next = Framing.step(current: current, trend: nearEdge ? min(trend, target) : trend, nearEdge: nearEdge) else { return }
+        let next = Framing.step(current: current, trend: nearEdge ? min(trend, target) : trend, nearEdge: nearEdge, moving: zoomMoving)
+        zoomMoving = next != nil
+        guard let next else { return }
         applyHardwareZoom(next)
     }
 

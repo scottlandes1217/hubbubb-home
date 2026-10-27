@@ -24,7 +24,7 @@ const TABS = [
 /* What each knob means, in the words a person would use. */
 export const KNOBS = [
   ["gestureMatch", "Gesture match strictness", "How close a hand must be to the gestures you taught it. Lower is stricter (fewer accidents); raise it if taught gestures are missed.", 0.01],
-  ["framingFill", "Framing", "How much of the frame one person's upper body fills when auto-zoom is on. Lower shows more of the room; the face never fills more than a quarter.", 0.05],
+  ["framingFill", "Framing", "How tightly auto-zoom frames one person: how much of the frame their upper body fills. 0.7 is waist up, 1.0 chest up, 1.4–1.6 head and shoulders. Lower shows more of the room.", 0.05],
   ["zoomMax", "Auto-zoom limit", "The furthest auto-zoom will zoom in, from 1× (never) to 4×. Pinching or scrolling the live view zooms by hand, past this limit.", 0.1],
   ["holdSeconds", "Hold time", "Seconds a gesture must be held before it counts. Longer means fewer accidents.", 0.1],
   ["handConfidence", "Hand clarity", "How clearly every finger must be seen. Higher ignores hands holding a phone or petting the dog.", 0.05],
