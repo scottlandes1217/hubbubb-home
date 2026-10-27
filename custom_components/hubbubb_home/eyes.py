@@ -156,6 +156,27 @@ def commands_lights(data: dict, targets: set[str]) -> bool:
     return bool(ids & targets) or "all" in ids
 
 
+def is_adaptive_lighting(context) -> bool:
+    """Adaptive Lighting marks its own calls with ':al:' in the context id."""
+    return ":al:" in (context.id or "")
+
+
+def hands_back(data: dict) -> bool:
+    """Whether an adaptive_lighting call gives lights back to it ("natural")."""
+    service_data = data.get("service_data") or {}
+    if data.get("service") == "set_manual_control":
+        return service_data.get("manual_control") is False
+    return data.get("service") == "apply"
+
+
+def adaptive_calls(switch: str, lights: list[str]) -> list[tuple]:
+    """Take lights off manual and let Adaptive Lighting set them now."""
+    return [
+        ("adaptive_lighting", "set_manual_control", {"entity_id": switch, "lights": lights, "manual_control": False}),
+        ("adaptive_lighting", "apply", {"entity_id": switch, "lights": lights, "transition": 1}),
+    ]
+
+
 def mood_for(states: list[str]) -> str:
     """The mood for several pucks at once: the busiest one wins."""
     moods = {SATELLITE_MOODS.get(s) for s in states}
@@ -416,6 +437,7 @@ class JarvisPresence:
         self._tint: list | None = None
         self._foreign: dict = {}
         self._commanded = False
+        self._handback = False  # "natural": they gave the lights back to Adaptive Lighting
         self._watch_lights: Callable[[], None] | None = None
 
     @property
@@ -481,6 +503,8 @@ class JarvisPresence:
         asked = self._active_scene(entities, since=self._started) if self._started else None
         if asked:
             calls = [("scene", "turn_on", {"entity_id": asked, "transition": 0.5})]
+        elif self._handback:
+            calls = self._adaptive(entities)
         elif self._foreign:
             calls = [("light", *reapply(e, st.state, dict(st.attributes))) for e, st in self._foreign.items()]
         else:
@@ -506,10 +530,38 @@ class JarvisPresence:
         """Someone else's light or scene command during the conversation."""
         data = event.data
         context = event.context
-        if data.get("domain") not in ("light", "scene") or context.id in self._ours or context.parent_id in self._ours:
+        if context.id in self._ours or context.parent_id in self._ours or is_adaptive_lighting(context):
             return
-        if commands_lights(data, self._light_targets()):
-            self._commanded = True
+        if data.get("domain") == "adaptive_lighting":
+            if hands_back(data):
+                self._handback, self._commanded, self._foreign = True, False, {}
+        elif data.get("domain") in ("light", "scene") and commands_lights(data, self._light_targets()):
+            self._commanded, self._handback = True, False
+
+    def _adaptive(self, entities: list[str], unpaused_only: bool = False) -> list[tuple]:
+        """Calls that hand these lights back to Adaptive Lighting.
+
+        unpaused_only: just the ones it is running right now (not on manual).
+        """
+        entries = self.hass.config_entries.async_entries("adaptive_lighting")
+        if not entries:
+            return []
+        registry = er.async_get(self.hass)
+        calls = []
+        for entry in entries:
+            lights = set(entry.options.get("lights") or entry.data.get("lights") or []) & set(entities)
+            switch = next((
+                e.entity_id for e in er.async_entries_for_config_entry(registry, entry.entry_id)
+                if e.domain == "switch" and not e.entity_id.endswith(("_sleep_mode", "_adapt_color", "_adapt_brightness"))
+            ), None)
+            state = self.hass.states.get(switch) if switch else None
+            if not lights or state is None or state.state != "on":
+                continue
+            if unpaused_only:
+                lights -= set(state.attributes.get("manual_control") or [])
+            if lights:
+                calls += adaptive_calls(switch, sorted(lights))
+        return calls
 
     def _light_targets(self) -> set[str]:
         """Our lights and the Hue groups holding them - a group command changes them too."""
@@ -525,8 +577,8 @@ class JarvisPresence:
         """A light we tint changed. Ours, or someone's command?"""
         new = event.data.get("new_state")
         context = event.context
-        if new is None or is_tint(dict(new.attributes), self._tint):
-            return  # gone, or (a late echo of) our own colour
+        if new is None or is_tint(dict(new.attributes), self._tint) or is_adaptive_lighting(context):
+            return  # gone, (a late echo of) our own colour, or Adaptive Lighting's routine pass
         # A group command's change reaches the light under the context of our
         # last call to it (HA keeps an entity's context for 5 s), so after a
         # command any colour that isn't our tint is theirs.
@@ -585,7 +637,13 @@ class JarvisPresence:
             # from Jarvis's colour, so keep what was saved rather than save that.
             if time.monotonic() - self._restored_at > 15:
                 scene = self._active_scene(entities) or f"scene.{SNAPSHOT_SCENE}"
-                self._before = [("scene", "turn_on", {"entity_id": scene, "transition": 0.5})]
+                # Lights Adaptive Lighting was running go back to it, not to a
+                # frozen copy - and skip the scene if it has them all, since
+                # activating a scene pauses Adaptive Lighting.
+                adaptive = self._adaptive(entities, unpaused_only=True)
+                covered = {light for _d, _s, data in adaptive for light in data["lights"]}
+                scene_call = [] if covered >= set(entities) else [("scene", "turn_on", {"entity_id": scene, "transition": 0.5})]
+                self._before = scene_call + adaptive
                 await self.hass.services.async_call(
                     "scene", "create", {"scene_id": SNAPSHOT_SCENE, "snapshot_entities": entities},
                     blocking=True, context=self._context(),
@@ -594,12 +652,13 @@ class JarvisPresence:
             self._started = datetime.now(UTC)
             self._foreign = {}
             self._commanded = False
+            self._handback = False
             unsubs = (
                 async_track_state_change_event(self.hass, entities, self._lights_changed),
                 self.hass.bus.async_listen("call_service", self._light_call),
             )
             self._watch_lights = lambda: [u() for u in unsubs]
-        if self._foreign:
+        if self._foreign or self._handback:
             return  # they changed these lights mid-conversation; leave them be
         self._tint = (config.get("colors") or MOOD_COLORS).get(mood, MOOD_COLORS[mood])
         await self.hass.services.async_call(

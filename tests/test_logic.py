@@ -522,6 +522,7 @@ def test_jarvis_lights_survive_a_follow_up_question():
     class Hass:
         services = Services()
         bus = types.SimpleNamespace(async_listen=lambda *a: (lambda: None))
+        config_entries = types.SimpleNamespace(async_entries=lambda d: [])
         states = types.SimpleNamespace(is_state=lambda *a: False, get=lambda e: None, async_all=lambda d: [])
 
         def async_create_background_task(self, coro, name):
@@ -586,6 +587,7 @@ def test_a_light_command_during_the_conversation_wins():
     class Hass:
         services = Services()
         bus = types.SimpleNamespace(async_listen=lambda *a: (lambda: None))
+        config_entries = types.SimpleNamespace(async_entries=lambda d: [])
         states = types.SimpleNamespace(is_state=lambda *a: False, get=lambda e: None, async_all=lambda d: [])
 
         def async_create_background_task(self, coro, name):
@@ -636,6 +638,7 @@ def test_a_light_command_survives_a_quick_next_conversation():
     class Hass:
         services = Services()
         bus = types.SimpleNamespace(async_listen=lambda *a: (lambda: None))
+        config_entries = types.SimpleNamespace(async_entries=lambda d: [])
         states = types.SimpleNamespace(is_state=lambda *a: False, get=lambda e: None, async_all=lambda d: [])
 
         def async_create_background_task(self, coro, name):
@@ -686,6 +689,7 @@ def test_a_group_command_wins_even_under_our_context():
     class Hass:
         services = Services()
         bus = types.SimpleNamespace(async_listen=lambda *a: (lambda: None))
+        config_entries = types.SimpleNamespace(async_entries=lambda d: [])
         states = types.SimpleNamespace(is_state=lambda *a: False, get=lambda e: None, async_all=lambda d: [room] if d == "light" else [])
 
         def async_create_background_task(self, coro, name):
@@ -723,6 +727,78 @@ def test_a_group_command_wins_even_under_our_context():
     last, data = calls[-1]
     assert last == "light.turn_on" and data["xy_color"] == [0.7, 0.3], calls[-1]
     assert not any(c == "scene.turn_on" for c, _ in calls), "never back to the old green"
+
+
+def test_adaptive_lighting_gets_its_lights_back():
+    """A lamp Adaptive Lighting was running goes back to it, not to a frozen
+    copy; "natural" mid-conversation hands it back too; AL's own passes are
+    never a command."""
+    import asyncio
+
+    calls, timers = [], []
+
+    class Services:
+        async def async_call(self, domain, service, data, blocking=False, context=None):
+            calls.append((f"{domain}.{service}", data))
+
+    al = types.SimpleNamespace(state="on", attributes={"manual_control": []})
+    entry = types.SimpleNamespace(entry_id="al1", options={}, data={"lights": ["light.bar", "light.other"]})
+
+    class Hass:
+        services = Services()
+        bus = types.SimpleNamespace(async_listen=lambda *a: (lambda: None))
+        config_entries = types.SimpleNamespace(async_entries=lambda d: [entry])
+        states = types.SimpleNamespace(is_state=lambda *a: False, get=lambda e: al if e == "switch.adaptive_lighting_home" else None, async_all=lambda d: [])
+
+        def async_create_background_task(self, coro, name):
+            return asyncio.ensure_future(coro)
+
+    def call_later(hass, delay, action):
+        timers.append(action)
+        return lambda: timers.remove(action)
+
+    eyes.async_call_later = call_later
+    eyes.async_track_state_change_event = lambda *a: (lambda: None)
+    switches = [types.SimpleNamespace(domain="switch", entity_id=e) for e in ("switch.adaptive_lighting_home_sleep_mode", "switch.adaptive_lighting_home")]
+    real_er, eyes.er = eyes.er, types.SimpleNamespace(async_get=lambda h: None, async_entries_for_config_entry=lambda r, i: switches)
+    link = types.SimpleNamespace(jarvis={"move": False, "lights": True, "light_entities": ["light.bar"]})
+    handed = [("adaptive_lighting.set_manual_control", {"entity_id": "switch.adaptive_lighting_home", "lights": ["light.bar"], "manual_control": False}),
+              ("adaptive_lighting.apply", {"entity_id": "switch.adaptive_lighting_home", "lights": ["light.bar"], "transition": 1})]
+    warm = types.SimpleNamespace(entity_id="light.bar", state="on", attributes={"color_mode": "color_temp", "color_temp_kelvin": 2200, "brightness": 143})
+
+    async def conversation(presence, during=()):
+        await presence.async_apply("listening")
+        for step in during:
+            step(presence)
+        await presence.async_apply("speaking")
+        await presence.async_apply("idle")
+        [t for t in timers if getattr(t, "__name__", "") == "_restore"][0]()
+        timers.clear()
+        await asyncio.sleep(0)
+
+    # 1. Running under AL, nothing asked: back to AL. AL's own pass mid-way is not a command.
+    presence = eyes.JarvisPresence(Hass(), link)
+    al_pass = lambda p: (p._light_call(types.SimpleNamespace(data={"domain": "light", "service": "turn_on", "service_data": {"entity_id": "light.bar"}}, context=types.SimpleNamespace(id="01X:al:AB:srvc:01", parent_id=None))),
+                         p._lights_changed(types.SimpleNamespace(data={"new_state": warm}, context=types.SimpleNamespace(id="01X:al:AB:srvc:01", parent_id=None))))
+    asyncio.run(conversation(presence, [al_pass]))
+    assert calls[-2:] == handed, calls[-2:]
+    assert not any(c == "scene.turn_on" for c, _ in calls), "a scene would pause Adaptive Lighting"
+    assert not presence._foreign and not presence._commanded
+
+    # 2. Paused (manual), "make it red" style: no handback, the scene snapshot.
+    calls.clear(); al.attributes["manual_control"] = ["light.bar"]
+    presence = eyes.JarvisPresence(Hass(), link)
+    asyncio.run(conversation(presence))
+    assert calls[-1][0] == "scene.turn_on" and not any(c.startswith("adaptive") for c, _ in calls), calls
+
+    # 3. Paused, then "natural" mid-conversation: no more tints, handed back.
+    calls.clear()
+    presence = eyes.JarvisPresence(Hass(), link)
+    natural = lambda p: p._light_call(types.SimpleNamespace(data={"domain": "adaptive_lighting", "service": "set_manual_control", "service_data": {"entity_id": "switch.adaptive_lighting_home", "manual_control": False}}, context=types.SimpleNamespace(id="theirs", parent_id=None)))
+    asyncio.run(conversation(presence, [natural]))
+    assert calls[-2:] == [(c, dict(d, lights=["light.bar"])) for c, d in handed], calls[-2:]
+    assert [c for c, d in calls if c == "light.turn_on"] == ["light.turn_on"], "only the listening tint, none after 'natural'"
+    eyes.er = real_er
 
 
 def test_speaker_prompt_line_three_cases():
