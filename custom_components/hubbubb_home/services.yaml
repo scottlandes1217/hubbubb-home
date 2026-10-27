@@ -185,3 +185,50 @@ agent_fleet_act:
     id: { selector: { text: } }
     text: { selector: { text: } }
     message: { selector: { text: } }
+mac_screen_sharing:
+  fields:
+    "on":
+      required: true
+      selector: { boolean: }
+    airplay:
+      required: false
+      selector: { text: }
+gestures_enable:
+  fields:
+    "on":
+      required: true
+      selector: { boolean: }
+gesture_test:
+  fields:
+    gesture:
+      required: true
+      selector:
+        select:
+          options: [thumbs_up, thumbs_down, open_palm, number_1, number_2, number_3]
+    person: { selector: { text: } }
+gestures_get:
+gesture_save:
+camera_state:
+camera_settings:
+camera_pan:
+camera_enroll:
+camera_forget_person:
+camera_items:
+camera_forget_item:
+camera_learn:
+camera_room_reset:
+camera_look:
+jarvis_presence_get:
+jarvis_presence_save:
+jarvis_presence_test:
+  fields:
+    mood:
+      required: true
+      selector: { select: { options: [listening, thinking, speaking] } }
+camera_drag:
+camera_focus:
+camera_pets:
+camera_pets_save:
+camera_pet_spot:
+camera_gesture_teach:
+camera_gesture_forget:

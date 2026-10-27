@@ -134,7 +134,7 @@
               "household_list": "Household list"
             },
             "data_description": {
-              "voice_service_url": "Where the voice service answers, like http://mac.local:10301. Blank turns speaker identification off.",
+              "voice_service_url": "Where the voice service answers: the Mac's address, port 10301. Blank turns speaker identification off.",
               "speaker_map": "A fallback when the voice is not recognised: the assist device in someone's own room probably hears them. Device IDs are on each device's page.",
               "approvers": "Each person's own device, for tap-to-approve. With any line here, Hubbubb requests by voice need the speaker recognized (90% or a spoken \"this is...\") and then approved on their device. Blank turns the gate off.",
               "token": "A shared secret between this integration and the voice service. Speaker events without it are dropped, so nothing else on the network can claim to be a voice. Blank skips the check.",
@@ -385,6 +385,40 @@
         "decision": {
           "name": "Decision",
           "description": "accepted, rejected, done, or pending."
+        }
+      }
+    },
+    "mac_screen_sharing": {
+      "name": "Mac screen mirroring to the TV",
+      "description": "Start or stop extending the camera's Mac onto the TV with Screen Mirroring.",
+      "fields": {
+        "on": {
+          "name": "On",
+          "description": "On starts extending; off stops it."
+        }
+      }
+    },
+    "gestures_enable": {
+      "name": "Turn camera gestures on or off",
+      "description": "Off ignores every camera gesture, for meetings or talking with your hands.",
+      "fields": {
+        "on": {
+          "name": "On",
+          "description": "On listens for gestures again; off ignores them all."
+        }
+      }
+    },
+    "gesture_test": {
+      "name": "Run a gesture's actions",
+      "description": "Run the actions assigned to a camera gesture, as if someone had made it.",
+      "fields": {
+        "gesture": {
+          "name": "Gesture",
+          "description": "Which gesture."
+        },
+        "person": {
+          "name": "Person",
+          "description": "Who to pretend made it (passed to the actions as person)."
         }
       }
     }

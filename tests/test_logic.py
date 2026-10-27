@@ -68,6 +68,9 @@ _stub(
 )
 _stub(
     "homeassistant.core",
+    Context=type("Context", (), {"__init__": lambda self, parent_id=None: (
+        setattr(self, "id", f"ctx{id(self)}"), setattr(self, "parent_id", parent_id))[0]}),
+    Event=object,
     HomeAssistant=object,
     CALLBACK_TYPE=object,
     callback=lambda f: f,
@@ -92,6 +95,8 @@ except ImportError:
         All=lambda *a, **k: None,
         Length=lambda *a, **k: None,
         Range=lambda *a, **k: None,
+        Any=lambda *a, **k: None,
+        Invalid=Exception,
     )
 
 class _LLMAPI:
@@ -100,7 +105,12 @@ class _LLMAPI:
 
 
 _helpers = _stub("homeassistant.helpers")
-_stub("homeassistant.helpers.event", async_track_point_in_time=_track_point_in_time)
+_stub(
+    "homeassistant.helpers.event",
+    async_track_point_in_time=_track_point_in_time,
+    async_call_later=None,
+    async_track_state_change_event=None,
+)
 _stub(
     "homeassistant.helpers.llm",
     API=_LLMAPI,
@@ -113,8 +123,8 @@ _stub(
 for _name, _attrs in {
     "area_registry": {},
     "device_registry": {},
-    "entity_registry": {},
-    "config_validation": {"string": str},
+    "entity_registry": {"async_get": None},
+    "config_validation": {"string": str, "SCRIPT_SCHEMA": lambda v: v, "boolean": bool, "entity_id": str},
     "intent": {"IntentHandler": _IntentHandler, "async_register": lambda *a: None},
     "aiohttp_client": {"async_get_clientsession": lambda hass: None},
     "issue_registry": {
@@ -143,6 +153,12 @@ class _Store:
 
 
 _stub("homeassistant.helpers.storage", Store=_Store)
+_stub(
+    "homeassistant.helpers.script",
+    SCRIPT_MODE_PARALLEL="parallel",
+    Script=object,
+    async_validate_actions_config=None,
+)
 _stub("homeassistant.util")
 _stub(
     "homeassistant.util.dt",
@@ -164,6 +180,8 @@ sys.modules["hubbubb_home"] = _pkg
 from hubbubb_home.memory import Memory  # noqa: E402
 from hubbubb_home.recipes import Recipes, as_lines, recipe_from_html  # noqa: E402
 from hubbubb_home.speakers import SpeakerBook  # noqa: E402
+from hubbubb_home import eyes  # noqa: E402
+from hubbubb_home.eyes import gesture_allowed, mood_for, pet_message  # noqa: E402
 from hubbubb_home.timers import TimerPool  # noqa: E402
 from hubbubb_home.nightly import FindingsReport, _days  # noqa: E402
 from hubbubb_home.review import ReviewReport, parse_proposals  # noqa: E402
@@ -428,6 +446,359 @@ def test_speaker_resolution_precedence():
     # Saying who you are beats everything.
     book.set_override("Dana")
     assert book.resolve("puck-bedroom") == ("Dana", 1.0, "told")
+
+
+def test_camera_presence_sits_between_sure_and_unsure_voice():
+    import time as _time
+    from hubbubb_home.speakers import CAMERA_WINDOW
+
+    book = SpeakerBook(None, "", "puck-bedroom: Vega")
+    now = _time.time()
+
+    # One known face in view beats the room default, as a lean.
+    book.saw(["Anna"])
+    assert book.resolve("puck-bedroom") == ("Anna", 0.7, "camera")
+    assert book.last_known == "Anna"
+
+    # It beats an unsure voice naming someone else...
+    book.record({"person": "Scott", "confidence": 0.6, "ts": now - 1})
+    assert book.resolve()[2] == "camera"
+    # ...but never a sure one.
+    book.record({"person": "Scott", "confidence": 0.9, "ts": now - 1})
+    assert book.resolve() == ("Scott", 0.9, "voice")
+
+    # Two people in view says nothing about which one spoke.
+    book.events.clear()
+    book.saw(["Anna", "Scott"])
+    assert book.resolve("puck-bedroom")[2] == "device"
+
+    # A camera that stopped reporting is no evidence.
+    book.saw(["Anna"])
+    book.in_view = (["Anna"], now - CAMERA_WINDOW - 1)
+    assert book.resolve() == (None, 0.0, None)
+
+    # Junk in the event is dropped, not stored.
+    book.saw(["", None, 3, "Scott"])
+    assert book.in_view[0] == ["Scott"]
+
+
+def test_gesture_runs_only_when_its_settings_allow():
+    volume = {"enabled": True, "repeat": True, "people": [], "actions": [{"action": "x"}]}
+    once = {**volume, "repeat": False}
+    assert gesture_allowed(volume, "Scott", held=False)
+    assert gesture_allowed(volume, None, held=True)  # held repeats step the volume
+    assert not gesture_allowed(once, "Scott", held=True)  # a one-shot fires once
+    assert gesture_allowed(once, "Scott", held=False)
+    # Limited to some people: names match loosely, strangers never.
+    mine = {**once, "people": ["scott"]}
+    assert gesture_allowed(mine, "Scott", held=False)
+    assert not gesture_allowed(mine, "Anna", held=False)
+    assert not gesture_allowed(mine, None, held=False)
+    # Off, empty or unknown does nothing.
+    assert not gesture_allowed({**once, "enabled": False}, "Scott", held=False)
+    assert not gesture_allowed({**once, "actions": []}, "Scott", held=False)
+    assert not gesture_allowed(None, "Scott", held=False)
+
+
+def test_jarvis_mood_follows_the_busiest_puck():
+    assert mood_for([]) == "idle"
+    assert mood_for(["idle", "unavailable"]) == "idle"
+    assert mood_for(["listening"]) == "listening"
+    assert mood_for(["processing"]) == "thinking"
+    assert mood_for(["listening", "responding"]) == "speaking"
+    assert mood_for(["processing", "listening", "idle"]) == "thinking"
+
+
+def test_jarvis_lights_survive_a_follow_up_question():
+    """idle -> listening within a second must not re-snapshot Jarvis's colour."""
+    import asyncio
+
+    calls, timers = [], []
+
+    class Services:
+        async def async_call(self, domain, service, data, blocking=False, context=None):
+            calls.append(f"{domain}.{service}")
+
+    class Hass:
+        services = Services()
+        bus = types.SimpleNamespace(async_listen=lambda *a: (lambda: None))
+        config_entries = types.SimpleNamespace(async_entries=lambda d: [])
+        states = types.SimpleNamespace(is_state=lambda *a: False, get=lambda e: None, async_all=lambda d: [])
+
+        def async_create_background_task(self, coro, name):
+            return asyncio.ensure_future(coro)
+
+    def call_later(hass, delay, action):
+        timers.append(action)
+        return lambda: timers.remove(action)
+
+    eyes.async_call_later = call_later
+    eyes.async_track_state_change_event = lambda *a: (lambda: None)
+    link = types.SimpleNamespace(jarvis={"move": False, "lights": True, "light_entities": ["light.bar"]})
+    presence = eyes.JarvisPresence(Hass(), link)
+
+    async def run():
+        for mood in ("listening", "thinking", "speaking", "idle", "listening", "speaking", "idle"):
+            await presence.async_apply(mood)
+        restore = [t for t in timers if getattr(t, "__name__", "") == "_restore"]
+        assert len(restore) == 1, timers  # one pending restore, after the last idle
+        restore[0]()
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+    assert calls.count("scene.create") == 1, calls  # saved once, before any colour
+    assert calls[-1] == "scene.turn_on", calls  # and put back once, at the end
+    assert calls.count("scene.turn_on") == 1, calls
+
+
+def test_jarvis_puts_back_the_scene_the_lights_were_in():
+    from datetime import datetime, timedelta, timezone
+
+    t = datetime(2026, 10, 26, 20, 0, tzinfo=timezone.utc)
+    scenes = [
+        ("scene.all_movie", "All", t - timedelta(hours=3), None),
+        ("scene.all_bright", "All", t, None),
+        ("scene.outside_bright", "Outside", t + timedelta(minutes=5), None),  # not their group
+        ("scene.all_natural_light", "All", None, False),
+        ("scene.mine", None, t, None),  # a snapshot, no group
+    ]
+    groups = {"All", "Home", "Living room"}
+    # The latest scene of their groups, when it is what last changed them.
+    assert eyes.scene_to_restore(scenes, groups, t + timedelta(seconds=2)) == "scene.all_bright"
+    # Changed by hand since: no scene, use the colour snapshot.
+    assert eyes.scene_to_restore(scenes, groups, t + timedelta(minutes=10)) is None
+    # An active smart scene (Natural light) wins outright.
+    natural = scenes[:3] + [("scene.all_natural_light", "All", None, True)]
+    assert eyes.scene_to_restore(natural, groups, t + timedelta(minutes=10)) == "scene.all_natural_light"
+    assert eyes.scene_to_restore([], groups, t) is None
+
+
+def test_a_light_command_during_the_conversation_wins():
+    """'Set my lights to natural' mid-conversation: no tint over it, and no
+    restoring the old colour afterwards."""
+    import asyncio
+
+    calls, timers = [], []
+
+    class Services:
+        async def async_call(self, domain, service, data, blocking=False, context=None):
+            calls.append((f"{domain}.{service}", data))
+
+    class Hass:
+        services = Services()
+        bus = types.SimpleNamespace(async_listen=lambda *a: (lambda: None))
+        config_entries = types.SimpleNamespace(async_entries=lambda d: [])
+        states = types.SimpleNamespace(is_state=lambda *a: False, get=lambda e: None, async_all=lambda d: [])
+
+        def async_create_background_task(self, coro, name):
+            return asyncio.ensure_future(coro)
+
+    def call_later(hass, delay, action):
+        timers.append(action)
+        return lambda: timers.remove(action)
+
+    eyes.async_call_later = call_later
+    eyes.async_track_state_change_event = lambda *a: (lambda: None)
+    link = types.SimpleNamespace(jarvis={"move": False, "lights": True, "light_entities": ["light.bar"]})
+    presence = eyes.JarvisPresence(Hass(), link)
+    natural = types.SimpleNamespace(entity_id="light.bar", state="on",
+                                    attributes={"color_mode": "color_temp", "color_temp_kelvin": 4000, "brightness": 200, "rgb_color": [255, 210, 170]})
+
+    async def run():
+        await presence.async_apply("listening")
+        await presence.async_apply("thinking")
+        # Jarvis runs the command: the bar changes under someone else's context.
+        presence._lights_changed(types.SimpleNamespace(data={"new_state": natural}, context=eyes.Context()))
+        # Our own echo (our context) never counts as theirs.
+        mine = presence._context()
+        presence._lights_changed(types.SimpleNamespace(data={"new_state": natural}, context=mine))
+        tints_before = sum(1 for c, _ in calls if c == "light.turn_on")
+        await presence.async_apply("speaking")
+        assert sum(1 for c, _ in calls if c == "light.turn_on") == tints_before, "no tint over their command"
+        await presence.async_apply("idle")
+        [t for t in timers if getattr(t, "__name__", "") == "_restore"][0]()
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+    last, data = calls[-1]
+    assert last == "light.turn_on" and data["color_temp_kelvin"] == 4000, calls[-1]  # what they asked for
+    assert not any(c == "scene.turn_on" for c, _ in calls), "never back to the old snapshot"
+
+
+def test_a_light_command_survives_a_quick_next_conversation():
+    """Green, 'make it red', then another question within 15 s: back to red, not green."""
+    import asyncio
+
+    calls, timers = [], []
+
+    class Services:
+        async def async_call(self, domain, service, data, blocking=False, context=None):
+            calls.append((f"{domain}.{service}", data))
+
+    class Hass:
+        services = Services()
+        bus = types.SimpleNamespace(async_listen=lambda *a: (lambda: None))
+        config_entries = types.SimpleNamespace(async_entries=lambda d: [])
+        states = types.SimpleNamespace(is_state=lambda *a: False, get=lambda e: None, async_all=lambda d: [])
+
+        def async_create_background_task(self, coro, name):
+            return asyncio.ensure_future(coro)
+
+    def call_later(hass, delay, action):
+        timers.append(action)
+        return lambda: timers.remove(action)
+
+    eyes.async_call_later = call_later
+    eyes.async_track_state_change_event = lambda *a: (lambda: None)
+    link = types.SimpleNamespace(jarvis={"move": False, "lights": True, "light_entities": ["light.bar"]})
+    presence = eyes.JarvisPresence(Hass(), link)
+    red = types.SimpleNamespace(entity_id="light.bar", state="on", attributes={"color_mode": "xy", "xy_color": [0.7, 0.3], "brightness": 255})
+
+    async def restore():
+        [t for t in timers if getattr(t, "__name__", "") == "_restore"][0]()
+        await asyncio.sleep(0)
+
+    async def run():
+        await presence.async_apply("listening")
+        presence._lights_changed(types.SimpleNamespace(data={"new_state": red}, context=eyes.Context()))
+        await presence.async_apply("idle")
+        await restore()
+        for mood in ("listening", "speaking", "idle"):  # the next question, seconds later
+            await presence.async_apply(mood)
+        await restore()
+
+    asyncio.run(run())
+    last, data = calls[-1]
+    assert last == "light.turn_on" and data["xy_color"] == [0.7, 0.3], calls[-1]
+    assert not any(c == "scene.turn_on" for c, _ in calls), "never back to the old green"
+
+
+def test_a_group_command_wins_even_under_our_context():
+    """'Change my lights' hits the Hue room; the lamp's new colour arrives
+    under our tint's context. It is still their command."""
+    import asyncio
+
+    calls, timers = [], []
+
+    class Services:
+        async def async_call(self, domain, service, data, blocking=False, context=None):
+            calls.append((f"{domain}.{service}", data))
+
+    room = types.SimpleNamespace(entity_id="light.room", attributes={"entity_id": ["light.bar", "light.other"]})
+
+    class Hass:
+        services = Services()
+        bus = types.SimpleNamespace(async_listen=lambda *a: (lambda: None))
+        config_entries = types.SimpleNamespace(async_entries=lambda d: [])
+        states = types.SimpleNamespace(is_state=lambda *a: False, get=lambda e: None, async_all=lambda d: [room] if d == "light" else [])
+
+        def async_create_background_task(self, coro, name):
+            return asyncio.ensure_future(coro)
+
+    def call_later(hass, delay, action):
+        timers.append(action)
+        return lambda: timers.remove(action)
+
+    eyes.async_call_later = call_later
+    eyes.async_track_state_change_event = lambda *a: (lambda: None)
+    link = types.SimpleNamespace(jarvis={"move": False, "lights": True, "light_entities": ["light.bar"]})
+    presence = eyes.JarvisPresence(Hass(), link)
+    red = types.SimpleNamespace(entity_id="light.bar", state="on", attributes={"color_mode": "xy", "xy_color": [0.7, 0.3], "rgb_color": [255, 0, 0], "brightness": 255})
+
+    async def run():
+        await presence.async_apply("listening")
+        await presence.async_apply("thinking")
+        ours = presence._context()
+        # Someone else's (unrelated) light call doesn't count.
+        presence._light_call(types.SimpleNamespace(data={"domain": "light", "service": "turn_on", "service_data": {"entity_id": "light.porch"}}, context=eyes.Context()))
+        presence._lights_changed(types.SimpleNamespace(data={"new_state": red}, context=ours))
+        assert not presence._foreign
+        # The command to the room, then the lamp turning red under our context.
+        presence._light_call(types.SimpleNamespace(data={"domain": "light", "service": "turn_on", "service_data": {"entity_id": "light.room"}}, context=eyes.Context()))
+        presence._lights_changed(types.SimpleNamespace(data={"new_state": red}, context=ours))
+        tints = sum(1 for c, _ in calls if c == "light.turn_on")
+        await presence.async_apply("speaking")
+        assert sum(1 for c, _ in calls if c == "light.turn_on") == tints, "no tint over their command"
+        await presence.async_apply("idle")
+        [t for t in timers if getattr(t, "__name__", "") == "_restore"][0]()
+        await asyncio.sleep(0)
+
+    asyncio.run(run())
+    last, data = calls[-1]
+    assert last == "light.turn_on" and data["xy_color"] == [0.7, 0.3], calls[-1]
+    assert not any(c == "scene.turn_on" for c, _ in calls), "never back to the old green"
+
+
+def test_adaptive_lighting_gets_its_lights_back():
+    """A lamp Adaptive Lighting was running goes back to it, not to a frozen
+    copy; "natural" mid-conversation hands it back too; AL's own passes are
+    never a command."""
+    import asyncio
+
+    calls, timers = [], []
+
+    class Services:
+        async def async_call(self, domain, service, data, blocking=False, context=None):
+            calls.append((f"{domain}.{service}", data))
+
+    al = types.SimpleNamespace(state="on", attributes={"manual_control": []})
+    entry = types.SimpleNamespace(entry_id="al1", options={}, data={"lights": ["light.bar", "light.other"]})
+
+    class Hass:
+        services = Services()
+        bus = types.SimpleNamespace(async_listen=lambda *a: (lambda: None))
+        config_entries = types.SimpleNamespace(async_entries=lambda d: [entry])
+        states = types.SimpleNamespace(is_state=lambda *a: False, get=lambda e: al if e == "switch.adaptive_lighting_home" else None, async_all=lambda d: [])
+
+        def async_create_background_task(self, coro, name):
+            return asyncio.ensure_future(coro)
+
+    def call_later(hass, delay, action):
+        timers.append(action)
+        return lambda: timers.remove(action)
+
+    eyes.async_call_later = call_later
+    eyes.async_track_state_change_event = lambda *a: (lambda: None)
+    switches = [types.SimpleNamespace(domain="switch", entity_id=e) for e in ("switch.adaptive_lighting_home_sleep_mode", "switch.adaptive_lighting_home")]
+    real_er, eyes.er = eyes.er, types.SimpleNamespace(async_get=lambda h: None, async_entries_for_config_entry=lambda r, i: switches)
+    link = types.SimpleNamespace(jarvis={"move": False, "lights": True, "light_entities": ["light.bar"]})
+    handed = [("adaptive_lighting.set_manual_control", {"entity_id": "switch.adaptive_lighting_home", "lights": ["light.bar"], "manual_control": False}),
+              ("adaptive_lighting.apply", {"entity_id": "switch.adaptive_lighting_home", "lights": ["light.bar"], "transition": 1})]
+    warm = types.SimpleNamespace(entity_id="light.bar", state="on", attributes={"color_mode": "color_temp", "color_temp_kelvin": 2200, "brightness": 143})
+
+    async def conversation(presence, during=()):
+        await presence.async_apply("listening")
+        for step in during:
+            step(presence)
+        await presence.async_apply("speaking")
+        await presence.async_apply("idle")
+        [t for t in timers if getattr(t, "__name__", "") == "_restore"][0]()
+        timers.clear()
+        await asyncio.sleep(0)
+
+    # 1. Running under AL, nothing asked: back to AL. AL's own pass mid-way is not a command.
+    presence = eyes.JarvisPresence(Hass(), link)
+    al_pass = lambda p: (p._light_call(types.SimpleNamespace(data={"domain": "light", "service": "turn_on", "service_data": {"entity_id": "light.bar"}}, context=types.SimpleNamespace(id="01X:al:AB:srvc:01", parent_id=None))),
+                         p._lights_changed(types.SimpleNamespace(data={"new_state": warm}, context=types.SimpleNamespace(id="01X:al:AB:srvc:01", parent_id=None))))
+    asyncio.run(conversation(presence, [al_pass]))
+    assert calls[-2:] == handed, calls[-2:]
+    assert not any(c == "scene.turn_on" for c, _ in calls), "a scene would pause Adaptive Lighting"
+    assert not presence._foreign and not presence._commanded
+
+    # 2. Paused (manual), "make it red" style: no handback, the scene snapshot.
+    calls.clear(); al.attributes["manual_control"] = ["light.bar"]
+    presence = eyes.JarvisPresence(Hass(), link)
+    asyncio.run(conversation(presence))
+    assert calls[-1][0] == "scene.turn_on" and not any(c.startswith("adaptive") for c, _ in calls), calls
+
+    # 3. Paused, then "natural" mid-conversation: no more tints, handed back.
+    calls.clear()
+    presence = eyes.JarvisPresence(Hass(), link)
+    natural = lambda p: p._light_call(types.SimpleNamespace(data={"domain": "adaptive_lighting", "service": "set_manual_control", "service_data": {"entity_id": "switch.adaptive_lighting_home", "manual_control": False}}, context=types.SimpleNamespace(id="theirs", parent_id=None)))
+    asyncio.run(conversation(presence, [natural]))
+    assert calls[-2:] == [(c, dict(d, lights=["light.bar"])) for c, d in handed], calls[-2:]
+    assert [c for c, d in calls if c == "light.turn_on"] == ["light.turn_on"], "only the listening tint, none after 'natural'"
+    eyes.er = real_er
 
 
 def test_speaker_prompt_line_three_cases():
@@ -2295,6 +2666,11 @@ def test_named_list_match():
     assert match_list(names, "house projects list") == "todo.house_projects"
     assert match_list(names, "my project") == "todo.house_projects"
     assert match_list(names, "christmas") is None
+
+
+def test_pet_message_reads_naturally():
+    assert pet_message("Vader", "back door", 3) == "Vader has been waiting at the back door for 3 minutes. Vader may need to go out."
+    assert pet_message("Vader", "The front door", None) == "Vader has been waiting at The front door. Vader may need to go out."
 
 
 if __name__ == "__main__":

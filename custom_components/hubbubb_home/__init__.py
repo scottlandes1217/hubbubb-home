@@ -23,8 +23,10 @@ from aiohttp import web
 
 from homeassistant.components.http import HomeAssistantView
 from homeassistant.config_entries import ConfigEntry
+from homeassistant.const import EVENT_HOMEASSISTANT_STARTED
 from homeassistant.core import (
     HomeAssistant,
+    callback,
     ServiceCall,
     ServiceResponse,
     SupportsResponse,
@@ -97,7 +99,7 @@ from .const import (
     SENTENCE_FILES,
     WEBHOOK_MESSAGE,
 )
-from . import appletv
+from . import appletv, eyes
 from .approvals import Approvals
 from .hubbubb import HubbubbClient, HubbubbError, HubbubbUserClient, parse_people
 from .intents import (
@@ -182,6 +184,9 @@ class Runtime:
     # Set after construction: tools speak through the same announcement policy
     # as the message webhook (quiet hours included) without importing __init__.
     announce_message: Any = None
+    # The camera on the companion's Mac (eyes.CameraLink), when there is a companion.
+    camera: Any = None
+    camera_services: list = field(default_factory=list)
     unsubscribe: list = field(default_factory=list)
 
     def option(self, section: str, key: str, default: Any = None) -> Any:
@@ -305,6 +310,29 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     runtime.announce_message = _announce_message
 
+    if companion.configured:
+        runtime.camera = eyes.CameraLink(
+            hass, session, companion_conf.get(CONF_COMPANION_URL),
+            companion_conf.get(CONF_COMPANION_TOKEN), speakers,
+        )
+        await runtime.camera.async_load()
+        runtime.camera.announce = runtime.announce_message
+        presence = eyes.JarvisPresence(hass, runtime.camera)
+        runtime.camera_services = eyes.async_register_services(hass, runtime.camera, presence)
+        # The pucks come up with their own integration; with "every puck"
+        # chosen, look for them once Home Assistant has finished starting.
+        @callback
+        def _start(_event=None) -> None:
+            presence.async_start()
+
+        if hass.is_running:
+            _start()
+        else:
+            hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STARTED, _start)
+        runtime.unsubscribe.append(presence.async_stop)
+        # Cancelled with the entry; reconnects by itself if the Mac sleeps.
+        entry.async_create_background_task(hass, runtime.camera.async_run(), f"{DOMAIN} camera feed")
+
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = runtime
 
     await _async_serve_cards(hass)
@@ -356,7 +384,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         unsub()
     for intent_type in (*ALL_INTENTS, *appletv.ATV_INTENTS):
         intent_helper.async_remove(hass, intent_type)
-    for service in (*AGENT_SERVICES, *SERVICE_SCHEMAS):
+    for service in (*AGENT_SERVICES, *SERVICE_SCHEMAS, *runtime.camera_services):
         hass.services.async_remove(DOMAIN, service)
     # One panel between however many entries; it goes with the last of them.
     if not hass.data[DOMAIN]:

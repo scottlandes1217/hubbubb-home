@@ -160,9 +160,10 @@ PANELS = (
     ("hubbubb-voice-studio.js", "hubbubb-voice", "Voice Studio", "mdi:microphone-plus"),
     ("hubbubb-recipes.js", "hubbubb-recipes", "Recipes", "mdi:chef-hat"),
     ("hubbubb-fleet.js", "hubbubb-fleet", "Fleet", "mdi:robot-industrial"),
+    ("hubbubb-camera.js", "hubbubb-camera", "Camera", "mdi:cctv"),
 )
 
-PLATFORMS = ["switch", "sensor", "conversation"]
+PLATFORMS = ["switch", "sensor", "conversation", "camera"]
 
 # Injected into whichever language model the user has pointed at the house, as
 # the Hubbubb Home half of its instructions. It carries the assistant's name,

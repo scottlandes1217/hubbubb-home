@@ -64,6 +64,8 @@ def agent_tools(runtime) -> list[llm.Tool]:
         tools.append(EscalateTool(runtime))
         tools.append(UseComputerTool(runtime))
         tools.append(WebSearchTool(runtime))
+        tools.append(LookTool(runtime))
+        tools.append(LearnItemTool(runtime))
     if runtime.speakers.configured:
         tools.append(TrainWakeWordTool(runtime))
     return tools
@@ -139,7 +141,11 @@ class HubbubbAPI(llm.API):
                 "current or outside the house, call web_search and answer only "
                 "from what its results say - prefer page_text over snippets; "
                 "if the results do not state the answer, say you could not "
-                "find it rather than filling in from memory. Call "
+                "find it rather than filling in from memory. For anything "
+                "physically in the house - finding a thing or a person, "
+                "reading a whiteboard or sign, what is on a table - call "
+                "look_around; when the speaker holds something up or points "
+                "it out and names it, call learn_item. Call "
                 "hand_to_companion with the full request, then say only that "
                 "you have passed it along, when: no tool of yours fits; a "
                 "tool returned an error; the speaker says you were wrong; "
@@ -688,6 +694,74 @@ class WebSearchTool(_RuntimeTool):
         except CompanionError as err:
             return {"error": str(err)}
         return {"results": results, "found": len(results)}
+
+
+class LookTool(_RuntimeTool):
+    name = "look_around"
+    description = (
+        "Your eyes: the camera on the Mac in the living room. Use it for ANY "
+        "question about what is physically in the house right now - finding "
+        "a thing or a person ('where are my AirPods', 'have you seen my "
+        "keys'), reading something ('what's written on the whiteboard', "
+        "'what does that sign say'), or what something looks like or is "
+        "doing ('is the dog on the couch', 'who is here', 'what's on the "
+        "table'). Pass the speaker's question in their own words. It turns "
+        "and zooms the camera as needed and answers in words, with the "
+        "people it recognizes and any animals. Things the speaker has shown "
+        "it before (learn_item) it knows by sight; when it cannot see one it "
+        "may report where it was last seen. It only sees that one room and "
+        "can take up to a minute. Relay its answer; never describe anything "
+        "it did not report. Not for email, files or anything on a screen "
+        "elsewhere."
+    )
+    parameters = vol.Schema(
+        {vol.Required("question"): vol.All(str, vol.Length(min=2, max=300))}
+    )
+
+    async def async_call(
+        self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context
+    ) -> JsonObjectType:
+        # No guest gate, as with camera_activity: anyone asking is standing in
+        # the house, and this only ever answers in words about one room.
+        try:
+            return await self._runtime.companion.async_camera(
+                "look", {"question": tool_input.tool_args["question"]}
+            )
+        except CompanionError as err:
+            return {"error": str(err)}
+
+
+class LearnItemTool(_RuntimeTool):
+    name = "learn_item"
+    description = (
+        "Teach the camera what one of the speaker's things looks like, so "
+        "look_around can find it by sight later. Use it when they hold "
+        "something up or point it out and name it: 'this is my AirPods "
+        "case', 'this is what I was looking for' (the name is whatever they "
+        "were just looking for), 'the blue mat by the door is my yoga mat'. "
+        "Also use it to answer your own question when they tell you what "
+        "something is. name: what they call it, short ('AirPods case'). "
+        "where: which thing to look at, in their words; leave it out when "
+        "they are holding it up. Teaching a name again replaces it. If it "
+        "cannot make the thing out, ask them to hold it closer and try again."
+    )
+    parameters = vol.Schema(
+        {
+            vol.Required("name"): vol.All(str, vol.Length(min=1, max=60)),
+            vol.Optional("where"): vol.All(str, vol.Length(max=200)),
+        }
+    )
+
+    async def async_call(
+        self, hass: HomeAssistant, tool_input: llm.ToolInput, llm_context
+    ) -> JsonObjectType:
+        args = tool_input.tool_args
+        try:
+            return await self._runtime.companion.async_camera(
+                "learn", {"name": args["name"], "hint": args.get("where", "")}
+            )
+        except CompanionError as err:
+            return {"error": str(err)}
 
 
 class TrainWakeWordTool(_RuntimeTool):

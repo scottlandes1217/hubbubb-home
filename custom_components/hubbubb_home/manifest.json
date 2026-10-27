@@ -1,13 +1,13 @@
 {
   "domain": "hubbubb_home",
   "name": "Hubbubb Home",
+  "after_dependencies": [
+    "lovelace"
+  ],
   "codeowners": [
     "@scottlandes1217"
   ],
   "config_flow": true,
-  "after_dependencies": [
-    "lovelace"
-  ],
   "dependencies": [
     "conversation",
     "http",
@@ -21,5 +21,5 @@
   "iot_class": "cloud_polling",
   "issue_tracker": "https://github.com/scottlandes1217/hubbubb-home/issues",
   "requirements": [],
-  "version": "0.30.57"
+  "version": "0.32.0"
 }
