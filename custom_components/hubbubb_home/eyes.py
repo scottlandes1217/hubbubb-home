@@ -716,7 +716,7 @@ def async_register_services(hass: HomeAssistant, link: CameraLink, presence: Jar
         await link.async_run_gesture(call.data["gesture"], call.data.get("person"))
 
     async def mac_screen_sharing(call: ServiceCall):
-        reply = await link.async_request("POST", "screen_sharing", {"on": call.data["on"]}, timeout=60)
+        reply = await link.async_request("POST", "screen_sharing", dict(call.data), timeout=60)
         if reply.get("ok") is False:
             raise HomeAssistantError(reply.get("detail") or "Screen mirroring did not change")
         return reply
@@ -755,7 +755,9 @@ def async_register_services(hass: HomeAssistant, link: CameraLink, presence: Jar
     )
     hass.services.async_register(
         DOMAIN, "mac_screen_sharing", mac_screen_sharing,
-        schema=vol.Schema({vol.Required("on"): cv.boolean}),
+        # airplay: an Apple TV's Screen Mirroring ID (the UUID after "AirPlay:");
+        # without it, the Samsung over HDMI is extended.
+        schema=vol.Schema({vol.Required("on"): cv.boolean, vol.Optional("airplay"): vol.Match(r"^[0-9A-Fa-f-]{36}$")}),
         supports_response=SupportsResponse.OPTIONAL,
     )
     return [*PASSTHROUGH, "gestures_get", "gesture_save", "gestures_enable", "gesture_test", "mac_screen_sharing",

@@ -190,6 +190,9 @@ mac_screen_sharing:
     "on":
       required: true
       selector: { boolean: }
+    airplay:
+      required: false
+      selector: { text: }
 gestures_enable:
   fields:
     "on":

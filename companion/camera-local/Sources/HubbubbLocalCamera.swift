@@ -1101,6 +1101,17 @@ private final class CameraService {
             guard let on = body["on"] as? Bool else { return bad("send {\"on\": true or false}") }
             let done = DispatchSemaphore(value: 0)
             var reply: [String: Any] = [:]
+            if let airplay = body["airplay"] as? String {
+                // It goes into an AppleScript: only a UUID gets through.
+                guard airplay.count == 36, airplay.allSatisfy({ $0.isHexDigit || $0 == "-" }) else {
+                    return bad("airplay is an Apple TV's Screen Mirroring ID (a UUID)")
+                }
+                DispatchQueue.main.async {
+                    self.setAirPlay(airplay, on: on, attempt: 1) { success, message in reply = ["ok": success, "detail": message]; done.signal() }
+                }
+                done.wait()
+                return ok(reply)
+            }
             DispatchQueue.main.async {
                 if on {
                     self.startScreenSharing(attempt: 1) { success, message in reply = ["ok": success, "detail": message]; done.signal() }
@@ -1308,6 +1319,55 @@ private final class CameraService {
             completion(detail.map { " Could not stop Samsung screen sharing: \($0)." } ?? " Samsung screen sharing stopped.")
         }
     }
+    /// AirPlay mirroring to an Apple TV: its Screen Mirroring row is a checkbox
+    /// that mirrors the entire screen in one click. A sleeping Apple TV takes
+    /// a few seconds to be listed, so retry for about ten.
+    private func setAirPlay(_ id: String, on: Bool, attempt: Int, completion: @escaping (Bool, String) -> Void) {
+        let script = #"""
+        tell application "System Events"
+            if not (exists window "Control Center" of process "ControlCenter") then
+                tell process "MenuBarAgent"
+                    repeat with g in groups of menu bar 1
+                        set mi to menu bar item 1 of g
+                        if value of attribute "AXIdentifier" of mi is "com.apple.menuextra.screen-mirroring" then click mi
+                    end repeat
+                end tell
+                delay 0.8
+            end if
+            tell process "ControlCenter"
+                set els to entire contents of window "Control Center"
+                set box to missing value
+                repeat with i from 1 to count of els
+                    set e to item i of els
+                    try
+                        if role of e is "AXCheckBox" and value of attribute "AXIdentifier" of e is "screen-mirroring-device-AirPlay:AIRPLAY_ID" then set box to e
+                    end try
+                end repeat
+                if box is missing value then
+                    key code 53
+                    error "the Apple TV is not listed in Screen Mirroring"
+                end if
+                if ((value of box) as integer) is not WANT then click box
+                delay 0.5
+                key code 53
+            end tell
+        end tell
+        """#.replacingOccurrences(of: "AIRPLAY_ID", with: id).replacingOccurrences(of: "WANT", with: on ? "1" : "0")
+        runScreenMirroringScript(script) { detail in
+            guard let detail else {
+                completion(true, on ? "Mirroring to the Apple TV." : "Stopped mirroring to the Apple TV.")
+                return
+            }
+            if attempt >= 5 {
+                completion(false, "Could not \(on ? "start" : "stop") Apple TV mirroring: \(detail).")
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+                self.setAirPlay(id, on: on, attempt: attempt + 1, completion: completion)
+            }
+        }
+    }
+
     private func runScreenMirroringScript(_ script: String, completion: @escaping (String?) -> Void) {
         DispatchQueue.global(qos: .userInitiated).async {
             var error: NSDictionary?
