@@ -596,10 +596,70 @@ def test_jarvis_only_dims_and_brightens_never_colours():
     after_restore = asyncio.run(run())
     levels = [d["brightness_pct"] for c, d, _ in calls if c == "light.turn_on"]
     assert not any(k in d for _, d, _ in calls for k in ("rgb_color", "xy_color", "hs_color")), calls
-    assert levels[0] == 70 and {70, 20} <= set(levels[1:]), levels  # around the lamp's own 40%
+    assert levels[0] == 20 and {70, 20} <= set(levels[1:]), levels  # listening dims, then it breathes around 40%
     assert calls[-1][0] == "scene.turn_on" and len(calls) == after_restore, "pulse stopped at the restore"
     assert all(":jv:" in ctx.id for _, _, ctx in calls), "marked so the AL-pause automation skips us"
     assert eyes.mood_levels(90) == (100, 45) and eyes.mood_levels(6) == (36, 5)
+
+
+def test_jarvis_lamp_follows_the_loudness_of_its_voice():
+    import asyncio
+    import struct
+
+    def tone(amp, steps):  # 8 kHz, VOICE_STEP each
+        return struct.pack(f"<{1600 * steps}h", *([amp, -amp] * (800 * steps)))
+
+    assert eyes.envelope(tone(0, 1) + tone(1000, 1) + tone(4000, 2), 8000) == [0.0, 0.25, 1.0, 1.0]
+    assert eyes.envelope(b"", 8000) == [] and eyes.envelope(tone(0, 2), 8000) == [0.0, 0.0]
+
+    pcm = tone(0, 1) + tone(4000, 1) + tone(2000, 1)
+    calls = []
+
+    class Services:
+        async def async_call(self, domain, service, data, blocking=False, context=None):
+            calls.append(data.get("brightness_pct"))
+
+    class Hass:
+        services = Services()
+        data = {}
+
+        def async_create_background_task(self, coro, name):
+            return asyncio.ensure_future(coro)
+
+        async def async_add_executor_job(self, fn, *args):
+            return fn(*args)
+
+    class Stream:
+        async def async_stream_result(self):
+            yield b"flac"
+
+    class Proc:
+        async def communicate(self, data):
+            return pcm, b""
+
+    async def fake_exec(*a, **k):
+        return Proc()
+
+    _stub("homeassistant.components.tts", async_get_stream=lambda hass, token: Stream() if token == "tok" else None)
+    _stub("homeassistant.components.ffmpeg", get_ffmpeg_manager=lambda hass: types.SimpleNamespace(binary="ffmpeg"))
+    real_exec, asyncio.create_subprocess_exec = asyncio.create_subprocess_exec, fake_exec
+    eyes.VOICE_STEP = 0.01
+    link = types.SimpleNamespace(jarvis={"lights": True, "light_entities": ["light.bar"]})
+    presence = eyes.JarvisPresence(Hass(), link)
+    presence._snapshot, presence._base = True, 40  # bright 70, dim 20
+
+    async def run():
+        presence.voice("tok", 0.05)
+        await presence._voice_task
+        presence.voice("missing", 0)
+        await presence._voice_task
+
+    try:
+        asyncio.run(run())
+    finally:
+        asyncio.create_subprocess_exec = real_exec
+        eyes.VOICE_STEP = 0.2
+    assert calls == [20, 70, 45, 20], calls  # silence, loud, half, then back to dim
 
 
 def test_jarvis_puts_back_the_scene_the_lights_were_in():
