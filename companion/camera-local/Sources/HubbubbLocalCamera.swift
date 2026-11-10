@@ -190,6 +190,11 @@ private struct RoomMap {
         precondition(!GestureGate.pausesAtHead(atHead: true, onFace: false, pose: "number_3"), "three fingers beside the head counts")
         precondition(GestureGate.pausesAtHead(atHead: true, onFace: true, pose: "open_palm"), "a palm on the cheek pauses, whatever it looks like")
         precondition(!GestureGate.pausesAtHead(atHead: false, onFace: false, pose: nil), "away from the head never pauses")
+        precondition(GestureGate.pausesAtHead(atHead: true, onFace: false, upright: false, pose: "open_palm"), "a flat hand in the hair is a scratch, whatever it looks like")
+        precondition(GestureGate.pausesAtHead(atHead: false, onFace: false, onNeck: true, pose: "thumbs_up"), "a hand on the neck pauses")
+        precondition(GestureGate.pausesAtHead(atHead: false, onFace: false, overhead: true, pose: "open_palm"), "a hand above the head is a stretch")
+        precondition(GestureGate.isUpright(wrist: .zero, knuckle: CGPoint(x: 0.01, y: 0.05)), "fingers up is upright")
+        precondition(!GestureGate.isUpright(wrist: .zero, knuckle: CGPoint(x: 0.05, y: -0.01)), "fingers sideways or down is not")
         // Motions: a swipe is cut out from rest to rest and matched by
         // direction, whatever its size or speed; so is a twist in place.
         typealias H = MotionStroke.Hand
@@ -502,12 +507,23 @@ private enum GestureGate {
     }
 
     /// A hand on the face itself always pauses gestures: a palm on the cheek
-    /// or fingers at the mouth often look like a pose. In the zone around it
-    /// (hair, chin) only a hand that isn't a gesture shape pauses - three
-    /// fingers held up beside the head sits in the hair zone from its first
-    /// frame, so pausing there meant it never counted at all.
-    static func pausesAtHead(atHead: Bool, onFace: Bool, pose: String?) -> Bool {
-        onFace || (atHead && pose == nil)
+    /// or fingers at the mouth often look like a pose. So does one on the neck
+    /// (nobody holds a gesture in front of their throat) and a wrist above the
+    /// head (stretching, reaching). In the zone around the face (hair, chin)
+    /// only an upright hand making a shape counts - three fingers held up
+    /// beside the head sits in the hair zone from its first frame, so pausing
+    /// there meant it never counted at all; a hand scratching the head lies
+    /// flat or points down, and often looks like a palm or a thumb.
+    static func pausesAtHead(atHead: Bool, onFace: Bool, onNeck: Bool = false, overhead: Bool = false,
+                             upright: Bool = true, pose: String?) -> Bool {
+        onFace || onNeck || overhead || (atHead && (pose == nil || !upright))
+    }
+
+    /// Whether a hand points up (by their own up): knuckles above the wrist by
+    /// at least half the hand's length, about 30 degrees.
+    static func isUpright(wrist: CGPoint, knuckle: CGPoint) -> Bool {
+        let dx = (knuckle.x - wrist.x) * 16 / 9, dy = knuckle.y - wrist.y
+        return dy > 0.5 * hypot(dx, dy)
     }
 
     /// How far a face is turned from the camera, from where the nose sits
@@ -1977,7 +1993,15 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 // Two hands together are a phone or a cup when held still -
                 // but two hands opening from together is a motion.
                 var raised = holding ? [] : lifted
-                if let line = motion(&tracks[index], hands: !requireLooking || track.facing ? lifted : [], now: now, fired: &fired) {
+                // Any hand at the head, neck or above it ends the stroke unfired,
+                // and the hand coming away (itself a stroke) stays quiet too.
+                let touching = track.face.map { face in own.contains { handOverlapsFace($0, faceBounds: face, up: track.up).any } } ?? false
+                if touching {
+                    tracks[index].stroke = MotionStroke()
+                    tracks[index].strokeQuietUntil = now.addingTimeInterval(1.5)
+                }
+                let moving = touching || (requireLooking && !track.facing) ? [] : lifted
+                if let line = motion(&tracks[index], hands: moving, now: now, fired: &fired) {
                     messages.append(tracks[index].name.map { "\($0): \(line)" } ?? line)
                     continue
                 }
@@ -2159,6 +2183,9 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         if face != nil, GestureGate.pausesAtHead(
             atHead: touching.contains { $0.atHead },
             onFace: touching.contains { $0.onFace },
+            onNeck: touching.contains { $0.onNeck },
+            overhead: touching.contains { $0.overhead },
+            upright: touching.allSatisfy { $0.upright },
             pose: primaryHand.flatMap { classifyGesture($0) }
         ) {
             votes = GestureVotes(lastVolumeRepeat: votes.lastVolumeRepeat, pausedUntil: now.addingTimeInterval(1.2))
@@ -2621,7 +2648,11 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         case previewFailed
     }
 
-    private func handOverlapsFace(_ hand: VNHumanHandPoseObservation, faceBounds: CGRect, up: CGVector = Upright.vertical) -> (atHead: Bool, onFace: Bool) {
+    private struct HeadTouch { var atHead = false, onFace = false, onNeck = false, overhead = false, upright = true
+        var any: Bool { atHead || onFace || onNeck || overhead }
+    }
+
+    private func handOverlapsFace(_ hand: VNHumanHandPoseObservation, faceBounds: CGRect, up: CGVector = Upright.vertical) -> HeadTouch {
         let joints: [VNHumanHandPoseObservation.JointName] = [
             .wrist, .thumbCMC, .thumbMP, .thumbIP, .thumbTip,
             .indexMCP, .indexPIP, .indexDIP, .indexTip,
@@ -2634,20 +2665,30 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             guard let point = try? hand.recognizedPoint(joint), point.confidence > 0.12 else { return nil }
             return Upright.point(point.location, around: c, up: up)  // hair is "above" in their frame
         }
-        guard !points.isEmpty else { return (false, false) }
+        guard !points.isEmpty else { return HeadTouch() }
         // Calibration knobs, in face heights: `hairReach` above the face box,
-        // `chinReach` below it.
+        // `chinReach` below it, `neckReach` below that (always pauses).
         let defaults = UserDefaults.standard
-        let head = GestureGate.head(
-            Upright.rect(faceBounds, up: up),
-            hair: CGFloat(defaults.object(forKey: "hairReach") as? Double ?? 0.9),
-            chin: CGFloat(defaults.object(forKey: "chinReach") as? Double ?? 0.25)
-        )
+        let face = Upright.rect(faceBounds, up: up)
+        let hair = CGFloat(defaults.object(forKey: "hairReach") as? Double ?? 0.9)
+        let chin = CGFloat(defaults.object(forKey: "chinReach") as? Double ?? 0.25)
+        let neckReach = CGFloat(defaults.object(forKey: "neckReach") as? Double ?? 0.6)
+        let head = GestureGate.head(face, hair: hair, chin: chin)
+        let neck = CGRect(x: head.minX, y: head.minY - face.height * neckReach, width: head.width, height: face.height * neckReach)
         // Calibration knob `faceTouch`: the share of the hand's joints on the
         // face box itself that counts as touching the face. Lower is stricter.
-        let face = Upright.rect(faceBounds, up: up)
         let share = CGFloat(defaults.object(forKey: "faceTouch") as? Double ?? 0.3)
-        return (GestureGate.atHead(points, head: head), GestureGate.atHead(points, head: face, share: share))
+        let point = { (joint: VNHumanHandPoseObservation.JointName) -> CGPoint? in
+            (try? hand.recognizedPoint(joint)).flatMap { $0.confidence > 0.12 ? Upright.point($0.location, around: c, up: up) : nil }
+        }
+        let wrist = point(.wrist)
+        return HeadTouch(
+            atHead: GestureGate.atHead(points, head: head),
+            onFace: GestureGate.atHead(points, head: face, share: share),
+            onNeck: GestureGate.atHead(points, head: neck),
+            overhead: wrist.map { $0.y > head.maxY } ?? false,
+            upright: wrist.flatMap { w in point(.middleMCP).map { GestureGate.isUpright(wrist: w, knuckle: $0) } } ?? true
+        )
     }
 
     private func applyHardwareZoom(_ factor: CGFloat) {
