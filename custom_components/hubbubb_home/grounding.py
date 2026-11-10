@@ -184,6 +184,7 @@ def same_request(a: str, b: str) -> bool:
         {w for w in re.findall(r"[a-z0-9']+", t.lower()) if w not in _FILLER}
         for t in (a, b)
     ]
-    if not all(words):
+    # One word ("yes", "no", "blue") is an answer, never a repeat of anything.
+    if min(map(len, words)) < 2:
         return False
     return len(words[0] & words[1]) / min(map(len, words)) >= SAME_REQUEST

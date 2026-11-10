@@ -283,6 +283,9 @@ class FrontDoorConversationEntity(conversation.ConversationEntity):
         """The recent local-brain try this request repeats, taken off the list."""
         now = time.time()
         self._tries = [t for t in self._tries if now - t[0] < REPEAT_WINDOW]
+        # The brain just asked something, so this is the answer.
+        if self._tries and self._tries[-1][2].rstrip().endswith("?"):
+            return None
         for i, t in enumerate(self._tries):
             if same_request(t[1], text):
                 return self._tries.pop(i)
@@ -358,7 +361,13 @@ class FrontDoorConversationEntity(conversation.ConversationEntity):
 
         -> (result, whether the brain answered it).
         """
-        response = await conversation.async_handle_intents(
+        cid = chat_log.conversation_id
+        # The brain just asked a question, so "yes" answers it - not the
+        # Mac-session question the JarvisAnswerYes sentence is waiting for.
+        last = next((c for c in reversed(chat_log.content)
+                     if c.role == "assistant" and c.content), None)
+        asked = cid in self._brain_ids and last and last.content.rstrip().endswith("?")
+        response = None if asked else await conversation.async_handle_intents(
             self.hass,
             user_input,
             chat_log,
@@ -374,7 +383,6 @@ class FrontDoorConversationEntity(conversation.ConversationEntity):
             return conversation.ConversationResult(
                 response=response, conversation_id=chat_log.conversation_id
             ), False
-        cid = chat_log.conversation_id
         result = await conversation.async_converse(
             hass=self.hass,
             text=user_input.text,
