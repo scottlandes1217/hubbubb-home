@@ -221,6 +221,10 @@ private struct RoomMap {
         let turn = (0...5).map { [H(0, 0, remainder(2.6 + Double($0) * 0.3, 2 * .pi))] }
         let twist = stroke([[H(0, 0, 2.6)]] + turn + Array(repeating: turn.last!, count: 3))
         precondition(twist.map { $0[0].last!.z - $0[0].first!.z } ?? 0 > 1.4, "a twist in place is a stroke, unwrapped")
+        let slow = (0...6).map { [H(0.02 * Double($0), 0, -Double($0) * 0.075)] }  // 26 degrees over 0.6 s
+        precondition(stroke([[H()]] + slow + Array(repeating: slow.last!, count: 3)) != nil, "a short, slow knob twist counts")
+        let wobble = (0...6).map { [H(0, 0, $0 % 2 == 0 ? 0 : 0.04)] }  // a still hand's turn jitter
+        precondition(stroke(wobble) == nil, "jitter is no stroke")
         let end = [H(0.1, 0, 3.0)]
         precondition(MotionStroke.holding([H(0.2, 0.1, 3.1)], at: end, within: 0.5), "a twist kept turned is held")
         precondition(MotionStroke.holding([H(0.2, 0.1, 3.1 - 2 * .pi)], at: end, within: 0.5), "even when the angle wraps after a lost frame")
@@ -786,6 +790,18 @@ private struct MotionStroke {
     // lower it if a still hand's jitter starts strokes.
     static let speed = 1.5
     static let turnScale = 1.0
+    // A twist is judged on its own: `turnTravel` degrees is a whole stroke
+    // (a knob turn is 20-40, not the ~70 a face-height swipe equals), and a
+    // radian a second counts as `turnSpeed` face heights a second, so a slow
+    // twist still starts one. Lower turnSpeed if a still hand starts strokes.
+    static let turnTravel = 20.0
+    static let turnSpeed = 2.5
+
+    /// How far a hand went between two points, for speed: its wrist, or its
+    /// turn weighted as above, whichever is more.
+    static func step(_ a: Hand, _ b: Hand) -> Double {
+        max(hypot(a.x - b.x, a.y - b.y), abs(a.z - b.z) / turnScale * turnSpeed)
+    }
 
     static func distance(_ a: Hand, _ b: Hand) -> Double { ((a - b) * (a - b)).sum().squareRoot() }
 
@@ -818,7 +834,7 @@ private struct MotionStroke {
         let dt = max(0.01, t - last.t)
         // Two hands meeting look like one: only like-for-like frames compare.
         let speed = hands.count == last.hands.count
-            ? zip(hands, last.hands).map { Self.distance($0, $1) }.max()! / dt : Self.speed
+            ? zip(hands, last.hands).map { Self.step($0, $1) }.max()! / dt : Self.speed
         if speed >= Self.speed {
             if !moving { frames = [last]; miss = nil }  // the stroke starts where the hand rested
             moving = true
@@ -848,9 +864,11 @@ private struct MotionStroke {
         }
         guard last.t - first.t <= 1.8 else { return (nil, "too long - make it one quick movement") }
         let paths = (0..<count).map { h in kept.map { $0.hands[h] } }
-        let moved = paths.map { Self.distance($0.last!, $0.first!) }.max() ?? 0
-        guard moved >= travel else {
-            return (nil, String(format: "too small (%.1f of %.1f) - move or turn your hand further", moved, travel))
+        let moved = paths.map { hypot($0.last!.x - $0.first!.x, $0.last!.y - $0.first!.y) }.max() ?? 0
+        let turned = paths.map { abs($0.last!.z - $0.first!.z) / Self.turnScale * 180 / .pi }.max() ?? 0
+        guard moved >= travel || turned >= Self.turnTravel else {
+            return (nil, String(format: "too small - turned %.0f of %.0f degrees, moved %.1f of %.1f face heights",
+                                turned, Self.turnTravel, moved, travel))
         }
         return (paths, nil)
     }
