@@ -188,3 +188,13 @@ def same_request(a: str, b: str) -> bool:
     if min(map(len, words)) < 2:
         return False
     return len(words[0] & words[1]) / min(map(len, words)) >= SAME_REQUEST
+
+
+# A tool call the local model wrote out as text instead of making it -
+# `hubbubb-home__web_search(query="...")`, a <tool_call> block, or bare JSON.
+# Spoken aloud it is gibberish, and the tool never ran.
+_LEAKED_CALL = re.compile(r'\w__\w+\s*\(|<tool_call>|^\W*\{\s*"(name|function)"\s*:')
+
+
+def leaked_tool_call(speech: str) -> bool:
+    return bool(_LEAKED_CALL.search(speech or ""))

@@ -1,6 +1,6 @@
 /* node cards/test/camera.mjs — the camera panel's pure parts. */
 import assert from "node:assert/strict";
-import { KNOBS, ago, changed, customGestureId, gestureCatalog, gestureForm, summarizeActions } from "../src/hubbubb-camera.js";
+import { KNOBS, ago, changed, customGestureId, gestureCatalog, gestureForm, motionLabel, oddSamples, summarizeActions } from "../src/hubbubb-camera.js";
 
 assert.equal(summarizeActions([]), "Does nothing yet");
 assert.equal(summarizeActions(undefined), "Does nothing yet");
@@ -32,6 +32,9 @@ const builtIn = [{ id: "thumbs_up", title: "Thumbs up" }];
 const listed = gestureCatalog(builtIn, { thumbs_up: 25, custom_peace_sign: 25 }, { gesture: "custom_rock_on" });
 assert.deepEqual(listed.map((g) => g.id), ["thumbs_up", "custom_peace_sign", "custom_rock_on"]);
 assert.equal(listed[1].title, "Peace sign");
+const moving = gestureCatalog([], { custom_swipe: 5 }, { gesture: "custom_open", motion: true }, ["custom_swipe"]);
+assert.deepEqual(moving.map((g) => g.motion), [true, true]);
+assert.equal(summarizeActions([{ action: "hubbubb_home.agent_screen_input", data: { action: "close_window" } }]), "Close the front window");
 
 // Every knob has a label, helper text and a slider step.
 for (const knob of KNOBS) assert.equal(knob.length, 4);
@@ -44,3 +47,15 @@ assert.deepEqual(jarvisConfig(jarvisForm(stored)), stored);
 // Defaults: moving on, lights off, no colours sent until chosen.
 assert.deepEqual(jarvisConfig(jarvisForm({})), { move: true, satellites: [], strength: 0.6, lights: false, light_entities: [], brightness: 80, pause_while: null });
 console.log("jarvis form ok");
+
+// Motion samples in words, from the person's side; the odd one out flagged.
+const step = (x, y, z) => [0, 0, 0, ...Array(18).fill(0), x, y, z];
+const left = step(0.2, 0.3, -0.9), right = step(0, 0, 1);
+assert.equal(motionLabel(left), "twist left");
+assert.equal(motionLabel(right), "twist right");
+assert.equal(motionLabel(step(-1, 0.1, 0)), "swipe right");
+assert.deepEqual(oddSamples([left, right, left, right, left]), [false, true, false, true, false]);
+assert.deepEqual(oddSamples([left, right]), [false, false]);
+const apart = [-0.1, 0, 0, ...Array(18).fill(0), -1, 0, 0, 0.1, 0, 0, ...Array(18).fill(0), 1, 0, 0];
+assert.equal(motionLabel(apart), "hands apart");
+console.log("motion samples ok");

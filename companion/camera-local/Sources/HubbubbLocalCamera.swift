@@ -190,6 +190,55 @@ private struct RoomMap {
         precondition(!GestureGate.pausesAtHead(atHead: true, onFace: false, pose: "number_3"), "three fingers beside the head counts")
         precondition(GestureGate.pausesAtHead(atHead: true, onFace: true, pose: "open_palm"), "a palm on the cheek pauses, whatever it looks like")
         precondition(!GestureGate.pausesAtHead(atHead: false, onFace: false, pose: nil), "away from the head never pauses")
+        precondition(GestureGate.pausesAtHead(atHead: true, onFace: false, upright: false, pose: "open_palm"), "a flat hand in the hair is a scratch, whatever it looks like")
+        precondition(GestureGate.pausesAtHead(atHead: true, onFace: false, onNeck: true, upright: true, pose: "thumbs_up"), "a hand at the beard pauses, upright or not")
+        let jawFace = CGRect(x: 0.4, y: 0.5, width: 0.1, height: 0.1)
+        let stroking = [CGPoint(x: 0.45, y: 0.52), CGPoint(x: 0.46, y: 0.49), CGPoint(x: 0.47, y: 0.47), CGPoint(x: 0.51, y: 0.45), CGPoint(x: 0.53, y: 0.44)]
+        precondition(GestureGate.atHead(stroking, head: GestureGate.jaw(jawFace, neck: 0.6, wide: 1.8)), "fingers on the chin, palm on the neck, wrist aside: at the jaw")
+        precondition(!GestureGate.atHead([CGPoint(x: 0.45, y: 0.3), CGPoint(x: 0.7, y: 0.5)], head: GestureGate.jaw(jawFace, neck: 0.6, wide: 1.8)), "a hand at the chest or out at the shoulder is not")
+        precondition(GestureGate.pausesAtHead(atHead: false, onFace: false, overhead: true, pose: "open_palm"), "a hand above the head is a stretch")
+        precondition(GestureGate.isUpright(wrist: .zero, knuckle: CGPoint(x: 0.01, y: 0.05)), "fingers up is upright")
+        precondition(!GestureGate.isUpright(wrist: .zero, knuckle: CGPoint(x: 0.05, y: -0.01)), "fingers sideways or down is not")
+        // Motions: a swipe is cut out from rest to rest and matched by
+        // direction, whatever its size or speed; so is a twist in place.
+        typealias H = MotionStroke.Hand
+        func stroke(_ moves: [[H]], step: TimeInterval = 0.1) -> [[H]]? {
+            var m = MotionStroke()
+            var out: [[H]]?
+            for (i, hands) in moves.enumerated() { out = m.add(t: Double(i) * step, hands: hands, travel: 1.2) ?? out }
+            return out
+        }
+        let right = (0...5).map { [H(Double($0) * 0.6, 0, 0)] }
+        let rest = Array(repeating: [H(3, 0, 0)], count: 3)
+        let swipe = stroke([[H()]] + right + rest)
+        precondition(swipe?.first?.count ?? 0 >= 6, "a swipe right is one stroke")
+        precondition(stroke((0...5).map { [H(Double($0) * 0.05, 0, 0)] }) == nil, "a drifting hand is no stroke")
+        var short = MotionStroke()
+        for (i, x) in [0, 0.3, 0.6, 0.6, 0.6].enumerated() { _ = short.add(t: Double(i) * 0.1, hands: [H(x, 0, 0)], travel: 1.2) }
+        precondition(short.miss?.hasPrefix("too small") == true, "a short stroke says why it didn't count")
+        // A knob turned right: the wrist stays put, the knuckles go round -
+        // through the half circle, where the raw angle jumps from pi to -pi.
+        let turn = (0...5).map { [H(0, 0, remainder(2.6 + Double($0) * 0.3, 2 * .pi))] }
+        let twist = stroke([[H(0, 0, 2.6)]] + turn + Array(repeating: turn.last!, count: 3))
+        precondition(twist.map { $0[0].last!.z - $0[0].first!.z } ?? 0 > 1.4, "a twist in place is a stroke, unwrapped")
+        let open = (0...4).map { [H(-Double($0) * 0.6, 0, 0), H(Double($0) * 0.6, 0, 0)] }
+        let opened = stroke([[H(), H()]] + open + Array(repeating: open.last!, count: 3))
+        precondition(opened?.count == 2, "two hands opening is a two-hand stroke")
+        var motions = MotionTemplates()
+        motions.samples["custom_swipe_right"] = [MotionStroke.vector(swipe!)]
+        motions.samples["custom_swipe_left"] = [MotionStroke.vector(swipe!.map { $0.map { H(-$0.x, $0.y, $0.z) } })]
+        motions.samples["custom_open"] = [MotionStroke.vector(opened!)]
+        motions.samples["custom_knob_right"] = [MotionStroke.vector(twist!)]
+        motions.samples["custom_knob_left"] = [MotionStroke.vector(twist!.map { $0.map { H($0.x, $0.y, -$0.z) } })]
+        let small = [(0...4).map { H(5 + Double($0) * 0.35, 1 + Double($0) * 0.03, 0.5) }]
+        precondition(motions.match(MotionStroke.vector(small), within: 0.35) == "custom_swipe_right", "a smaller, slower swipe right elsewhere")
+        precondition(motions.match(MotionStroke.vector([small[0].reversed()]), within: 0.35) == "custom_swipe_left", "the other way is the other swipe")
+        precondition(motions.match(MotionStroke.vector(opened!), within: 0.35) == "custom_open", "two hands match two-hand motions only")
+        let down = [(0...4).map { H(0, -Double($0) * 0.6, 0) }]
+        precondition(motions.match(MotionStroke.vector(down), within: 0.35) == nil, "a swipe down is neither")
+        let smallTwist = [(0...4).map { H(1 + Double($0) * 0.02, 0, -1 + Double($0) * 0.25) }]
+        precondition(motions.match(MotionStroke.vector(smallTwist), within: 0.35) == "custom_knob_right", "a smaller twist right, wobbling a little")
+        precondition(motions.match(MotionStroke.vector([smallTwist[0].reversed()]), within: 0.35) == "custom_knob_left", "twisting back is the other knob turn")
         // Elbows: a forearm up is raised; a hand in the lap is not, even when
         // the camera's angle puts it close to the face in the picture.
         let arm = [(wrist: CGPoint(x: 0.6, y: 0.4), elbow: CGPoint(x: 0.62, y: 0.3))]
@@ -436,6 +485,13 @@ private enum GestureGate {
             .filter { $0.1 < near }.min { $0.1 < $1.1 }?.0.elbow
     }
 
+    /// The jaw: the lower half of the face, the beard and the neck, `wide`
+    /// face widths across and `neck` face heights below the face box.
+    static func jaw(_ face: CGRect, neck: CGFloat, wide: CGFloat) -> CGRect {
+        CGRect(x: face.midX - face.width * wide / 2, y: face.minY - face.height * neck,
+               width: face.width * wide, height: face.height * (neck + 0.5))
+    }
+
     /// The head, where a hand means eating or a scratch, not a gesture: the face
     /// box, `hair` face heights above it, `chin` below it (the mouth and a fork
     /// on its way there), and a sliver either side. Padding wide to the sides
@@ -462,12 +518,23 @@ private enum GestureGate {
     }
 
     /// A hand on the face itself always pauses gestures: a palm on the cheek
-    /// or fingers at the mouth often look like a pose. In the zone around it
-    /// (hair, chin) only a hand that isn't a gesture shape pauses - three
-    /// fingers held up beside the head sits in the hair zone from its first
-    /// frame, so pausing there meant it never counted at all.
-    static func pausesAtHead(atHead: Bool, onFace: Bool, pose: String?) -> Bool {
-        onFace || (atHead && pose == nil)
+    /// or fingers at the mouth often look like a pose. So does one at the jaw -
+    /// chin, beard, neck, counted as one zone because a hand stroking a beard
+    /// is split across them - and a wrist above the head (stretching, reaching). In the zone around the face (hair, chin)
+    /// only an upright hand making a shape counts - three fingers held up
+    /// beside the head sits in the hair zone from its first frame, so pausing
+    /// there meant it never counted at all; a hand scratching the head lies
+    /// flat or points down, and often looks like a palm or a thumb.
+    static func pausesAtHead(atHead: Bool, onFace: Bool, onNeck: Bool = false, overhead: Bool = false,
+                             upright: Bool = true, pose: String?) -> Bool {
+        onFace || onNeck || overhead || (atHead && (pose == nil || !upright))
+    }
+
+    /// Whether a hand points up (by their own up): knuckles above the wrist by
+    /// at least half the hand's length, about 30 degrees.
+    static func isUpright(wrist: CGPoint, knuckle: CGPoint) -> Bool {
+        let dx = (knuckle.x - wrist.x) * 16 / 9, dy = knuckle.y - wrist.y
+        return dy > 0.5 * hypot(dx, dy)
     }
 
     /// How far a face is turned from the camera, from where the nose sits
@@ -693,6 +760,140 @@ private struct GestureTemplates {
     }
 }
 
+/// One person's hands in motion: each hand's wrist relative to their face, in
+/// face heights (so near and far mean the same), and its turn - which way the
+/// knuckles point from the wrist, so a knob twisted in place moves too. Cut
+/// into strokes, a burst of movement from rest to rest: a swipe is one stroke,
+/// so is two hands opening, so is turning a knob.
+private struct MotionStroke {
+    /// x, y in face heights; z the hand's turn in radians x `turnScale`.
+    typealias Hand = SIMD3<Double>
+    var frames: [(t: TimeInterval, hands: [Hand])] = []
+    var moving = false
+    var stillFrames = 0
+    // Why the last stroke didn't count, kept until the next one starts.
+    var miss: String?
+
+    // Calibration knobs: faster than `speed` face heights a second is moving;
+    // a stroke is 0.15-1.8 s and travels at least `travel` face heights. A
+    // radian of turn counts as `turnScale` face heights: 1.0 makes a ~70 degree
+    // twist as much as a 1.2 face-height swipe. Raise it if twists fall short,
+    // lower it if a still hand's jitter starts strokes.
+    static let speed = 1.5
+    static let turnScale = 1.0
+
+    static func distance(_ a: Hand, _ b: Hand) -> Double { ((a - b) * (a - b)).sum().squareRoot() }
+
+    /// One frame's hands (left to right in the picture), or none - each a
+    /// wrist and the raw turn angle, which is unwrapped here so a turn past
+    /// half a circle keeps counting. -> a finished stroke: each hand's path,
+    /// when one just ended.
+    mutating func add(t: TimeInterval, hands raw: [Hand], travel: Double) -> [[Hand]]? {
+        var hands = raw.map { Hand($0.x, $0.y, $0.z * Self.turnScale) }
+        if let last = frames.last, last.hands.count == hands.count {
+            let lap = 2 * Double.pi * Self.turnScale
+            for i in hands.indices { hands[i].z = last.hands[i].z + remainder(hands[i].z - last.hands[i].z, lap) }
+        }
+        guard let last = frames.last, !hands.isEmpty else {
+            let done = moving ? finish(travel: travel) : (paths: nil, miss: miss)
+            self = MotionStroke(frames: hands.isEmpty ? [] : [(t, hands)], miss: done.miss)
+            return done.paths
+        }
+        let dt = max(0.01, t - last.t)
+        // Two hands meeting look like one: only like-for-like frames compare.
+        let speed = hands.count == last.hands.count
+            ? zip(hands, last.hands).map { Self.distance($0, $1) }.max()! / dt : Self.speed
+        if speed >= Self.speed {
+            if !moving { frames = [last]; miss = nil }  // the stroke starts where the hand rested
+            moving = true
+            stillFrames = 0
+            frames.append((t, hands))
+            if t - frames[0].t > 1.8 {  // waving about, not a gesture
+                self = MotionStroke(frames: [(t, hands)], miss: "too long - make it one quick movement")
+            }
+            return nil
+        }
+        guard moving else { frames = [(t, hands)]; return nil }
+        frames.append((t, hands))
+        stillFrames += 1
+        guard stillFrames >= 2 else { return nil }
+        let done = finish(travel: travel)
+        self = MotionStroke(frames: [(t, hands)], miss: done.miss)
+        return done.paths
+    }
+
+    /// The stroke's paths, or why it doesn't count.
+    private func finish(travel: Double) -> (paths: [[Hand]]?, miss: String?) {
+        // The frames with the most hands in them carry the stroke.
+        let count = frames.map(\.hands.count).max() ?? 0
+        let kept = frames.filter { $0.hands.count == count }
+        guard kept.count >= 3, let first = kept.first, let last = kept.last, last.t - first.t >= 0.15 else {
+            return (nil, "too quick, or your hand was lost mid-way - a little slower")
+        }
+        guard last.t - first.t <= 1.8 else { return (nil, "too long - make it one quick movement") }
+        let paths = (0..<count).map { h in kept.map { $0.hands[h] } }
+        let moved = paths.map { Self.distance($0.last!, $0.first!) }.max() ?? 0
+        guard moved >= travel else {
+            return (nil, String(format: "too small (%.1f of %.1f) - move or turn your hand further", moved, travel))
+        }
+        return (paths, nil)
+    }
+
+    /// A stroke as numbers: each hand's path at 8 even steps, from where the
+    /// hands started together (and each hand's own starting turn), scaled to
+    /// its own size - big or small, fast or slow, a swipe left is a swipe left
+    /// and a twist right is a twist right. Direction and shape are what count.
+    static func vector(_ paths: [[Hand]]) -> [Double] {
+        var start = paths.map { $0[0] }.reduce(Hand(), +) / Double(paths.count)
+        let steps = paths.map { path in
+            (0..<8).map { i -> Hand in
+                let f = Double(i) / 7 * Double(path.count - 1)
+                let a = path[Int(f)], b = path[min(path.count - 1, Int(f) + 1)], k = f - Double(Int(f))
+                start.z = path[0].z
+                return a + (b - a) * k - start
+            }
+        }
+        let size = max(0.01, steps.joined().map { Self.distance($0, Hand()) }.max() ?? 0)
+        return steps.joined().flatMap { [$0.x / size, $0.y / size, $0.z / size] }
+    }
+}
+
+/// The motions someone has taught: ~5 strokes each.
+private struct MotionTemplates {
+    var samples: [String: [[Double]]] = [:]
+
+    static var url: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Hubbubb Local Camera/motions.json")
+    }
+
+    static func load() -> MotionTemplates {
+        let data = try? Data(contentsOf: url)
+        return MotionTemplates(samples: data.flatMap { try? JSONDecoder().decode([String: [[Double]]].self, from: $0) } ?? [:])
+    }
+
+    func save() throws {
+        try FileManager.default.createDirectory(at: Self.url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try JSONEncoder().encode(samples).write(to: Self.url, options: .atomic)
+    }
+
+    /// The taught motion nearest this stroke (same number of hands), if near
+    /// enough and clearly nearer than the next best.
+    func match(_ v: [Double], within limit: Double) -> String? {
+        let ranked = samples.compactMap { motion, taught -> (String, Double)? in
+            let best = taught.filter { $0.count == v.count }.map { t in
+                stride(from: 0, to: v.count, by: 3).map { i in
+                    MotionStroke.distance(.init(v[i], v[i + 1], v[i + 2]), .init(t[i], t[i + 1], t[i + 2]))
+                }.reduce(0, +) / Double(v.count / 3)
+            }.min()
+            return best.map { (motion, $0) }
+        }.sorted { $0.1 < $1.1 }
+        guard let first = ranked.first, first.1 < limit else { return nil }
+        if ranked.count > 1, ranked[1].1 < first.1 * 1.15 { return nil }
+        return first.0
+    }
+}
+
 /// How to frame one person, kept pure so `--self-test` can check it.
 private enum Framing {
     /// The zoom that frames them: the upper body fills `fill` of the frame's
@@ -834,6 +1035,8 @@ private final class CameraService {
         "zoomMax": (1.0...4.0, 4.0),
         "gestureMatch": (0.15...0.7, 0.35),
         "faceTouch": (0.1...1.0, 0.3),
+        "motionMatch": (0.1...0.8, 0.35),
+        "motionTravel": (0.5...4.0, 1.2),
     ]
     private var follow: Bool {
         get { UserDefaults.standard.object(forKey: "localAIFollowingEnabled") as? Bool ?? true }
@@ -1068,14 +1271,20 @@ private final class CameraService {
             guard hubbubbLinkCameraIdentity(&buffer, 256) == 1 else { return bad("camera not connected") }
             let parts = String(cString: buffer).split(separator: "|", omittingEmptySubsequences: false).map(String.init)
             return ok(["serial": parts.first ?? "", "firmware": parts.count > 1 ? parts[1] : ""])
+        case ("POST", "/gesture_teach") where body["cancel"] as? Bool == true:
+            processor?.stopTeaching()
+            return ok(["ok": true])
         case ("POST", "/gesture_teach"):
             guard let processor, let gesture = body["gesture"] as? String,
                   ["thumbs_up", "thumbs_down", "open_palm", "number_1", "number_2", "number_3"].contains(gesture)
                     || gesture.range(of: "^custom_[a-z0-9_]{1,40}$", options: .regularExpression) != nil else {
                 return bad("unknown gesture")
             }
-            processor.beginTeaching(gesture)
+            processor.beginTeaching(gesture, motion: body["motion"] as? Bool == true && gesture.hasPrefix("custom_"))
             return ok(["ok": true])
+        case ("POST", "/gesture_forget") where body["sample"] is NSNumber:
+            let index = (body["sample"] as! NSNumber).intValue
+            return ok(["ok": processor?.forgetMotionSample(body["gesture"] as? String ?? "", at: index) ?? false])
         case ("POST", "/gesture_forget"):
             return ok(["ok": processor?.forgetTeaching(body["gesture"] as? String ?? "") ?? false])
         case ("POST", "/enroll"):
@@ -1431,6 +1640,9 @@ private struct Track {
     var nameMisses = 0
     var lastIdentified = Date.distantPast
     var votes = GestureVotes()
+    var stroke = MotionStroke()
+    // After a motion fires (or is sampled), the hand coming back is not another.
+    var strokeQuietUntil = Date.distantPast
 
     /// Where to point the camera: the face, else the top of the body box.
     var aim: CGRect {
@@ -1761,7 +1973,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                     return hypot((w.location.x - m.location.x) * 16 / 9, w.location.y - m.location.y)
                 }.max() ?? 0.04
                 let holding = wrists.count >= 2 && GestureGate.together(wrists[0], wrists[1], handLength: handLength)
-                var raised = holding ? [] : own.filter { hand in
+                let lifted = own.filter { hand in
                     guard let wrist = try? hand.recognizedPoint(.wrist), wrist.confidence > 0.1 else { return false }
                     // Chest height or above by the face (and by their own up, lying down).
                     let nearFace = track.face.map { face in
@@ -1788,6 +2000,21 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                                       "by": track.face == nil ? "body" : "face", "arms_seen": arms.count])
                     if track.face != nil { return nearFace }
                     return GestureGate.isRaised(wrist: wrist.location, face: nil, body: track.body, reach: reach)
+                }
+                // Two hands together are a phone or a cup when held still -
+                // but two hands opening from together is a motion.
+                var raised = holding ? [] : lifted
+                // Any hand at the head, neck or above it ends the stroke unfired,
+                // and the hand coming away (itself a stroke) stays quiet too.
+                let touching = track.face.map { face in own.contains { handOverlapsFace($0, faceBounds: face, up: track.up).any } } ?? false
+                if touching {
+                    tracks[index].stroke = MotionStroke()
+                    tracks[index].strokeQuietUntil = now.addingTimeInterval(1.5)
+                }
+                let moving = touching || (requireLooking && !track.facing) ? [] : lifted
+                if let line = motion(&tracks[index], hands: moving, now: now, fired: &fired) {
+                    messages.append(tracks[index].name.map { "\($0): \(line)" } ?? line)
+                    continue
                 }
                 if requireLooking && !track.facing && !raised.isEmpty {
                     lookingAway += raised.count
@@ -1967,6 +2194,9 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         if face != nil, GestureGate.pausesAtHead(
             atHead: touching.contains { $0.atHead },
             onFace: touching.contains { $0.onFace },
+            onNeck: touching.contains { $0.onNeck },
+            overhead: touching.contains { $0.overhead },
+            upright: touching.allSatisfy { $0.upright },
             pose: primaryHand.flatMap { classifyGesture($0) }
         ) {
             votes = GestureVotes(lastVolumeRepeat: votes.lastVolumeRepeat, pausedUntil: now.addingTimeInterval(1.2))
@@ -2055,6 +2285,10 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             // fingers opening into a palm); only the first one counts.
             if Date() < votes.quietUntil, votes.lastFired != detectedGesture {
                 return ("One gesture at a time - drop your hand, then make the next one.", nil)
+            }
+            if let t = primaryHand.flatMap({ hand in face.map { handOverlapsFace(hand, faceBounds: $0, up: up) } }) {
+                note("Hubbubb camera: fired %@ - joints in face/head/jaw %.2f/%.2f/%.2f, upright %d, wrist %.1f,%.1f face heights from the face",
+                     detectedGesture, t.shares[0], t.shares[1], t.shares[2], t.upright ? 1 : 0, Double(t.wrist?.x ?? 0), Double(t.wrist?.y ?? 0))
             }
             votes.latched = detectedGesture
             votes.lastFired = detectedGesture
@@ -2429,7 +2663,14 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         case previewFailed
     }
 
-    private func handOverlapsFace(_ hand: VNHumanHandPoseObservation, faceBounds: CGRect, up: CGVector = Upright.vertical) -> (atHead: Bool, onFace: Bool) {
+    private struct HeadTouch { var atHead = false, onFace = false, onNeck = false
+        var shares: [Double] = []  // of the hand's joints in face, head, jaw - for the log
+        var wrist: CGPoint?  // from the face's middle, in face heights
+        var overhead = false, upright = true
+        var any: Bool { atHead || onFace || onNeck || overhead }
+    }
+
+    private func handOverlapsFace(_ hand: VNHumanHandPoseObservation, faceBounds: CGRect, up: CGVector = Upright.vertical) -> HeadTouch {
         let joints: [VNHumanHandPoseObservation.JointName] = [
             .wrist, .thumbCMC, .thumbMP, .thumbIP, .thumbTip,
             .indexMCP, .indexPIP, .indexDIP, .indexTip,
@@ -2442,20 +2683,34 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             guard let point = try? hand.recognizedPoint(joint), point.confidence > 0.12 else { return nil }
             return Upright.point(point.location, around: c, up: up)  // hair is "above" in their frame
         }
-        guard !points.isEmpty else { return (false, false) }
+        guard !points.isEmpty else { return HeadTouch() }
         // Calibration knobs, in face heights: `hairReach` above the face box,
-        // `chinReach` below it.
+        // `chinReach` below it, `neckReach` below that (always pauses).
         let defaults = UserDefaults.standard
-        let head = GestureGate.head(
-            Upright.rect(faceBounds, up: up),
-            hair: CGFloat(defaults.object(forKey: "hairReach") as? Double ?? 0.9),
-            chin: CGFloat(defaults.object(forKey: "chinReach") as? Double ?? 0.25)
-        )
+        let face = Upright.rect(faceBounds, up: up)
+        let hair = CGFloat(defaults.object(forKey: "hairReach") as? Double ?? 0.9)
+        let chin = CGFloat(defaults.object(forKey: "chinReach") as? Double ?? 0.25)
+        let neckReach = CGFloat(defaults.object(forKey: "neckReach") as? Double ?? 0.6)
+        let jawWidth = CGFloat(defaults.object(forKey: "jawWidth") as? Double ?? 1.8)
+        let head = GestureGate.head(face, hair: hair, chin: chin)
+        let jaw = GestureGate.jaw(face, neck: neckReach, wide: jawWidth)
         // Calibration knob `faceTouch`: the share of the hand's joints on the
         // face box itself that counts as touching the face. Lower is stricter.
-        let face = Upright.rect(faceBounds, up: up)
         let share = CGFloat(defaults.object(forKey: "faceTouch") as? Double ?? 0.3)
-        return (GestureGate.atHead(points, head: head), GestureGate.atHead(points, head: face, share: share))
+        let point = { (joint: VNHumanHandPoseObservation.JointName) -> CGPoint? in
+            (try? hand.recognizedPoint(joint)).flatMap { $0.confidence > 0.12 ? Upright.point($0.location, around: c, up: up) : nil }
+        }
+        let wrist = point(.wrist)
+        let inside = { (zone: CGRect) in Double(points.filter(zone.contains).count) / Double(points.count) }
+        return HeadTouch(
+            atHead: GestureGate.atHead(points, head: head),
+            onFace: GestureGate.atHead(points, head: face, share: share),
+            onNeck: GestureGate.atHead(points, head: jaw),
+            shares: [inside(face), inside(head), inside(jaw)],
+            wrist: wrist.map { CGPoint(x: ($0.x - face.midX) * 16 / 9 / face.height, y: ($0.y - face.midY) / face.height) },
+            overhead: wrist.map { $0.y > head.maxY } ?? false,
+            upright: wrist.flatMap { w in point(.middleMCP).map { GestureGate.isUpright(wrist: w, knuckle: $0) } } ?? true
+        )
     }
 
     private func applyHardwareZoom(_ factor: CGFloat) {
@@ -2972,8 +3227,11 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     // Taught gestures, and a teaching in progress (under settingsLock).
     private var templates = GestureTemplates.load()
     private var teaching: String?
+    private var teachingMotion = false
     private var teachSamples: [[Double]] = []
     private let teachTarget = 25
+    private var motions = MotionTemplates.load()
+    private let motionLimit = 12  // newest kept; a motion works from its first
     // Vision's joint keys -> the names HandShape uses.
     private static let jointNames: [String: String] = [
         "VNHLKWRI": "wrist", "VNHLKTTIP": "thumbTip", "VNHLKTIP": "thumbIP", "VNHLKTMP": "thumbMP", "VNHLKTCMC": "thumbCMC",
@@ -3030,23 +3288,113 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         return ruled.flatMap { templates.samples[$0] == nil ? $0 : nil }
     }
 
+    /// One person's hands this frame, watched for taught motions (and sampled
+    /// while one is being taught). -> a status line when it should replace
+    /// the still-gesture handling this frame.
+    private func motion(_ track: inout Track, hands: [VNHumanHandPoseObservation], now: Date,
+                        fired: inout [(gesture: String, person: String?, held: Bool)]) -> String? {
+        settingsLock.lock()
+        let teach = teachingMotion ? teaching : nil
+        let watching = teach != nil || !motions.samples.isEmpty
+        settingsLock.unlock()
+        guard watching, let face = track.face else { return teach.map { "Teaching \(gestureTitle($0)): look at the camera." } }
+        // Each wrist relative to the face, in face heights, by their own up;
+        // the two strongest hands, left to right.
+        let c = CGPoint(x: face.midX, y: face.midY), up = track.up
+        // Each hand's turn: wrist to the middle of its knuckles, which steadies
+        // it more than any one finger.
+        let wrists = hands.sorted { $0.confidence > $1.confidence }.prefix(2).compactMap { hand -> MotionStroke.Hand? in
+            guard let w = try? hand.recognizedPoint(.wrist), w.confidence > 0.1 else { return nil }
+            let at = { (q: CGPoint) -> CGPoint in
+                let p = Upright.point(q, around: c, up: up)
+                return CGPoint(x: (p.x - c.x) * 16 / 9 / face.height, y: (p.y - c.y) / face.height)
+            }
+            let wrist = at(w.location)
+            let knuckles = [VNHumanHandPoseObservation.JointName.indexMCP, .middleMCP, .ringMCP, .littleMCP]
+                .compactMap { try? hand.recognizedPoint($0) }.filter { $0.confidence > 0.1 }.map { at($0.location) }
+            let turn = knuckles.isEmpty ? 0 : atan2(knuckles.map(\.y).reduce(0, +) / CGFloat(knuckles.count) - wrist.y,
+                                                    knuckles.map(\.x).reduce(0, +) / CGFloat(knuckles.count) - wrist.x)
+            return .init(Double(wrist.x), Double(wrist.y), Double(turn))
+        }.sorted { $0.x < $1.x }
+        let travel = UserDefaults.standard.object(forKey: "motionTravel") as? Double ?? 1.2
+        guard let paths = track.stroke.add(t: now.timeIntervalSinceReferenceDate, hands: wrists, travel: travel),
+              now >= track.strokeQuietUntil else {
+            // While teaching a motion, still gestures stay quiet.
+            guard let teach else { return nil }
+            if track.stroke.moving { return "Teaching \(gestureTitle(teach)): watching…" }
+            if let miss = track.stroke.miss { return "Teaching \(gestureTitle(teach)): that one didn't count - \(miss)." }
+            return "Teaching \(gestureTitle(teach)): do the motion, then drop your hand."
+        }
+        // ponytail: a fixed second's quiet hides the hand coming back after a
+        // swipe (which is itself the opposite swipe); a faster second swipe waits.
+        track.strokeQuietUntil = now.addingTimeInterval(1.0)
+        let vector = MotionStroke.vector(paths)
+        // One stroke per teach, then stop: the hand coming back (itself the
+        // opposite motion) and anything after it is never sampled.
+        if let teach {
+            settingsLock.lock()
+            motions.samples[teach, default: []].append(vector)
+            motions.samples[teach] = Array(motions.samples[teach]!.suffix(motionLimit))
+            let count = motions.samples[teach]!.count
+            teaching = nil
+            teachingMotion = false
+            let snapshot = motions
+            settingsLock.unlock()
+            try? snapshot.save()
+            note("Hubbubb camera: taught motion %@ (sample %d, %d hands)", teach, count, paths.count)
+            return "Got it - \(gestureTitle(teach)) has \(count) sample\(count == 1 ? "" : "s")."
+        }
+        let limit = UserDefaults.standard.object(forKey: "motionMatch") as? Double ?? 0.35
+        settingsLock.lock()
+        let match = motions.match(vector, within: limit)
+        settingsLock.unlock()
+        guard let match else { return nil }
+        fired.append((match, track.name, false))
+        track.lastSeen = now
+        track.votes = GestureVotes(lastVolumeRepeat: track.votes.lastVolumeRepeat)
+        return "\(gestureTitle(match)) recognized. Running its assigned action."
+    }
+
     // MARK: - Teaching gestures
 
     /// Start collecting samples of `gesture` from the next raised hand.
-    func beginTeaching(_ gesture: String) {
+    func beginTeaching(_ gesture: String, motion: Bool = false) {
         settingsLock.lock()
         teaching = gesture
+        teachingMotion = motion
         teachSamples = []
         settingsLock.unlock()
     }
 
+    func stopTeaching() {
+        settingsLock.lock()
+        teaching = nil
+        teachingMotion = false
+        teachSamples = []
+        settingsLock.unlock()
+    }
+
+    /// Drop one sample of a taught motion; the last one forgets the motion.
+    func forgetMotionSample(_ gesture: String, at index: Int) -> Bool {
+        settingsLock.lock()
+        guard var taught = motions.samples[gesture], taught.indices.contains(index) else { settingsLock.unlock(); return false }
+        taught.remove(at: index)
+        motions.samples[gesture] = taught.isEmpty ? nil : taught
+        let snapshot = motions
+        settingsLock.unlock()
+        try? snapshot.save()
+        return true
+    }
+
     func forgetTeaching(_ gesture: String) -> Bool {
         settingsLock.lock()
-        let removed = templates.samples.removeValue(forKey: gesture) != nil
-        let snapshot = templates
+        let shape = templates.samples.removeValue(forKey: gesture) != nil
+        let motion = motions.samples.removeValue(forKey: gesture) != nil
+        let (snapshot, motionSnapshot) = (templates, motions)
         settingsLock.unlock()
-        if removed { try? snapshot.save() }
-        return removed
+        if shape { try? snapshot.save() }
+        if motion { try? motionSnapshot.save() }
+        return shape || motion
     }
 
     /// Taught gestures and their sample counts, and any teaching in progress.
@@ -3054,15 +3402,18 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         settingsLock.lock()
         defer { settingsLock.unlock() }
         return [
-            "taught": templates.samples.mapValues(\.count),
-            "teaching": teaching.map { ["gesture": $0, "samples": teachSamples.count, "target": teachTarget] } ?? NSNull(),
+            "taught": templates.samples.mapValues(\.count).merging(motions.samples.mapValues(\.count)) { a, _ in a },
+            "motions": Array(motions.samples.keys),
+            "motion_samples": motions.samples,
+            "teaching": teaching.map { ["gesture": $0, "samples": teachSamples.count, "motion": teachingMotion,
+                                        "target": teachingMotion ? 1 : teachTarget] } ?? NSNull(),
         ]
     }
 
     /// One raised hand while teaching: keep a sample. -> a status line.
     private func teach(_ hand: VNHumanHandPoseObservation) -> String? {
         settingsLock.lock()
-        let gesture = teaching
+        let gesture = teachingMotion ? nil : teaching
         settingsLock.unlock()
         guard let gesture else { return nil }
         var points: [String: CGPoint] = [:]

@@ -47,13 +47,38 @@ export const customGestureId = (name) => {
 };
 
 /* The built-in gestures, then every one taught from scratch (or being taught). */
-export const gestureCatalog = (catalog = [], taught = {}, teaching = null) => {
+export const gestureCatalog = (catalog = [], taught = {}, teaching = null, motions = []) => {
   const ids = [...Object.keys(taught || {}), teaching?.gesture].filter((id) => id?.startsWith("custom_"));
   const custom = [...new Set(ids)].sort().map((id) => {
     const words = id.slice(7).replace(/_/g, " ");
-    return { id, title: words[0].toUpperCase() + words.slice(1), how: "Your own gesture", icon: "mdi:hand-wave", custom: true };
+    const motion = motions.includes(id) || (teaching?.gesture === id && !!teaching.motion);
+    return { id, title: words[0].toUpperCase() + words.slice(1), how: motion ? "Your own motion" : "Your own gesture", icon: motion ? "mdi:gesture-swipe" : "mdi:hand-wave", custom: true, motion };
   });
   return [...catalog, ...custom];
+};
+
+/* One taught motion sample (8 steps x [x, y, turn] per hand, as the camera
+   stores it) in words, from where the person stands: the camera faces them, so
+   its right is their left and its clockwise their anticlockwise. */
+export const motionLabel = (v = []) => {
+  const hand = (h) => ({ start: v.slice(h * 24, h * 24 + 3), end: v.slice(h * 24 + 21, h * 24 + 24) });
+  if (v.length === 48) {
+    const [a, b] = [hand(0), hand(1)];
+    return b.end[0] - a.end[0] > b.start[0] - a.start[0] ? "hands apart" : "hands together";
+  }
+  const [x, y, turn] = hand(0).end;
+  if (Math.abs(turn) >= 0.5 * Math.hypot(x, y)) return turn < 0 ? "twist left" : "twist right";
+  if (Math.abs(x) > Math.abs(y)) return x > 0 ? "swipe left" : "swipe right";
+  return y > 0 ? "swipe up" : "swipe down";
+};
+
+/* The samples that aren't what most of them are - likely a hand coming back,
+   or something else caught while teaching. No majority, nothing flagged. */
+export const oddSamples = (samples = []) => {
+  const labels = samples.map(motionLabel);
+  const counts = labels.reduce((n, l) => ({ ...n, [l]: (n[l] || 0) + 1 }), {});
+  const [top, n] = Object.entries(counts).sort((a, b) => b[1] - a[1])[0] || [];
+  return n > samples.length / 2 ? labels.map((l) => l !== top) : labels.map(() => false);
 };
 
 /* "Select option, Mac screen mirroring" for a card's one-line summary. */
@@ -63,6 +88,8 @@ export const summarizeActions = (actions) => {
   const names = list.map((a) => {
     const id = a.action || a.service || (a.choose && "choose") || (a.delay && "delay") || (a.event && "event") || "";
     if (id === "hubbubb_home.mac_screen_sharing") return a.data?.on ? "Start Mac screen mirroring" : "Stop Mac screen mirroring";
+    const mac = { close_window: "Close the front window", full_screen: "Toggle full screen", mission_control: "Mission Control", spotlight: "Spotlight" };
+    if (id === "hubbubb_home.agent_screen_input" && mac[a.data?.action]) return mac[a.data.action];
     if (!id.includes(".")) return id ? id[0].toUpperCase() + id.slice(1) : "Step";
     const [, verb] = id.split(".");
     return verb.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
@@ -144,6 +171,7 @@ class HubbubbCamera extends LitElement {
     _items: { state: true },
     _enrollName: { state: true },
     _newGesture: { state: true },
+    _newMotion: { state: true },
     _confirm: { state: true },
     _ask: { state: true },
     _teach: { state: true },
@@ -170,6 +198,7 @@ class HubbubbCamera extends LitElement {
     this._items = null;
     this._enrollName = "";
     this._newGesture = "";
+    this._newMotion = false;
     this._pets = null; // { pets: {name: kind}, spots: {name: [pan, tilt]}, pets_at, wait_minutes }
     this._petForm = { name: "", kind: "dog", spot: "", result: "" };
     this._confirm = null; // what a second click will delete
@@ -430,7 +459,7 @@ class HubbubbCamera extends LitElement {
 
   get _catalog() {
     const training = this._state?.gestures || {};
-    return gestureCatalog(this._gestures?.catalog, training.taught, training.teaching);
+    return gestureCatalog(this._gestures?.catalog, training.taught, training.teaching, training.motions);
   }
 
   _iconFor(id) {
@@ -526,10 +555,15 @@ class HubbubbCamera extends LitElement {
       </div>
       <section class="card">
         <h3>New gesture</h3>
-        <p class="muted small">Name it, then hold it up to the camera for a few seconds so it learns your hand. Pick a shape that isn't close to another gesture.</p>
-        <form class="inline" @submit=${(e) => { e.preventDefault(); this._createGesture(); }}>
-          <input placeholder="Name, e.g. Peace sign" .value=${this._newGesture} @input=${(e) => (this._newGesture = e.target.value)} />
+        <p class="muted small">A <b>shape</b> is a hand held still (peace sign); pick one that isn't close to another gesture. A <b>motion</b> is a movement — a swipe, two hands opening, turning a knob — with one hand or both; you'll record it a few times, one at a time.</p>
+        <form class="inline wrap" @submit=${(e) => { e.preventDefault(); this._createGesture(); }}>
+          <input placeholder=${this._newMotion ? "Name, e.g. Swipe left" : "Name, e.g. Peace sign"} .value=${this._newGesture} @input=${(e) => (this._newGesture = e.target.value)} />
+          <select .value=${this._newMotion ? "motion" : "shape"} @change=${(e) => (this._newMotion = e.target.value === "motion")}>
+            <option value="shape">Shape</option>
+            <option value="motion">Motion</option>
+          </select>
           <button class="primary" ?disabled=${this._busy || !!this._state?.gestures?.teaching || !customGestureId(this._newGesture)}>Teach it</button>
+          ${this._state?.gestures?.teaching ? html`<button type="button" @click=${() => this._try(() => this._call("camera_gesture_teach", { gesture: this._state.gestures.teaching.gesture, cancel: true })).then(() => this._poll())}>Stop teaching</button>` : nothing}
         </form>
       </section>
     `;
@@ -538,7 +572,7 @@ class HubbubbCamera extends LitElement {
   async _createGesture() {
     const id = customGestureId(this._newGesture);
     if (!id) return;
-    await this._try(() => this._call("camera_gesture_teach", { gesture: id }));
+    await this._try(() => this._call("camera_gesture_teach", { gesture: id, motion: this._newMotion }));
     this._newGesture = "";
     this._open = id;
     this._form = gestureForm(this._gestures?.gestures?.[id]);
@@ -593,22 +627,49 @@ class HubbubbCamera extends LitElement {
           <div class="teach-view">${this._renderView(true)}</div>
           <div>
             <div class="name">Teaching ${c.title}…</div>
-            <div class="progress"><div style=${`width:${Math.round((100 * now.samples) / now.target)}%`}></div></div>
+            ${now.motion ? nothing : html`<div class="progress"><div style=${`width:${Math.round((100 * now.samples) / now.target)}%`}></div></div>`}
             <p class="muted">${this._state?.status || ""}</p>
-            <p class="muted small">Look at the camera, hold ${c.title.toLowerCase()} at chest height, and move it around a little — closer, further, tilted — so it learns your hand from every angle.</p>
+            <p class="muted small">${now.motion
+              ? html`Look at the camera and do ${c.title.toLowerCase()} once, the way you'll do it for real, then drop your hand. It records just that one.`
+              : html`Look at the camera, hold ${c.title.toLowerCase()} at chest height, and move it around a little — closer, further, tilted — so it learns your hand from every angle.`}</p>
+            <button @click=${() => this._try(() => this._call("camera_gesture_teach", { gesture: c.id, cancel: true })).then(() => this._poll())}>Stop teaching</button>
           </div>
         </div>
       </div>`;
+    if (c.motion) return this._renderMotionSamples(c, training.motion_samples?.[c.id] || [], now);
     return html`<div class="teach-box">
       <div class="teach-row-inline">
         <div class="grow">
           <div class="name">${taught ? `Taught from your hand (${taught} samples)` : "Using the built-in shape"}</div>
           <div class="muted small">${taught ? "Re-teach it if it's being missed or mistaken for another gesture." : "Teach it your way of doing it — it takes 3 seconds and makes it far more reliable."}</div>
         </div>
-        <button class="primary" ?disabled=${this._busy || !!now} @click=${() => this._try(() => this._call("camera_gesture_teach", { gesture: c.id })).then(() => this._poll())}>${taught ? "Re-teach" : "Teach it"}</button>
+        <button class="primary" ?disabled=${this._busy || !!now} @click=${() => this._try(() => this._call("camera_gesture_teach", { gesture: c.id, motion: !!c.motion })).then(() => this._poll())}>${taught ? "Re-teach" : "Teach it"}</button>
         ${taught ? html`<button ?disabled=${this._busy || !!now} @click=${() => this._forgetTeach(c.id)}>${this._confirm === `g:${c.id}` ? "Really forget?" : "Forget"}</button>` : nothing}
       </div>
     </div>`;
+  }
+
+  _renderMotionSamples(c, samples, now) {
+    const odd = oddSamples(samples);
+    return html`<div class="teach-box">
+      <div class="teach-row-inline">
+        <div class="grow">
+          <div class="name">${samples.length ? `Taught from your hand (${samples.length} sample${samples.length === 1 ? "" : "s"})` : "Not taught yet"}</div>
+          <div class="muted small">Record it one at a time; 3 to 5 good ones is plenty. Delete any that don't look like the others.</div>
+        </div>
+        <button class="primary" ?disabled=${this._busy || !!now} @click=${() => this._try(() => this._call("camera_gesture_teach", { gesture: c.id, motion: true })).then(() => this._poll())}>Record one</button>
+        ${samples.length ? html`<button ?disabled=${this._busy || !!now} @click=${() => this._forgetTeach(c.id)}>${this._confirm === `g:${c.id}` ? "Really forget all?" : "Forget all"}</button>` : nothing}
+      </div>
+      ${samples.length ? html`<div class="chips samples">${samples.map((v, i) => html`<span class="sample ${odd[i] ? "odd" : ""}">
+        ${i + 1}. ${motionLabel(v)}${odd[i] ? html` <b>· unlike the others</b>` : nothing}
+        <button class="x" title="Delete this sample" aria-label=${`Delete sample ${i + 1}`} ?disabled=${this._busy} @click=${() => this._forgetSample(c.id, i)}>×</button>
+      </span>`)}</div>` : nothing}
+    </div>`;
+  }
+
+  async _forgetSample(id, sample) {
+    await this._try(() => this._call("camera_gesture_forget", { gesture: id, sample }));
+    this._poll();
   }
 
   async _forgetTeach(id) {
@@ -1104,6 +1165,10 @@ class HubbubbCamera extends LitElement {
     @keyframes pop { from { opacity: 0; transform: translate(-50%, -6px); } }
     @media (prefers-reduced-motion: reduce) { .toast { animation: none; } }
     .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+    .samples { margin-top: 10px; }
+    .sample { display: inline-flex; align-items: center; gap: 4px; font-size: 13px; padding: 2px 4px 2px 10px; border-radius: 999px; background: var(--secondary-background-color); }
+    .sample.odd { outline: 1px solid var(--warning-color, #ffa600); }
+    .sample .x { border: 0; background: none; color: inherit; font-size: 16px; line-height: 1; padding: 4px 8px; min-width: 32px; min-height: 32px; cursor: pointer; }
     .chip { display: inline-flex; align-items: center; gap: 4px; padding: 4px 12px 4px 8px; border-radius: 999px; background: rgba(var(--rgb-primary-color, 3, 169, 244), 0.14); }
     .chip.animal { background: rgba(var(--rgb-warning-color, 255, 166, 0), 0.18); }
     .chip ha-icon { --mdc-icon-size: 18px; }
@@ -1122,7 +1187,7 @@ class HubbubbCamera extends LitElement {
     }
     .round:hover { border-color: var(--primary-color); color: var(--primary-color); }
 
-    input {
+    input, select {
       flex: 1;
       min-width: 0;
       padding: 10px 12px;
@@ -1136,6 +1201,7 @@ class HubbubbCamera extends LitElement {
     .inline { display: flex; gap: 8px; }
     .inline.wrap { flex-wrap: wrap; }
     .inline.wrap input { flex: 1 1 220px; }
+    .inline.wrap select { flex: 0 0 auto; }
     button {
       padding: 8px 14px;
       border-radius: 8px;
