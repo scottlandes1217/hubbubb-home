@@ -191,7 +191,11 @@ private struct RoomMap {
         precondition(GestureGate.pausesAtHead(atHead: true, onFace: true, pose: "open_palm"), "a palm on the cheek pauses, whatever it looks like")
         precondition(!GestureGate.pausesAtHead(atHead: false, onFace: false, pose: nil), "away from the head never pauses")
         precondition(GestureGate.pausesAtHead(atHead: true, onFace: false, upright: false, pose: "open_palm"), "a flat hand in the hair is a scratch, whatever it looks like")
-        precondition(GestureGate.pausesAtHead(atHead: false, onFace: false, onNeck: true, pose: "thumbs_up"), "a hand on the neck pauses")
+        precondition(GestureGate.pausesAtHead(atHead: true, onFace: false, onNeck: true, upright: true, pose: "thumbs_up"), "a hand at the beard pauses, upright or not")
+        let jawFace = CGRect(x: 0.4, y: 0.5, width: 0.1, height: 0.1)
+        let stroking = [CGPoint(x: 0.45, y: 0.52), CGPoint(x: 0.46, y: 0.49), CGPoint(x: 0.47, y: 0.47), CGPoint(x: 0.51, y: 0.45), CGPoint(x: 0.53, y: 0.44)]
+        precondition(GestureGate.atHead(stroking, head: GestureGate.jaw(jawFace, neck: 0.6, wide: 1.8)), "fingers on the chin, palm on the neck, wrist aside: at the jaw")
+        precondition(!GestureGate.atHead([CGPoint(x: 0.45, y: 0.3), CGPoint(x: 0.7, y: 0.5)], head: GestureGate.jaw(jawFace, neck: 0.6, wide: 1.8)), "a hand at the chest or out at the shoulder is not")
         precondition(GestureGate.pausesAtHead(atHead: false, onFace: false, overhead: true, pose: "open_palm"), "a hand above the head is a stretch")
         precondition(GestureGate.isUpright(wrist: .zero, knuckle: CGPoint(x: 0.01, y: 0.05)), "fingers up is upright")
         precondition(!GestureGate.isUpright(wrist: .zero, knuckle: CGPoint(x: 0.05, y: -0.01)), "fingers sideways or down is not")
@@ -481,6 +485,13 @@ private enum GestureGate {
             .filter { $0.1 < near }.min { $0.1 < $1.1 }?.0.elbow
     }
 
+    /// The jaw: the lower half of the face, the beard and the neck, `wide`
+    /// face widths across and `neck` face heights below the face box.
+    static func jaw(_ face: CGRect, neck: CGFloat, wide: CGFloat) -> CGRect {
+        CGRect(x: face.midX - face.width * wide / 2, y: face.minY - face.height * neck,
+               width: face.width * wide, height: face.height * (neck + 0.5))
+    }
+
     /// The head, where a hand means eating or a scratch, not a gesture: the face
     /// box, `hair` face heights above it, `chin` below it (the mouth and a fork
     /// on its way there), and a sliver either side. Padding wide to the sides
@@ -507,9 +518,9 @@ private enum GestureGate {
     }
 
     /// A hand on the face itself always pauses gestures: a palm on the cheek
-    /// or fingers at the mouth often look like a pose. So does one on the neck
-    /// (nobody holds a gesture in front of their throat) and a wrist above the
-    /// head (stretching, reaching). In the zone around the face (hair, chin)
+    /// or fingers at the mouth often look like a pose. So does one at the jaw -
+    /// chin, beard, neck, counted as one zone because a hand stroking a beard
+    /// is split across them - and a wrist above the head (stretching, reaching). In the zone around the face (hair, chin)
     /// only an upright hand making a shape counts - three fingers held up
     /// beside the head sits in the hair zone from its first frame, so pausing
     /// there meant it never counted at all; a hand scratching the head lies
@@ -2275,6 +2286,10 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             if Date() < votes.quietUntil, votes.lastFired != detectedGesture {
                 return ("One gesture at a time - drop your hand, then make the next one.", nil)
             }
+            if let t = primaryHand.flatMap({ hand in face.map { handOverlapsFace(hand, faceBounds: $0, up: up) } }) {
+                note("Hubbubb camera: fired %@ - joints in face/head/jaw %.2f/%.2f/%.2f, upright %d, wrist %.1f,%.1f face heights from the face",
+                     detectedGesture, t.shares[0], t.shares[1], t.shares[2], t.upright ? 1 : 0, Double(t.wrist?.x ?? 0), Double(t.wrist?.y ?? 0))
+            }
             votes.latched = detectedGesture
             votes.lastFired = detectedGesture
             votes.quietUntil = Date().addingTimeInterval(1.5)
@@ -2648,7 +2663,10 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         case previewFailed
     }
 
-    private struct HeadTouch { var atHead = false, onFace = false, onNeck = false, overhead = false, upright = true
+    private struct HeadTouch { var atHead = false, onFace = false, onNeck = false
+        var shares: [Double] = []  // of the hand's joints in face, head, jaw - for the log
+        var wrist: CGPoint?  // from the face's middle, in face heights
+        var overhead = false, upright = true
         var any: Bool { atHead || onFace || onNeck || overhead }
     }
 
@@ -2673,8 +2691,9 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         let hair = CGFloat(defaults.object(forKey: "hairReach") as? Double ?? 0.9)
         let chin = CGFloat(defaults.object(forKey: "chinReach") as? Double ?? 0.25)
         let neckReach = CGFloat(defaults.object(forKey: "neckReach") as? Double ?? 0.6)
+        let jawWidth = CGFloat(defaults.object(forKey: "jawWidth") as? Double ?? 1.8)
         let head = GestureGate.head(face, hair: hair, chin: chin)
-        let neck = CGRect(x: head.minX, y: head.minY - face.height * neckReach, width: head.width, height: face.height * neckReach)
+        let jaw = GestureGate.jaw(face, neck: neckReach, wide: jawWidth)
         // Calibration knob `faceTouch`: the share of the hand's joints on the
         // face box itself that counts as touching the face. Lower is stricter.
         let share = CGFloat(defaults.object(forKey: "faceTouch") as? Double ?? 0.3)
@@ -2682,10 +2701,13 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             (try? hand.recognizedPoint(joint)).flatMap { $0.confidence > 0.12 ? Upright.point($0.location, around: c, up: up) : nil }
         }
         let wrist = point(.wrist)
+        let inside = { (zone: CGRect) in Double(points.filter(zone.contains).count) / Double(points.count) }
         return HeadTouch(
             atHead: GestureGate.atHead(points, head: head),
             onFace: GestureGate.atHead(points, head: face, share: share),
-            onNeck: GestureGate.atHead(points, head: neck),
+            onNeck: GestureGate.atHead(points, head: jaw),
+            shares: [inside(face), inside(head), inside(jaw)],
+            wrist: wrist.map { CGPoint(x: ($0.x - face.midX) * 16 / 9 / face.height, y: ($0.y - face.midY) / face.height) },
             overhead: wrist.map { $0.y > head.maxY } ?? false,
             upright: wrist.flatMap { w in point(.middleMCP).map { GestureGate.isUpright(wrist: w, knuckle: $0) } } ?? true
         )
