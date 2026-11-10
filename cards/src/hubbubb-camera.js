@@ -531,7 +531,7 @@ class HubbubbCamera extends LitElement {
       </div>
       <section class="card">
         <h3>New gesture</h3>
-        <p class="muted small">A <b>shape</b> is a hand held still (peace sign); pick one that isn't close to another gesture. A <b>motion</b> is a movement — a swipe, two hands opening — with one hand or both; you'll do it 5 times.</p>
+        <p class="muted small">A <b>shape</b> is a hand held still (peace sign); pick one that isn't close to another gesture. A <b>motion</b> is a movement — a swipe, two hands opening, turning a knob — with one hand or both; you'll do it 5 times.</p>
         <form class="inline wrap" @submit=${(e) => { e.preventDefault(); this._createGesture(); }}>
           <input placeholder=${this._newMotion ? "Name, e.g. Swipe left" : "Name, e.g. Peace sign"} .value=${this._newGesture} @input=${(e) => (this._newGesture = e.target.value)} />
           <select .value=${this._newMotion ? "motion" : "shape"} @change=${(e) => (this._newMotion = e.target.value === "motion")}>
@@ -539,6 +539,7 @@ class HubbubbCamera extends LitElement {
             <option value="motion">Motion</option>
           </select>
           <button class="primary" ?disabled=${this._busy || !!this._state?.gestures?.teaching || !customGestureId(this._newGesture)}>Teach it</button>
+          ${this._state?.gestures?.teaching ? html`<button type="button" @click=${() => this._try(() => this._call("camera_gesture_teach", { gesture: this._state.gestures.teaching.gesture, cancel: true })).then(() => this._poll())}>Stop teaching</button>` : nothing}
         </form>
       </section>
     `;
@@ -607,6 +608,7 @@ class HubbubbCamera extends LitElement {
             <p class="muted small">${now.motion
               ? html`Look at the camera and do ${c.title.toLowerCase()} the way you'll do it for real, then drop your hand and wait for the count to go up. Five times.`
               : html`Look at the camera, hold ${c.title.toLowerCase()} at chest height, and move it around a little — closer, further, tilted — so it learns your hand from every angle.`}</p>
+            <button @click=${() => this._try(() => this._call("camera_gesture_teach", { gesture: c.id, cancel: true })).then(() => this._poll())}>Stop teaching</button>
           </div>
         </div>
       </div>`;

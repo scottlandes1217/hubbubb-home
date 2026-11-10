@@ -65,26 +65,27 @@ var Ft=Object.defineProperty,Dt=Object.defineProperties;var Gt=Object.getOwnProp
           </section>
         </div>
       </div>
-    `}_settingsFrom(t,e){let s={};for(let i of["follow","auto_zoom","zoom","zoomMax"])t[i]!==void 0&&t[i]!==e[i]&&(s[i]=t[i]);Object.keys(s).length&&this._settings(s)}async _askCamera(){this._ask=_(u({},this._ask),{busy:!0,answer:null});try{let t=await this._call("camera_look",{question:this._ask.q.trim()}),e=!t.found&&t.last_seen?` Last seen ${t.last_seen}`:"";this._ask=_(u({},this._ask),{busy:!1,answer:(t.answer||t.error||"No answer.")+e})}catch(t){this._ask=_(u({},this._ask),{busy:!1,answer:(t==null?void 0:t.message)||String(t)})}}_renderGestures(){var e,s;let t=this._gestures;return t?c`
+    `}_settingsFrom(t,e){let s={};for(let i of["follow","auto_zoom","zoom","zoomMax"])t[i]!==void 0&&t[i]!==e[i]&&(s[i]=t[i]);Object.keys(s).length&&this._settings(s)}async _askCamera(){this._ask=_(u({},this._ask),{busy:!0,answer:null});try{let t=await this._call("camera_look",{question:this._ask.q.trim()}),e=!t.found&&t.last_seen?` Last seen ${t.last_seen}`:"";this._ask=_(u({},this._ask),{busy:!1,answer:(t.answer||t.error||"No answer.")+e})}catch(t){this._ask=_(u({},this._ask),{busy:!1,answer:(t==null?void 0:t.message)||String(t)})}}_renderGestures(){var e,s,i,a;let t=this._gestures;return t?c`
       <p class="intro">Look at the camera and hold a gesture steady at chest height for about a second. Assign each one any Home Assistant actions — the same editor automations use. Hands at the keyboard, near your face, or while you look elsewhere never count.</p>
       <section class="card">
         <ha-formfield label="Gestures on — turn off for meetings or when talking with your hands">
-          <ha-switch .checked=${t.on!==!1} ?disabled=${this._busy} @change=${i=>this._gesturesOn(i.target.checked)}></ha-switch>
+          <ha-switch .checked=${t.on!==!1} ?disabled=${this._busy} @change=${o=>this._gesturesOn(o.target.checked)}></ha-switch>
         </ha-formfield>
       </section>
       <div class="gestures ${t.on===!1?"disabled":""}">
-        ${this._catalog.map(i=>this._renderGesture(i,t.gestures[i.id]))}
+        ${this._catalog.map(o=>this._renderGesture(o,t.gestures[o.id]))}
       </div>
       <section class="card">
         <h3>New gesture</h3>
-        <p class="muted small">A <b>shape</b> is a hand held still (peace sign); pick one that isn't close to another gesture. A <b>motion</b> is a movement — a swipe, two hands opening — with one hand or both; you'll do it 5 times.</p>
-        <form class="inline wrap" @submit=${i=>{i.preventDefault(),this._createGesture()}}>
-          <input placeholder=${this._newMotion?"Name, e.g. Swipe left":"Name, e.g. Peace sign"} .value=${this._newGesture} @input=${i=>this._newGesture=i.target.value} />
-          <select .value=${this._newMotion?"motion":"shape"} @change=${i=>this._newMotion=i.target.value==="motion"}>
+        <p class="muted small">A <b>shape</b> is a hand held still (peace sign); pick one that isn't close to another gesture. A <b>motion</b> is a movement — a swipe, two hands opening, turning a knob — with one hand or both; you'll do it 5 times.</p>
+        <form class="inline wrap" @submit=${o=>{o.preventDefault(),this._createGesture()}}>
+          <input placeholder=${this._newMotion?"Name, e.g. Swipe left":"Name, e.g. Peace sign"} .value=${this._newGesture} @input=${o=>this._newGesture=o.target.value} />
+          <select .value=${this._newMotion?"motion":"shape"} @change=${o=>this._newMotion=o.target.value==="motion"}>
             <option value="shape">Shape</option>
             <option value="motion">Motion</option>
           </select>
           <button class="primary" ?disabled=${this._busy||!!((s=(e=this._state)==null?void 0:e.gestures)!=null&&s.teaching)||!Ht(this._newGesture)}>Teach it</button>
+          ${(a=(i=this._state)==null?void 0:i.gestures)!=null&&a.teaching?c`<button type="button" @click=${()=>this._try(()=>this._call("camera_gesture_teach",{gesture:this._state.gestures.teaching.gesture,cancel:!0})).then(()=>this._poll())}>Stop teaching</button>`:p}
         </form>
       </section>
     `:c`<div class="empty">Loading gestures…</div>`}async _createGesture(){var e,s;let t=Ht(this._newGesture);t&&(await this._try(()=>this._call("camera_gesture_teach",{gesture:t,motion:this._newMotion})),this._newGesture="",this._open=t,this._form=C((s=(e=this._gestures)==null?void 0:e.gestures)==null?void 0:s[t]),this._poll())}async _gesturesOn(t){await this._try(()=>this._call("gestures_enable",{on:t},!1)),this._loadGestures()}_renderGesture(t,e){var n,h,d,m,g,f;let s=this._open===t.id,i=s?this._form:C(e),a=((n=this._flash)==null?void 0:n.gesture)===t.id,o=(m=(d=(h=this._state)==null?void 0:h.gestures)==null?void 0:d.taught)==null?void 0:m[t.id],l=((g=this._gestures.last)==null?void 0:g.gesture)===t.id?this._gestures.last:null;return c`
@@ -109,6 +110,7 @@ var Ft=Object.defineProperty,Dt=Object.defineProperties;var Gt=Object.getOwnProp
             <div class="progress"><div style=${`width:${Math.round(100*s.samples/s.target)}%`}></div></div>
             <p class="muted">${((l=this._state)==null?void 0:l.status)||""}</p>
             <p class="muted small">${s.motion?c`Look at the camera and do ${t.title.toLowerCase()} the way you'll do it for real, then drop your hand and wait for the count to go up. Five times.`:c`Look at the camera, hold ${t.title.toLowerCase()} at chest height, and move it around a little — closer, further, tilted — so it learns your hand from every angle.`}</p>
+            <button @click=${()=>this._try(()=>this._call("camera_gesture_teach",{gesture:t.id,cancel:!0})).then(()=>this._poll())}>Stop teaching</button>
           </div>
         </div>
       </div>`:c`<div class="teach-box">
