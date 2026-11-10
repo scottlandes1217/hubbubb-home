@@ -223,6 +223,13 @@ private struct RoomMap {
         precondition(twist.map { $0[0].last!.z - $0[0].first!.z } ?? 0 > 1.4, "a twist in place is a stroke, unwrapped")
         let slow = (0...6).map { [H(0.02 * Double($0), 0, -Double($0) * 0.075)] }  // 26 degrees over 0.6 s
         precondition(stroke([[H()]] + slow + Array(repeating: slow.last!, count: 3)) != nil, "a short, slow knob twist counts")
+        var glitch = MotionStroke()
+        for (i, z) in [0, -0.2, -0.4, 2.7, -0.6, -0.6, -0.6].enumerated() { _ = glitch.add(t: Double(i) * 0.1, hands: [H(0, 0, z)], travel: 1.2) }
+        precondition(glitch.frames.allSatisfy { $0.hands[0].z <= 0 }, "a half-circle jump in one frame is a misread, not a turn")
+        let lefts = (0..<3).map { _ in MotionStroke.vector(twist!.map { $0.map { H($0.x, $0.y, -$0.z) } }) }
+        precondition(MotionStroke.label(lefts[0]) == "twist left" && MotionStroke.majority(lefts) == "twist left", "three left twists make it a left twist")
+        precondition(MotionStroke.label(MotionStroke.vector(twist!)) == "twist right", "and a right one isn't")
+        precondition(MotionStroke.majority(Array(lefts.prefix(2))) == nil, "two samples aren't a majority yet")
         let wobble = (0...6).map { [H(0, 0, $0 % 2 == 0 ? 0 : 0.04)] }  // a still hand's turn jitter
         precondition(stroke(wobble) == nil, "jitter is no stroke")
         let end = [H(0.1, 0, 3.0)]
@@ -824,7 +831,12 @@ private struct MotionStroke {
         var hands = raw.map { Hand($0.x, $0.y, $0.z * Self.turnScale) }
         if let last = frames.last, last.hands.count == hands.count {
             let lap = 2 * Double.pi * Self.turnScale
-            for i in hands.indices { hands[i].z = last.hands[i].z + remainder(hands[i].z - last.hands[i].z, lap) }
+            for i in hands.indices {
+                let turn = remainder(hands[i].z - last.hands[i].z, lap)
+                // No hand turns ~70 degrees in a frame: that is the knuckles
+                // misread for a moment, so keep the last turn.
+                hands[i].z = last.hands[i].z + (abs(turn) > 1.2 * Self.turnScale ? 0 : turn)
+            }
         }
         guard let last = frames.last, !hands.isEmpty else {
             let done = moving ? finish(travel: travel) : (paths: nil, miss: miss)
@@ -871,6 +883,28 @@ private struct MotionStroke {
                                 turned, Self.turnTravel, moved, travel))
         }
         return (paths, nil)
+    }
+
+    /// A stroke vector (see `vector`) in words - twist left, swipe up, hands
+    /// apart - from the person's side: the camera faces them, so its right is
+    /// their left. The panel's motionLabel says the same.
+    static func label(_ v: [Double]) -> String {
+        if v.count == 48 {
+            return v[45] - v[21] > v[24] - v[0] ? "hands apart" : "hands together"
+        }
+        guard v.count == 24 else { return "" }
+        let (x, y, turn) = (v[21], v[22], v[23])
+        if abs(turn) >= 0.5 * hypot(x, y) { return turn < 0 ? "twist left" : "twist right" }
+        if abs(x) > abs(y) { return x > 0 ? "swipe left" : "swipe right" }
+        return y > 0 ? "swipe up" : "swipe down"
+    }
+
+    /// What most of a motion's samples are, once that is clear (3 or more,
+    /// over half agreeing); nil before.
+    static func majority(_ samples: [[Double]]) -> String? {
+        let counts = Dictionary(grouping: samples.map(label), by: { $0 }).mapValues(\.count)
+        guard samples.count >= 3, let top = counts.max(by: { $0.value < $1.value }), top.value * 2 > samples.count else { return nil }
+        return top.key
     }
 
     /// A stroke as numbers: each hand's path at 8 even steps, from where the
@@ -3396,6 +3430,14 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         // opposite motion) and anything after it is never sampled.
         if let teach {
             settingsLock.lock()
+            // A wind-up (turning the other way first) is a stroke too: once the
+            // motion's direction is clear, refuse one that goes against it and
+            // keep listening for the real one.
+            if let usual = MotionStroke.majority(motions.samples[teach] ?? []), MotionStroke.label(vector) != usual {
+                settingsLock.unlock()
+                track.strokeQuietUntil = now
+                return "Teaching \(gestureTitle(teach)): that was a \(MotionStroke.label(vector)), the others are a \(usual) - do it again."
+            }
             motions.samples[teach, default: []].append(vector)
             motions.samples[teach] = Array(motions.samples[teach]!.suffix(motionLimit))
             let count = motions.samples[teach]!.count
