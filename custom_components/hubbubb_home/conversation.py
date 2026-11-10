@@ -28,7 +28,7 @@ from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.intent import IntentResponse, IntentResponseType
 
 from .companion import CompanionError
-from .grounding import same_request
+from .grounding import leaked_tool_call, same_request
 from .const import (
     CONF_ACK,
     CONF_ANNOUNCE,
@@ -383,17 +383,37 @@ class FrontDoorConversationEntity(conversation.ConversationEntity):
             return conversation.ConversationResult(
                 response=response, conversation_id=chat_log.conversation_id
             ), False
-        result = await conversation.async_converse(
-            hass=self.hass,
-            text=user_input.text,
-            conversation_id=self._brain_ids.get(cid),
-            context=user_input.context,
-            language=user_input.language,
-            agent_id=self._brain,
-            device_id=user_input.device_id,
-            satellite_id=user_input.satellite_id,
-            extra_system_prompt=user_input.extra_system_prompt,
-        )
+        async def converse(text, brain_cid):
+            return await conversation.async_converse(
+                hass=self.hass,
+                text=text,
+                conversation_id=brain_cid,
+                context=user_input.context,
+                language=user_input.language,
+                agent_id=self._brain,
+                device_id=user_input.device_id,
+                satellite_id=user_input.satellite_id,
+                extra_system_prompt=user_input.extra_system_prompt,
+            )
+
+        result = await converse(user_input.text, self._brain_ids.get(cid))
+        speech = result.response.speech.get("plain", {}).get("speech", "")
+        if leaked_tool_call(speech):
+            # The brain wrote its tool call as text, so nothing ran. Once more,
+            # told so; if it does it again, never read the syntax aloud.
+            _LOGGER.warning("brain wrote a tool call as text: %s", speech)
+            result = await converse(
+                "You wrote a tool call as text instead of calling the tool. "
+                "Call it properly now and answer from its result: "
+                + user_input.text,
+                result.conversation_id,
+            )
+            if leaked_tool_call(
+                result.response.speech.get("plain", {}).get("speech", "")
+            ):
+                result.response.async_set_speech(
+                    "Sorry sir, I fumbled that. Ask me again and I'll get it."
+                )
         self._brain_ids[cid] = result.conversation_id
         while len(self._brain_ids) > 50:
             self._brain_ids.pop(next(iter(self._brain_ids)))
