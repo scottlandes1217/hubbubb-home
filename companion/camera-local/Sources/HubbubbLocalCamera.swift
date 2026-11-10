@@ -221,6 +221,11 @@ private struct RoomMap {
         let turn = (0...5).map { [H(0, 0, remainder(2.6 + Double($0) * 0.3, 2 * .pi))] }
         let twist = stroke([[H(0, 0, 2.6)]] + turn + Array(repeating: turn.last!, count: 3))
         precondition(twist.map { $0[0].last!.z - $0[0].first!.z } ?? 0 > 1.4, "a twist in place is a stroke, unwrapped")
+        let end = [H(0.1, 0, 3.0)]
+        precondition(MotionStroke.holding([H(0.2, 0.1, 3.1)], at: end, within: 0.5), "a twist kept turned is held")
+        precondition(MotionStroke.holding([H(0.2, 0.1, 3.1 - 2 * .pi)], at: end, within: 0.5), "even when the angle wraps after a lost frame")
+        precondition(!MotionStroke.holding([H(0.1, 0, 2.0)], at: end, within: 0.5), "turned back is not held")
+        precondition(!MotionStroke.holding([], at: end, within: 0.5), "a dropped hand is not held")
         let open = (0...4).map { [H(-Double($0) * 0.6, 0, 0), H(Double($0) * 0.6, 0, 0)] }
         let opened = stroke([[H(), H()]] + open + Array(repeating: open.last!, count: 3))
         precondition(opened?.count == 2, "two hands opening is a two-hand stroke")
@@ -783,6 +788,17 @@ private struct MotionStroke {
     static let turnScale = 1.0
 
     static func distance(_ a: Hand, _ b: Hand) -> Double { ((a - b) * (a - b)).sum().squareRoot() }
+
+    /// Whether hands are still where a stroke ended - holding the motion's
+    /// last position, as a held knob twist does. Turns compare round the
+    /// circle: a dropped frame restarts the unwrapping.
+    static func holding(_ here: [Hand], at end: [Hand], within: Double) -> Bool {
+        guard !here.isEmpty, here.count == end.count else { return false }
+        let lap = 2 * Double.pi * turnScale
+        return zip(here, end).allSatisfy { h, e in
+            distance(Hand(h.x, h.y, e.z + remainder(h.z - e.z, lap)), e) < within
+        }
+    }
 
     /// One frame's hands (left to right in the picture), or none - each a
     /// wrist and the raw turn angle, which is unwrapped here so a turn past
@@ -1643,6 +1659,8 @@ private struct Track {
     var stroke = MotionStroke()
     // After a motion fires (or is sampled), the hand coming back is not another.
     var strokeQuietUntil = Date.distantPast
+    // A fired motion still held at its end position: repeats while it stays.
+    var heldMotion: (id: String, at: [MotionStroke.Hand], repeated: Date, seen: Date)?
 
     /// Where to point the camera: the face, else the top of the body box.
     var aim: CGRect {
@@ -3317,8 +3335,35 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             return .init(Double(wrist.x), Double(wrist.y), Double(turn))
         }.sorted { $0.x < $1.x }
         let travel = UserDefaults.standard.object(forKey: "motionTravel") as? Double ?? 1.2
-        guard let paths = track.stroke.add(t: now.timeIntervalSinceReferenceDate, hands: wrists, travel: travel),
-              now >= track.strokeQuietUntil else {
+        let stroke = track.stroke.add(t: now.timeIntervalSinceReferenceDate, hands: wrists, travel: travel)
+        // Held at the end of a fired motion (a knob kept turned): report it
+        // again every repeat interval, as a held shape does, so "repeat while
+        // held" keeps stepping the volume. Moving or dropping the hand ends it,
+        // and the hand coming back stays quiet. Calibration knob `motionHold`:
+        // how far (face heights) the hand may drift and still be holding.
+        if var held = track.heldMotion {
+            let drift = UserDefaults.standard.object(forKey: "motionHold") as? Double ?? 0.5
+            let here = track.stroke.frames.last?.hands ?? []
+            // Only drift counts, not the stroke's own idea of moving: a still
+            // hand's turn jitters, and nothing within `drift` can be a stroke.
+            if MotionStroke.holding(here, at: held.at, within: drift) {
+                held.seen = now
+                if now.timeIntervalSince(held.repeated) >= volumeRepeatInterval {
+                    fired.append((held.id, track.name, true))
+                    held.repeated = now
+                    track.lastSeen = now
+                }
+                track.heldMotion = held
+                return "\(gestureTitle(held.id)) held. Drop your hand to stop."
+            }
+            // One lost frame is not a dropped hand.
+            if wrists.isEmpty, now.timeIntervalSince(held.seen) < 0.4 { return "\(gestureTitle(held.id)) held. Drop your hand to stop." }
+            track.heldMotion = nil
+            track.stroke = MotionStroke()
+            track.strokeQuietUntil = now.addingTimeInterval(1.0)
+            return nil
+        }
+        guard let paths = stroke, now >= track.strokeQuietUntil else {
             // While teaching a motion, still gestures stay quiet.
             guard let teach else { return nil }
             if track.stroke.moving { return "Teaching \(gestureTitle(teach)): watching…" }
@@ -3350,6 +3395,9 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         settingsLock.unlock()
         guard let match else { return nil }
         fired.append((match, track.name, false))
+        // The first repeat waits a little longer than the next ones, so a
+        // twist that only pauses before dropping steps once, not twice.
+        track.heldMotion = (match, paths.map { $0.last! }, now.addingTimeInterval(0.3), now)
         track.lastSeen = now
         track.votes = GestureVotes(lastVolumeRepeat: track.votes.lastVolumeRepeat)
         return "\(gestureTitle(match)) recognized. Running its assigned action."
