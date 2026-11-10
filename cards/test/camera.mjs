@@ -1,6 +1,6 @@
 /* node cards/test/camera.mjs — the camera panel's pure parts. */
 import assert from "node:assert/strict";
-import { KNOBS, ago, changed, customGestureId, gestureCatalog, gestureForm, summarizeActions } from "../src/hubbubb-camera.js";
+import { KNOBS, ago, changed, customGestureId, gestureCatalog, gestureForm, motionLabel, oddSamples, summarizeActions } from "../src/hubbubb-camera.js";
 
 assert.equal(summarizeActions([]), "Does nothing yet");
 assert.equal(summarizeActions(undefined), "Does nothing yet");
@@ -47,3 +47,15 @@ assert.deepEqual(jarvisConfig(jarvisForm(stored)), stored);
 // Defaults: moving on, lights off, no colours sent until chosen.
 assert.deepEqual(jarvisConfig(jarvisForm({})), { move: true, satellites: [], strength: 0.6, lights: false, light_entities: [], brightness: 80, pause_while: null });
 console.log("jarvis form ok");
+
+// Motion samples in words, from the person's side; the odd one out flagged.
+const step = (x, y, z) => [0, 0, 0, ...Array(18).fill(0), x, y, z];
+const left = step(0.2, 0.3, -0.9), right = step(0, 0, 1);
+assert.equal(motionLabel(left), "twist left");
+assert.equal(motionLabel(right), "twist right");
+assert.equal(motionLabel(step(-1, 0.1, 0)), "swipe right");
+assert.deepEqual(oddSamples([left, right, left, right, left]), [false, true, false, true, false]);
+assert.deepEqual(oddSamples([left, right]), [false, false]);
+const apart = [-0.1, 0, 0, ...Array(18).fill(0), -1, 0, 0, 0.1, 0, 0, ...Array(18).fill(0), 1, 0, 0];
+assert.equal(motionLabel(apart), "hands apart");
+console.log("motion samples ok");

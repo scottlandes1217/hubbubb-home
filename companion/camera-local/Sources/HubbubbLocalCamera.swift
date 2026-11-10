@@ -1255,6 +1255,9 @@ private final class CameraService {
             }
             processor.beginTeaching(gesture, motion: body["motion"] as? Bool == true && gesture.hasPrefix("custom_"))
             return ok(["ok": true])
+        case ("POST", "/gesture_forget") where body["sample"] is NSNumber:
+            let index = (body["sample"] as! NSNumber).intValue
+            return ok(["ok": processor?.forgetMotionSample(body["gesture"] as? String ?? "", at: index) ?? false])
         case ("POST", "/gesture_forget"):
             return ok(["ok": processor?.forgetTeaching(body["gesture"] as? String ?? "") ?? false])
         case ("POST", "/enroll"):
@@ -3165,7 +3168,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     private var teachSamples: [[Double]] = []
     private let teachTarget = 25
     private var motions = MotionTemplates.load()
-    private let motionTarget = 5
+    private let motionLimit = 12  // newest kept; a motion works from its first
     // Vision's joint keys -> the names HandShape uses.
     private static let jointNames: [String: String] = [
         "VNHLKWRI": "wrist", "VNHLKTTIP": "thumbTip", "VNHLKTIP": "thumbIP", "VNHLKTMP": "thumbMP", "VNHLKTCMC": "thumbCMC",
@@ -3263,23 +3266,20 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         // swipe (which is itself the opposite swipe); a faster second swipe waits.
         track.strokeQuietUntil = now.addingTimeInterval(1.0)
         let vector = MotionStroke.vector(paths)
+        // One stroke per teach, then stop: the hand coming back (itself the
+        // opposite motion) and anything after it is never sampled.
         if let teach {
             settingsLock.lock()
-            teachSamples.append(vector)
-            let count = teachSamples.count
-            let done = count >= motionTarget
-            if done {
-                motions.samples[teach] = teachSamples
-                teaching = nil
-                teachingMotion = false
-                teachSamples = []
-            }
+            motions.samples[teach, default: []].append(vector)
+            motions.samples[teach] = Array(motions.samples[teach]!.suffix(motionLimit))
+            let count = motions.samples[teach]!.count
+            teaching = nil
+            teachingMotion = false
             let snapshot = motions
             settingsLock.unlock()
-            guard done else { return "Teaching \(gestureTitle(teach)): \(count)/\(motionTarget). Drop your hand, then do it again." }
             try? snapshot.save()
-            note("Hubbubb camera: taught motion %@ (%d samples, %d hands)", teach, count, paths.count)
-            return "Learned \(gestureTitle(teach))."
+            note("Hubbubb camera: taught motion %@ (sample %d, %d hands)", teach, count, paths.count)
+            return "Got it - \(gestureTitle(teach)) has \(count) sample\(count == 1 ? "" : "s")."
         }
         let limit = UserDefaults.standard.object(forKey: "motionMatch") as? Double ?? 0.35
         settingsLock.lock()
@@ -3311,6 +3311,18 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         settingsLock.unlock()
     }
 
+    /// Drop one sample of a taught motion; the last one forgets the motion.
+    func forgetMotionSample(_ gesture: String, at index: Int) -> Bool {
+        settingsLock.lock()
+        guard var taught = motions.samples[gesture], taught.indices.contains(index) else { settingsLock.unlock(); return false }
+        taught.remove(at: index)
+        motions.samples[gesture] = taught.isEmpty ? nil : taught
+        let snapshot = motions
+        settingsLock.unlock()
+        try? snapshot.save()
+        return true
+    }
+
     func forgetTeaching(_ gesture: String) -> Bool {
         settingsLock.lock()
         let shape = templates.samples.removeValue(forKey: gesture) != nil
@@ -3329,8 +3341,9 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         return [
             "taught": templates.samples.mapValues(\.count).merging(motions.samples.mapValues(\.count)) { a, _ in a },
             "motions": Array(motions.samples.keys),
+            "motion_samples": motions.samples,
             "teaching": teaching.map { ["gesture": $0, "samples": teachSamples.count, "motion": teachingMotion,
-                                        "target": teachingMotion ? motionTarget : teachTarget] } ?? NSNull(),
+                                        "target": teachingMotion ? 1 : teachTarget] } ?? NSNull(),
         ]
     }
 
