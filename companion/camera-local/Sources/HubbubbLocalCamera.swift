@@ -1220,16 +1220,15 @@ private final class CameraService {
     }
 
     /// Each analysed frame: remember the status line, and send the annotated
-    /// preview to anyone watching, at most ~8 frames a second, 1920 px wide
-    /// (960 looked blocky at panel size; ~3x the bytes, fine on the LAN).
+    /// preview to anyone watching, at most ~8 frames a second, 960 px wide.
     private func preview(_ image: CGImage?, _ message: String) {
         setStatus(message)
         guard let image, let server, server.watching, Date().timeIntervalSince(lastFrameSent) > 0.12 else { return }
         lastFrameSent = Date()
-        let scale = min(1, 1920 / CGFloat(image.width))
+        let scale = min(1, 960 / CGFloat(image.width))
         let small = CIImage(cgImage: image).transformed(by: CGAffineTransform(scaleX: scale, y: scale))
         if let jpeg = jpegContext.jpegRepresentation(of: small, colorSpace: CGColorSpaceCreateDeviceRGB(),
-                                                     options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.8]) {
+                                                     options: [kCGImageDestinationLossyCompressionQuality as CIImageRepresentationOption: 0.7]) {
             server.pushFrame(jpeg)
         }
     }
