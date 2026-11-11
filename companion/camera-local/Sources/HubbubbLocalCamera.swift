@@ -105,18 +105,32 @@ private struct RoomMap {
     func stops(reach: Float) -> [(pan: Float, tilt: Float)]? {
         let trusted = self.trusted
         guard bins.values.reduce(0, { $0 + $1.count }) >= Self.needed, !trusted.isEmpty else { return nil }
+        return Self.cover(trusted.keys.sorted(), reach: reach, never: never) { group in
+            group.reduce(Float(0)) { $0 + trusted[$1]!.tiltSum } / Float(group.reduce(0) { $0 + trusted[$1]!.count })
+        }
+    }
+
+    /// Stops over everywhere the camera can usefully look, `limit` degrees
+    /// either side of straight ahead, skipping never-look spots: how the room
+    /// gets learned in the first place, and re-checked now and then after.
+    func everywhere(reach: Float, limit: Float, tilt: Float) -> [(pan: Float, tilt: Float)] {
+        let bins = (Int((-limit / Self.binDegrees).rounded(.down))..<Int((limit / Self.binDegrees).rounded(.up))).filter { !never.contains($0) }
+        return Self.cover(bins, reach: reach, never: never) { _ in tilt }
+    }
+
+    /// Stops `reach` degrees wide laid over sorted bins, left to right; a
+    /// never-look spot ends one, so no stop is aimed across it.
+    static func cover(_ bins: [Int], reach: Float, never: Set<Int> = [], tilt: ([Int]) -> Float) -> [(pan: Float, tilt: Float)] {
         var stops: [(pan: Float, tilt: Float)] = []
         var group: [Int] = []
         func close() {
             guard let first = group.first, let last = group.last else { return }
-            let low = Float(first) * Self.binDegrees, high = Float(last + 1) * Self.binDegrees
-            let count = group.reduce(0) { $0 + trusted[$1]!.count }
-            let tilt = group.reduce(Float(0)) { $0 + trusted[$1]!.tiltSum } / Float(count)
-            stops.append(((low + high) / 2, tilt))
+            stops.append(((Float(first) + Float(last + 1)) * binDegrees / 2, tilt(group)))
             group = []
         }
-        for bin in trusted.keys.sorted() {
-            if let first = group.first, Float(bin + 1 - first) * Self.binDegrees > reach { close() }
+        for bin in bins {
+            if let first = group.first, Float(bin + 1 - first) * binDegrees > reach
+                || (group.last! + 1..<bin).contains(where: never.contains) { close() }
             group.append(bin)
         }
         close()
@@ -1191,6 +1205,9 @@ private enum Patrol {
         room.add(pan: 30, tilt: -8)
         precondition(room.stops(reach: 56)!.count == 1 && room.search!.high == -35, "never look here drops that spot, and new sightings there")
         precondition(room.neverSpans == [[25, 40]], "as one span")
+        let all = RoomMap().everywhere(reach: 56, limit: 100, tilt: -20)
+        precondition(all.count == 4 && all.first!.pan == -72.5 && all.last!.pan == 82.5 && all.allSatisfy { $0.tilt == -20 }, "learning sweeps the whole room: \(all)")
+        precondition(!room.everywhere(reach: 56, limit: 100, tilt: -20).contains { (25...40).contains($0.pan) }, "but never where it was told not to")
         precondition(index(step: 5, count: 1) == 0, "one stop stays put")
         precondition(PetLooks.overlap(CGRect(x: 0, y: 0, width: 1, height: 1), CGRect(x: 0, y: 0, width: 1, height: 1)) == 1, "a box is itself")
         precondition(PetLooks.overlap(CGRect(x: 0, y: 0, width: 0.2, height: 0.2), CGRect(x: 0.5, y: 0.5, width: 0.2, height: 0.2)) == 0, "apart is no overlap")
@@ -2007,6 +2024,9 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     private var latestAnimalBoxes: [[String: Any]] = []
     private var lastPetNote = Date.distantPast
     private var patrolStep = 0
+    private var patrolLap = 0
+    private var patrolAt: Float?
+    private var patrolMovedAt = Date.distantPast
     // Vision thread only: the last classify failed for unclear finger joints.
     private var fingersUnclear = false
     private let lookQueue = DispatchQueue(label: "com.hubbubb.camera.look")
@@ -2084,7 +2104,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         settingsLock.unlock()
         if !autoZoom { applyHardwareZoom(zoomFactor) }
         // Following just switched off: start watching the room from its first stop.
-        if switchedOff { ptzQueue.async { [weak self] in self?.patrolStep = 0 } }
+        if switchedOff { ptzQueue.async { [weak self] in self?.patrolStep = 0; self?.patrolAt = nil } }
     }
 
     func captureOutput(
@@ -2186,6 +2206,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 // instead of staring at one spot. Anyone mid-gesture holds it still.
                 faceLostSince = nil
                 patrol(now: now, busy: now < framingHoldUntil || tracks.contains { $0.heldMotion != nil || $0.stroke.moving })
+                learnRoom(from: visible, now: now)
             } else if visible.isEmpty {
                 // Jarvis's nodding pauses following; never let it keep the camera
                 // still while the person is out of view.
@@ -3183,6 +3204,25 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         }
     }
 
+    /// While watching the room, everyone in view is a sighting where they
+    /// are, worked out from the stop and their place in the picture - the
+    /// camera doesn't centre anyone, so frame()'s "centred, note the pan"
+    /// never runs. Not while the camera is still moving to a stop.
+    private func learnRoom(from visible: [Track], now: Date) {
+        guard !visible.isEmpty, now.timeIntervalSince(patrolMovedAt) > 2, now.timeIntervalSince(lastMapUpdate) > 2 else { return }
+        settingsLock.lock()
+        let position = knownPosition, zoom = currentZoomFactor
+        settingsLock.unlock()
+        guard let position else { return }
+        lastMapUpdate = now
+        let seen = visible.map { Pets.direction(of: $0.aim, pan: position.pan, tilt: position.tilt, zoom: zoom) }
+        ptzQueue.async { [weak self] in
+            guard let self else { return }
+            for d in seen { self.roomMap.add(pan: d.pan, tilt: d.tilt) }
+            self.roomMap.save()
+        }
+    }
+
     /// Following off: wide, stepping across the room's span (learned, else
     /// around the last sighting), `patrolSeconds` (8) at each stop, and staying
     /// while anyone is in the middle of a gesture. Auto-zoom off keeps the
@@ -3192,6 +3232,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         guard now >= patrolNextMove else { return }
         let dwell = UserDefaults.standard.object(forKey: "patrolSeconds") as? Double ?? 8
         patrolNextMove = now.addingTimeInterval(dwell)
+        patrolMovedAt = now
         settingsLock.lock()
         let autoZoom = autoZoomEnabled, zoom = currentZoomFactor
         settingsLock.unlock()
@@ -3200,13 +3241,23 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             guard let self else { return }
             // Where people have been seen; until that's learned, the span round
             // the last sighting.
+            // Where people have been seen. Until that's learned - and one lap in
+            // `exploreEvery` (10) after - everywhere it can usefully look,
+            // `learnDegrees` (100) either side of straight ahead, so the map
+            // learns places nobody has been seen yet.
+            let defaults = UserDefaults.standard
             let view = 70 / Float(autoZoom ? 1 : max(1, zoom))
-            let (low, high, tilt) = self.searchSpan()
-            let stops = self.roomMap.stops(reach: view * 0.8)
-                ?? Patrol.stops(low: low, high: high, view: view).map { ($0, tilt($0)) }
+            let room = self.roomMap.stops(reach: view * 0.8)
+            let every = max(2, defaults.object(forKey: "exploreEvery") as? Int ?? 10)
+            let stops = room.flatMap { self.patrolLap % every == every - 1 ? nil : $0 }
+                ?? self.roomMap.everywhere(reach: view * 0.8, limit: Float(defaults.object(forKey: "learnDegrees") as? Double ?? 100),
+                                           tilt: Float(defaults.object(forKey: "searchTilt") as? Double ?? -20))
+            guard !stops.isEmpty else { return }
             let stop = stops[Patrol.index(step: self.patrolStep, count: stops.count)]
             self.patrolStep += 1
-            guard stops.count > 1 || self.patrolStep == 1 else { return }  // one stop: aim once, then stay
+            if self.patrolStep >= stops.count { self.patrolStep = 0; self.patrolLap += 1 }
+            guard stop.pan != self.patrolAt else { return }  // one stop: aim once, then stay
+            self.patrolAt = stop.pan
             _ = hubbubbLinkCameraPointAt(stop.pan, stop.tilt)
         }
     }
