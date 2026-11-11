@@ -301,6 +301,14 @@ private struct RoomMap {
         precondition(MotionStroke.label(lefts[0]) == "twist left" && MotionStroke.majority(lefts) == "twist left", "three left twists make it a left twist")
         precondition(MotionStroke.label(MotionStroke.vector(twist!)) == "twist right", "and a right one isn't")
         precondition(MotionStroke.majority(Array(lefts.prefix(2))) == nil, "two samples aren't a majority yet")
+        // Twist left and straight back without a pause: the stroke is the twist.
+        let there = (0...4).map { [H(0, 0, -Double($0) * 0.15)] }  // 34 degrees left
+        let back = (1...5).map { [H(0, 0, -0.6 + Double($0) * 0.25)] }  // and back past the start
+        var both = MotionStroke(), strokes: [[[H]]] = []
+        for (i, hands) in ([[H()]] + there + back + Array(repeating: back.last!, count: 3)).enumerated() {
+            if let done = both.add(t: Double(i) * 0.1, hands: hands, travel: 1.2) { strokes.append(done) }
+        }
+        precondition(strokes.map { MotionStroke.label(MotionStroke.vector($0)) } == ["twist left", "twist right"], "twist and back is two strokes: \(strokes.count)")
         let wobble = (0...6).map { [H(0, 0, $0 % 2 == 0 ? 0 : 0.04)] }  // a still hand's turn jitter
         precondition(stroke(wobble) == nil, "jitter is no stroke")
         let end = [H(0.1, 0, 3.0)]
@@ -930,6 +938,16 @@ private struct MotionStroke {
 
     static func distance(_ a: Hand, _ b: Hand) -> Double { ((a - b) * (a - b)).sum().squareRoot() }
 
+    /// Whether the hand has started back the way it came: the stroke has gone
+    /// three quarters of a whole one (turned, or moved) and this frame goes
+    /// against it by more than jitter.
+    static func reversed(first: Hand, last: Hand, now: Hand, travel: Double) -> Bool {
+        let turned = (last.z - first.z) / turnScale, turning = (now.z - last.z) / turnScale
+        if abs(turned) * 180 / .pi >= turnTravel * 0.75, turned * turning < 0, abs(turning) > 0.08 { return true }
+        let moved = (last.x - first.x, last.y - first.y), moving = (now.x - last.x, now.y - last.y)
+        return hypot(moved.0, moved.1) >= travel * 0.75 && moved.0 * moving.0 + moved.1 * moving.1 < 0 && hypot(moving.0, moving.1) > 0.1
+    }
+
     /// Whether hands are still where a stroke ended - holding the motion's
     /// last position, as a held knob twist does. Turns compare round the
     /// circle: a dropped frame restarts the unwrapping.
@@ -965,6 +983,15 @@ private struct MotionStroke {
         // Two hands meeting look like one: only like-for-like frames compare.
         let speed = hands.count == last.hands.count
             ? zip(hands, last.hands).map { Self.step($0, $1) }.max()! / dt : Self.speed
+        // Turning back ends the stroke: a twist and the twist back (or a swipe
+        // and the hand coming back), done without a pause, are two strokes -
+        // as one, the stroke ended where it started and read as the opposite.
+        if moving, let first = frames.first, hands.count == last.hands.count, hands.count == first.hands.count,
+           Self.reversed(first: first.hands[0], last: last.hands[0], now: hands[0], travel: travel) {
+            let done = finish(travel: travel)
+            self = MotionStroke(frames: [last, (t, hands)], moving: true, miss: done.miss)
+            return done.paths
+        }
         if speed >= Self.speed {
             if !moving { frames = [last]; miss = nil }  // the stroke starts where the hand rested
             moving = true
