@@ -3735,6 +3735,9 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     private var templates = GestureTemplates.load()
     private var teaching: String?
     private var teachingMotion = false
+    // A motion teach records only after the hand held still at its start.
+    private var teachArmedAt: Date?
+    private var teachStillSince: Date?
     private var teachSamples: [[Double]] = []
     private let teachTarget = 25
     private var motions = MotionTemplates.load()
@@ -3852,9 +3855,28 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             track.strokeQuietUntil = now.addingTimeInterval(1.0)
             return nil
         }
-        guard let paths = stroke, now >= track.strokeQuietUntil else {
+        // Teaching: only what comes after the hand has held still where the
+        // motion starts counts - raising it into place and winding up (a knob
+        // twist starts by turning the other way) come before, and were
+        // getting recorded as the motion.
+        if let teach, teachArmedAt == nil {
+            if wrists.isEmpty || track.stroke.moving { teachStillSince = nil } else if teachStillSince == nil { teachStillSince = now }
+            if let since = teachStillSince, now.timeIntervalSince(since) >= 0.8 {
+                teachArmedAt = now
+                track.stroke = MotionStroke(frames: track.stroke.frames)
+            } else {
+                let why = track.stroke.miss.map { "that one didn't count - \($0). " } ?? ""
+                return "Teaching \(gestureTitle(teach)): \(why)put your hand where the motion starts and hold it still…"
+            }
+        }
+        guard let paths = stroke, now >= track.strokeQuietUntil, teach == nil || (teachArmedAt.map { now.timeIntervalSince($0) > 0.1 } ?? false) else {
             // While teaching a motion, still gestures stay quiet.
             guard let teach else { return nil }
+            if teachArmedAt != nil, !track.stroke.moving {
+                // A try that didn't count: hold still at the start again first.
+                if track.stroke.miss != nil { teachArmedAt = nil; teachStillSince = nil }
+                else { return "Teaching \(gestureTitle(teach)): go - do it once." }
+            }
             if track.stroke.moving { return "Teaching \(gestureTitle(teach)): watching…" }
             if let miss = track.stroke.miss { return "Teaching \(gestureTitle(teach)): that one didn't count - \(miss)." }
             return "Teaching \(gestureTitle(teach)): do the motion, then drop your hand."
@@ -3873,13 +3895,16 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             if let usual = MotionStroke.majority(motions.samples[teach] ?? []), MotionStroke.label(vector) != usual {
                 settingsLock.unlock()
                 track.strokeQuietUntil = now
-                return "Teaching \(gestureTitle(teach)): that was a \(MotionStroke.label(vector)), the others are a \(usual) - do it again."
+                teachArmedAt = nil
+                teachStillSince = nil
+                return "Teaching \(gestureTitle(teach)): that was a \(MotionStroke.label(vector)), the others are a \(usual) - hold still at the start and do it again."
             }
             motions.samples[teach, default: []].append(vector)
             motions.samples[teach] = Array(motions.samples[teach]!.suffix(motionLimit))
             let count = motions.samples[teach]!.count
             teaching = nil
             teachingMotion = false
+            teachArmedAt = nil
             let snapshot = motions
             settingsLock.unlock()
             try? snapshot.save()
@@ -3908,6 +3933,8 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         teaching = gesture
         teachingMotion = motion
         teachSamples = []
+        teachArmedAt = nil
+        teachStillSince = nil
         settingsLock.unlock()
     }
 

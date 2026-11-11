@@ -663,7 +663,7 @@ class HubbubbCamera extends LitElement {
             ${now.motion ? nothing : html`<div class="progress"><div style=${`width:${Math.round((100 * now.samples) / now.target)}%`}></div></div>`}
             <p class="muted">${this._state?.status || ""}</p>
             <p class="muted small">${now.motion
-              ? html`Look at the camera and do ${c.title.toLowerCase()} once, the way you'll do it for real, then drop your hand. It records just that one.`
+              ? html`Look at the camera, put your hand where ${c.title.toLowerCase()} starts and hold it still until it says <b>go</b>, then do it once, the way you'll do it for real. Winding up beforehand doesn't count.`
               : html`Look at the camera, hold ${c.title.toLowerCase()} at chest height, and move it around a little — closer, further, tilted — so it learns your hand from every angle.`}</p>
             <button @click=${() => this._try(() => this._call("camera_gesture_teach", { gesture: c.id, cancel: true })).then(() => this._poll())}>Stop teaching</button>
           </div>

@@ -114,7 +114,7 @@ var It=Object.defineProperty,Gt=Object.defineProperties;var Wt=Object.getOwnProp
             <div class="name">Teaching ${t.title}…</div>
             ${s.motion?d:c`<div class="progress"><div style=${`width:${Math.round(100*s.samples/s.target)}%`}></div></div>`}
             <p class="muted">${((n=this._state)==null?void 0:n.status)||""}</p>
-            <p class="muted small">${s.motion?c`Look at the camera and do ${t.title.toLowerCase()} once, the way you'll do it for real, then drop your hand. It records just that one.`:c`Look at the camera, hold ${t.title.toLowerCase()} at chest height, and move it around a little — closer, further, tilted — so it learns your hand from every angle.`}</p>
+            <p class="muted small">${s.motion?c`Look at the camera, put your hand where ${t.title.toLowerCase()} starts and hold it still until it says <b>go</b>, then do it once, the way you'll do it for real. Winding up beforehand doesn't count.`:c`Look at the camera, hold ${t.title.toLowerCase()} at chest height, and move it around a little — closer, further, tilted — so it learns your hand from every angle.`}</p>
             <button @click=${()=>this._try(()=>this._call("camera_gesture_teach",{gesture:t.id,cancel:!0})).then(()=>this._poll())}>Stop teaching</button>
           </div>
         </div>
