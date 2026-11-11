@@ -68,9 +68,43 @@ private struct RoomMap {
         bins[bin] = (old.count + 1, old.tiltSum + tilt)
     }
 
+    /// The bins that are really part of the room: `perBin` sightings, and at
+    /// least `share` of the busiest bin's - after 20,000 sightings a handful at
+    /// the wall (a poster, the TV, a false detection) is not where people are.
+    var trusted: [Int: (count: Int, tiltSum: Float)] {
+        let busiest = bins.values.map(\.count).max() ?? 0
+        let floor = max(Self.perBin, Int((Float(busiest) * Self.share).rounded(.up)))
+        return bins.filter { $0.value.count >= floor }
+    }
+    static let share: Float = 0.02
+
+    /// Where to stop when watching the room at 1x: stops `reach` degrees wide
+    /// laid over the trusted bins only, left to right, each at the head height
+    /// of the bins it covers; nil until learned.
+    func stops(reach: Float) -> [(pan: Float, tilt: Float)]? {
+        let trusted = self.trusted
+        guard bins.values.reduce(0, { $0 + $1.count }) >= Self.needed, !trusted.isEmpty else { return nil }
+        var stops: [(pan: Float, tilt: Float)] = []
+        var group: [Int] = []
+        func close() {
+            guard let first = group.first, let last = group.last else { return }
+            let low = Float(first) * Self.binDegrees, high = Float(last + 1) * Self.binDegrees
+            let count = group.reduce(0) { $0 + trusted[$1]!.count }
+            let tilt = group.reduce(Float(0)) { $0 + trusted[$1]!.tiltSum } / Float(count)
+            stops.append(((low + high) / 2, tilt))
+            group = []
+        }
+        for bin in trusted.keys.sorted() {
+            if let first = group.first, Float(bin + 1 - first) * Self.binDegrees > reach { close() }
+            group.append(bin)
+        }
+        close()
+        return stops
+    }
+
     /// Pan span to sweep and the tilt to hold at a given pan, or nil until learned.
     var search: (low: Float, high: Float, tilt: (Float) -> Float)? {
-        let trusted = bins.filter { $0.value.count >= Self.perBin }
+        let trusted = self.trusted
         guard bins.values.reduce(0, { $0 + $1.count }) >= Self.needed,
               let low = trusted.keys.min(), let high = trusted.keys.max() else { return nil }
         return (Float(low) * Self.binDegrees, Float(high + 1) * Self.binDegrees, { pan in
@@ -1114,18 +1148,22 @@ private enum Patrol {
         return (0..<count).map { first + (last - first) * Float($0) / Float(count - 1) }
     }
 
-    /// The stop for the `step`th move: there and back, 0 1 2 1 0 1...
-    static func index(step: Int, count: Int) -> Int {
-        guard count > 1 else { return 0 }
-        let period = 2 * (count - 1), k = step % period
-        return k < count ? k : period - k
-    }
+    /// The stop for the `step`th move: left to right, then straight back to
+    /// the left - 0 1 2 0 1 2 - so every stop comes round as often.
+    static func index(step: Int, count: Int) -> Int { count > 1 ? step % count : 0 }
 
     static func selfTest() {
         precondition(stops(low: -20, high: 20) == [0], "a room that fits in one view is one stop")
         let wide = stops(low: -60, high: 60)
         precondition(wide.count == 3 && wide.first! == -32 && wide.last! == 32, "120 degrees is three overlapping stops")
-        precondition((0..<6).map { index(step: $0, count: 3) } == [0, 1, 2, 1, 0, 1], "there and back")
+        precondition((0..<6).map { index(step: $0, count: 3) } == [0, 1, 2, 0, 1, 2], "left to right, then from the left again")
+        var room = RoomMap()
+        for _ in 0..<1000 { room.add(pan: -40, tilt: 2); room.add(pan: 30, tilt: -8) }
+        for _ in 0..<5 { room.add(pan: 100, tilt: -10); room.add(pan: -110, tilt: -5) }  // strays at the walls
+        let stops = room.stops(reach: 56)!
+        precondition(stops.count == 2 && stops[0].pan == -37.5 && stops[1].pan == 32.5, "stops only where people are: \(stops)")
+        precondition(abs(stops[1].tilt + 8) < 0.01, "at the head height seen there")
+        precondition(room.search!.low == -40 && room.search!.high == 35, "the search skips the strays too")
         precondition(index(step: 5, count: 1) == 0, "one stop stays put")
         precondition(PetLooks.overlap(CGRect(x: 0, y: 0, width: 1, height: 1), CGRect(x: 0, y: 0, width: 1, height: 1)) == 1, "a box is itself")
         precondition(PetLooks.overlap(CGRect(x: 0, y: 0, width: 0.2, height: 0.2), CGRect(x: 0.5, y: 0.5, width: 0.2, height: 0.2)) == 0, "apart is no overlap")
@@ -3104,12 +3142,16 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         if autoZoom, zoom > 1.05 { applyHardwareZoom(1) }
         ptzQueue.async { [weak self] in
             guard let self else { return }
+            // Where people have been seen; until that's learned, the span round
+            // the last sighting.
+            let view = 70 / Float(autoZoom ? 1 : max(1, zoom))
             let (low, high, tilt) = self.searchSpan()
-            let stops = Patrol.stops(low: low, high: high, view: 70 / Float(autoZoom ? 1 : max(1, zoom)))
-            let pan = stops[Patrol.index(step: self.patrolStep, count: stops.count)]
+            let stops = self.roomMap.stops(reach: view * 0.8)
+                ?? Patrol.stops(low: low, high: high, view: view).map { ($0, tilt($0)) }
+            let stop = stops[Patrol.index(step: self.patrolStep, count: stops.count)]
             self.patrolStep += 1
             guard stops.count > 1 || self.patrolStep == 1 else { return }  // one stop: aim once, then stay
-            _ = hubbubbLinkCameraPointAt(pan, tilt(pan))
+            _ = hubbubbLinkCameraPointAt(stop.pan, stop.tilt)
         }
     }
 
