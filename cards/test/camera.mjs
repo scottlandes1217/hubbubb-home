@@ -1,6 +1,6 @@
 /* node cards/test/camera.mjs — the camera panel's pure parts. */
 import assert from "node:assert/strict";
-import { KNOBS, ago, changed, customGestureId, gestureCatalog, gestureForm, motionLabel, oddSamples, summarizeActions } from "../src/hubbubb-camera.js";
+import { KNOBS, ago, changed, customGestureId, gestureCatalog, gestureForm, motionLabel, oddSamples, summarizeActions, PICTURE, lightNote } from "../src/hubbubb-camera.js";
 
 assert.equal(summarizeActions([]), "Does nothing yet");
 assert.equal(summarizeActions(undefined), "Does nothing yet");
@@ -59,3 +59,10 @@ assert.deepEqual(oddSamples([left, right]), [false, false]);
 const apart = [-0.1, 0, 0, ...Array(18).fill(0), -1, 0, 0, 0.1, 0, 0, ...Array(18).fill(0), 1, 0, 0];
 assert.equal(motionLabel(apart), "hands apart");
 console.log("motion samples ok");
+
+// Picture controls: each has a label and helper; ISO reads as light.
+for (const p of PICTURE) assert.equal(p.length, 3);
+assert.match(lightNote(3557), /too dark/);
+assert.match(lightNote(400), /plenty/);
+assert.equal(lightNote(0), "");
+console.log("picture ok");

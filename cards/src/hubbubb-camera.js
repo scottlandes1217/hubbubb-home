@@ -40,6 +40,20 @@ export const KNOBS = [
   ["searchTilt", "Search tilt", "Degrees up (+) or down (−) to search at, until the room is learned.", 1],
 ];
 
+/* The camera's own picture controls: [name, label, helper]. */
+export const PICTURE = [
+  ["exposure", "Exposure", "Brighter or darker, in stops. In a dim room brighter also means grainier."],
+  ["brightness", "Brightness", "Lifts or lowers the whole picture after exposure."],
+  ["contrast", "Contrast", "Difference between light and dark."],
+  ["sharpness", "Sharpness", "Edge sharpening. Higher looks crisper but sharpens grain too."],
+  ["white_balance", "Colour temperature", "Kelvin: lower is cooler (bluer), higher warmer. Moving it turns automatic white balance off."],
+];
+
+/* What ISO says about the light: the camera's auto-exposure pick. */
+export const lightNote = (iso) =>
+  !iso ? "" : iso >= 2500 ? `ISO ${iso}: the room is too dark for this camera - more light on faces will help far more than any slider.`
+    : iso >= 1000 ? `ISO ${iso}: dim. More light would make it noticeably cleaner.` : `ISO ${iso}: plenty of light.`;
+
 /* A gesture you name yourself -> its id: "Peace sign!" -> "custom_peace_sign". */
 export const customGestureId = (name) => {
   const slug = (name || "").toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 40).replace(/_+$/, "");
@@ -175,6 +189,7 @@ class HubbubbCamera extends LitElement {
     _confirm: { state: true },
     _ask: { state: true },
     _teach: { state: true },
+    _picture: { state: true },
     _formReady: { state: true },
     _viewKey: { state: true },
     _jarvis: { state: true },
@@ -267,6 +282,7 @@ class HubbubbCamera extends LitElement {
       this._state = { connected: false, status: e?.message || String(e) };
     }
     if (this._tab === "jarvis") this._loadJarvis(false);
+    if (this._tab === "tuning" && !this._picture) this._loadPicture();
     if (this._tab === "people") this._pets = await this._call("camera_pets").catch(() => this._pets);
     const fast = ["live", "people", "jarvis"].includes(this._tab) || this._state?.enrolling || this._state?.gestures?.teaching;
     this._timer = setTimeout(() => this._poll(), fast ? 1500 : 6000);
@@ -305,6 +321,7 @@ class HubbubbCamera extends LitElement {
     try { localStorage.setItem("hubbubb-camera-tab", tab); } catch {}
     if (tab === "things" && !this._items) this._loadItems();
     if (tab === "jarvis") this._loadJarvis(true);
+    if (tab === "tuning") this._loadPicture();
     this._poll();
   }
 
@@ -1021,6 +1038,10 @@ class HubbubbCamera extends LitElement {
             : html`<div class="empty">Waiting for the camera…</div>`}
         </section>
         <section class="card">
+          <h3>Picture</h3>
+          ${this._renderPicture()}
+        </section>
+        <section class="card">
           <h3>Room map</h3>
           ${room.learned
             ? html`<p>The camera has learned where people spend time: <b>${Math.round(room.low)}° to ${Math.round(room.high)}°</b> of pan, from ${room.sightings} sightings. Searches stay inside that span, skipping walls, corners and the back of the TV.</p>`
@@ -1032,6 +1053,43 @@ class HubbubbCamera extends LitElement {
         </section>
       </div>
     `;
+  }
+
+  async _loadPicture() {
+    this._picture = await this._call("camera_picture").catch(() => null);
+  }
+
+  _renderPicture() {
+    const pic = this._picture;
+    if (!pic) return html`<div class="empty">Waiting for the camera…</div>`;
+    const fields = PICTURE.filter(([k]) => pic[k] && pic[k].max > pic[k].min);
+    const data = Object.fromEntries(fields.map(([k]) => [k, pic[k].value]));
+    const auto = pic.white_balance_auto?.value === 1;
+    return html`
+      <p class="muted small">${lightNote(Math.round(pic.iso?.value || 0))}</p>
+      <ha-form
+        .hass=${this.hass}
+        .data=${data}
+        .schema=${fields.map(([k]) => ({ name: k, selector: { number: { min: pic[k].min, max: pic[k].max, step: pic[k].step, mode: "slider" } } }))}
+        .computeLabel=${(f) => PICTURE.find(([k]) => k === f.name)?.[1]}
+        .computeHelper=${(f) => PICTURE.find(([k]) => k === f.name)?.[2]}
+        @value-changed=${(e) => this._pictureChanged(e.detail.value, data)}
+      ></ha-form>
+      <div class="actions">
+        <button ?disabled=${this._busy || auto} @click=${() => this._setPicture({ white_balance_auto: 1 })}>${auto ? "White balance is automatic" : "Automatic white balance"}</button>
+        <button ?disabled=${this._busy} @click=${() => this._setPicture({ exposure: 0, brightness: 50, contrast: 50, sharpness: 50, white_balance_auto: 1 })}>Reset picture</button>
+      </div>`;
+  }
+
+  _pictureChanged(value, current) {
+    const changes = Object.fromEntries(Object.entries(value).filter(([k, v]) => v !== undefined && v !== current[k]));
+    clearTimeout(this._pictureTimer);
+    this._pictureTimer = setTimeout(() => Object.keys(changes).length && this._setPicture(changes), 400);
+  }
+
+  async _setPicture(changes) {
+    const res = await this._try(() => this._call("camera_picture_set", changes));
+    if (res) this._picture = res;
   }
 
   _knobs(value, current) {

@@ -307,6 +307,53 @@ private func hubbubbLinkCameraTakeControl() -> Int32
 private func hubbubbLinkCameraIdentity(_ buffer: UnsafeMutablePointer<CChar>, _ size: Int32) -> Int32
 @_silgen_name("HubbubbLinkCameraNudge")
 private func hubbubbLinkCameraNudge(_ pan: Float, _ tilt: Float) -> Int32
+@_silgen_name("HubbubbLinkCameraPictureGet")
+private func hubbubbLinkCameraPictureGet(_ name: UnsafePointer<CChar>, _ value: UnsafeMutablePointer<Double>, _ minimum: UnsafeMutablePointer<Double>,
+                                         _ maximum: UnsafeMutablePointer<Double>, _ step: UnsafeMutablePointer<Double>) -> Int32
+@_silgen_name("HubbubbLinkCameraPictureSet")
+private func hubbubbLinkCameraPictureSet(_ name: UnsafePointer<CChar>, _ value: Double) -> Int32
+
+/// The camera's own picture controls. What was set from Home Assistant is
+/// kept (UserDefaults "picture") and put back whenever the camera connects,
+/// since it forgets them when unplugged. iso is read only: auto-exposure's
+/// pick, which says how dark the room is.
+private enum Picture {
+    static let names = ["brightness", "contrast", "sharpness", "exposure", "white_balance_auto", "white_balance", "iso"]
+    static var saved: [String: Double] { UserDefaults.standard.dictionary(forKey: "picture") as? [String: Double] ?? [:] }
+
+    static func read() -> [String: Any] {
+        var out: [String: Any] = [:]
+        for name in names {
+            var value = 0.0, low = 0.0, high = 0.0, step = 1.0
+            guard hubbubbLinkCameraPictureGet(name, &value, &low, &high, &step) == 1 else { continue }
+            out[name] = ["value": value, "min": low, "max": high, "step": step]
+        }
+        return out
+    }
+
+    /// -> the names that took.
+    static func set(_ changes: [String: Double]) -> [String] {
+        var kept = saved, took: [String] = []
+        // Auto white balance first: a temperature switches it off.
+        for (name, value) in changes.sorted(by: { ($0.key == "white_balance_auto" ? 0 : 1) < ($1.key == "white_balance_auto" ? 0 : 1) }) where name != "iso" && names.contains(name) {
+            guard hubbubbLinkCameraPictureSet(name, value) == 1 else { continue }
+            took.append(name)
+            kept[name] = value
+            if name == "white_balance" { kept["white_balance_auto"] = 0 }
+            if name == "white_balance_auto", value > 0.5 { kept["white_balance"] = nil }
+        }
+        UserDefaults.standard.set(kept, forKey: "picture")
+        return took
+    }
+
+    static func restore() {
+        let kept = saved
+        guard !kept.isEmpty else { return }
+        note("Hubbubb camera: restoring picture settings %@ (took %@)", kept.description, set(kept).description)
+    }
+
+    static func forget() { UserDefaults.standard.removeObject(forKey: "picture") }
+}
 
 /// Things the user has shown the camera: what each looks like (a description
 /// and a cropped photo) and where it was last seen. The photo is handed to the
@@ -1167,6 +1214,7 @@ private final class CameraService {
             }
             var zoomMinimum = 0, zoomMaximum = 0, zoomStep = 1, currentZoom = 100
             let zoomSupported = hubbubbLinkCameraZoomInitialize(&zoomMinimum, &zoomMaximum, &zoomStep, &currentZoom) == 1
+            if zoomSupported { Picture.restore() }
             self.session.beginConfiguration()
             guard self.session.canAddInput(input) else {
                 self.session.commitConfiguration()
@@ -1334,6 +1382,16 @@ private final class CameraService {
             }
             processor.setMood(mood, strength: (body["strength"] as? NSNumber)?.doubleValue ?? 0.6)
             return ok(["ok": true])
+        case ("GET", "/picture"):
+            return ok(Picture.read())
+        case ("POST", "/picture"):
+            // {"sharpness": 40, ...}, or {"reset": true} to stop restoring them
+            // (the camera keeps what it has until unplugged or set again).
+            if body["reset"] as? Bool == true { Picture.forget(); return ok(Picture.read()) }
+            let changes = body.compactMapValues { ($0 as? NSNumber)?.doubleValue }
+            let took = Picture.set(changes)
+            guard !took.isEmpty || changes.isEmpty else { return bad("the camera refused \(changes.keys.sorted().joined(separator: ", "))") }
+            return ok(Picture.read())
         case ("GET", "/identity"):
             var buffer = [CChar](repeating: 0, count: 256)
             guard hubbubbLinkCameraIdentity(&buffer, 256) == 1 else { return bad("camera not connected") }

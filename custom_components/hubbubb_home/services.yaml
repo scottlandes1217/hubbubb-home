@@ -231,5 +231,7 @@ camera_focus:
 camera_pets:
 camera_pets_save:
 camera_pet_spot:
+camera_picture:
+camera_picture_set:
 camera_gesture_teach:
 camera_gesture_forget:

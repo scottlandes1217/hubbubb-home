@@ -155,3 +155,40 @@ extern "C" int HubbubbLinkCameraZoomSet(long value) {
     value = std::clamp(value, zoomRange.min, zoomRange.max);
     return cameraController->SetZoomAbsolute(value) ? 1 : 0;
 }
+
+// Picture controls, by name: brightness, contrast, sharpness, white_balance
+// (kelvin), white_balance_auto (0/1), exposure (EV, -3..+3) and iso (read
+// only, what auto-exposure picked). -> 1 when read, with the range when the
+// camera reports one (else min = max = 0).
+extern "C" int HubbubbLinkCameraPictureGet(const char *name, double *value, double *minimum, double *maximum, double *step) {
+    std::lock_guard<std::mutex> lock(cameraMutex);
+    if (!cameraController || !cameraExtendController || !name) return 0;
+    const std::string key(name);
+    CameraControlInfo info{};
+    bool ok = false;
+    *minimum = *maximum = 0; *step = 1;
+    if (key == "brightness") { int16_t v = 0; ok = cameraController->GetBrightnessValue(v) && cameraController->GetBrightnessRange(info); *value = v; }
+    else if (key == "contrast") { uint16_t v = 0; ok = cameraController->GetContrastValue(v) && cameraController->GetContrastRange(info); *value = v; }
+    else if (key == "sharpness") { uint16_t v = 0; ok = cameraController->GetSharpnessValue(v) && cameraController->GetSharpnessRange(info); *value = v; }
+    else if (key == "white_balance") { uint16_t v = 0; ok = cameraController->GetWhitebalanceTemperatureValue(v) && cameraController->GetWhitebalanceTemperatureRange(info); *value = v; }
+    else if (key == "white_balance_auto") { uint8_t m = 0; ok = cameraController->GetWhitebalanceTemperatureMode(m); *value = m; *maximum = 1; }
+    else if (key == "exposure") { float v = 0; ok = cameraExtendController->GetExposureCompensation(v); *value = v; *minimum = -3; *maximum = 3; *step = 0.3; }
+    else if (key == "iso") { uint16_t v = 0; ok = cameraExtendController->GetISOValue(v); *value = v; }
+    if (info.max > info.min) { *minimum = info.min; *maximum = info.max; *step = std::max(1L, info.step); }
+    return ok ? 1 : 0;
+}
+
+extern "C" int HubbubbLinkCameraPictureSet(const char *name, double value) {
+    std::lock_guard<std::mutex> lock(cameraMutex);
+    if (!cameraController || !cameraExtendController || !name) return 0;
+    const std::string key(name);
+    if (key == "brightness") return cameraController->SetBrightnessValue(static_cast<int16_t>(value)) ? 1 : 0;
+    if (key == "contrast") return cameraController->SetContrastValue(static_cast<uint16_t>(value)) ? 1 : 0;
+    if (key == "sharpness") return cameraController->SetSharpnessValue(static_cast<uint16_t>(value)) ? 1 : 0;
+    // A temperature only sticks with auto white balance off.
+    if (key == "white_balance") return cameraController->SetWhitebalanceTemperatureMode(0)
+        && cameraController->SetWhitebalanceTemperatureValue(static_cast<uint16_t>(value)) ? 1 : 0;
+    if (key == "white_balance_auto") return cameraController->SetWhitebalanceTemperatureMode(value > 0.5 ? 1 : 0) ? 1 : 0;
+    if (key == "exposure") return cameraExtendController->SetExposureCompensation(static_cast<float>(std::clamp(value, -3.0, 3.0))) ? 1 : 0;
+    return 0;
+}
