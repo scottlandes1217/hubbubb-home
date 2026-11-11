@@ -309,6 +309,16 @@ private struct RoomMap {
             if let done = both.add(t: Double(i) * 0.1, hands: hands, travel: 1.2) { strokes.append(done) }
         }
         precondition(strokes.map { MotionStroke.label(MotionStroke.vector($0)) } == ["twist left", "twist right"], "twist and back is two strokes: \(strokes.count)")
+        // Teaching: a slow twist left and straight back is the twist, done
+        // once it stops getting further.
+        var attempt = MotionTry(frames: [(0, [H()])], travel: 1.2)
+        for (i, z) in [-0.1, -0.2, -0.3, -0.45, -0.5, -0.3, 0.0, 0.3, 0.3, 0.3].enumerated() {
+            attempt.frames.append((Double(i + 1) * 0.2, [H(0.02, 0, z)]))
+        }
+        precondition(attempt.far.index == 5 && attempt.far.size > 1 && attempt.done(now: 2.0, dropped: false), "far point, and done")
+        precondition(MotionStroke.label(MotionStroke.vector(attempt.paths)) == "twist left", "a slow twist and back is a twist left")
+        let early = MotionTry(frames: Array(attempt.frames.prefix(4)), travel: 1.2)
+        precondition(!early.done(now: 0.7, dropped: false), "still going further: not done")
         let wobble = (0...6).map { [H(0, 0, $0 % 2 == 0 ? 0 : 0.04)] }  // a still hand's turn jitter
         precondition(stroke(wobble) == nil, "jitter is no stroke")
         let end = [H(0.1, 0, 3.0)]
@@ -913,8 +923,10 @@ private struct MotionStroke {
     var frames: [(t: TimeInterval, hands: [Hand])] = []
     var moving = false
     var stillFrames = 0
-    // Why the last stroke didn't count, kept until the next one starts.
+    // Why the last stroke didn't count, kept until the next one starts, and
+    // its paths anyway - teaching keeps a near miss for Stop to use.
     var miss: String?
+    var tried: [[Hand]]?
 
     // Calibration knobs: faster than `speed` face heights a second is moving;
     // a stroke is 0.15-1.8 s and travels at least `travel` face heights. A
@@ -975,8 +987,8 @@ private struct MotionStroke {
             }
         }
         guard let last = frames.last, !hands.isEmpty else {
-            let done = moving ? finish(travel: travel) : (paths: nil, miss: miss)
-            self = MotionStroke(frames: hands.isEmpty ? [] : [(t, hands)], miss: done.miss)
+            let done = moving ? finish(travel: travel) : (paths: nil, miss: miss, tried: tried)
+            self = MotionStroke(frames: hands.isEmpty ? [] : [(t, hands)], miss: done.miss, tried: done.tried)
             return done.paths
         }
         let dt = max(0.01, t - last.t)
@@ -989,7 +1001,7 @@ private struct MotionStroke {
         if moving, let first = frames.first, hands.count == last.hands.count, hands.count == first.hands.count,
            Self.reversed(first: first.hands[0], last: last.hands[0], now: hands[0], travel: travel) {
             let done = finish(travel: travel)
-            self = MotionStroke(frames: [last, (t, hands)], moving: true, miss: done.miss)
+            self = MotionStroke(frames: [last, (t, hands)], moving: true, miss: done.miss, tried: done.tried)
             return done.paths
         }
         if speed >= Self.speed {
@@ -1007,27 +1019,28 @@ private struct MotionStroke {
         stillFrames += 1
         guard stillFrames >= 2 else { return nil }
         let done = finish(travel: travel)
-        self = MotionStroke(frames: [(t, hands)], miss: done.miss)
+        self = MotionStroke(frames: [(t, hands)], miss: done.miss, tried: done.tried)
         return done.paths
     }
 
     /// The stroke's paths, or why it doesn't count.
-    private func finish(travel: Double) -> (paths: [[Hand]]?, miss: String?) {
+    private func finish(travel: Double) -> (paths: [[Hand]]?, miss: String?, tried: [[Hand]]?) {
         // The frames with the most hands in them carry the stroke.
         let count = frames.map(\.hands.count).max() ?? 0
         let kept = frames.filter { $0.hands.count == count }
-        guard kept.count >= 3, let first = kept.first, let last = kept.last, last.t - first.t >= 0.15 else {
-            return (nil, "too quick, or your hand was lost mid-way - a little slower")
-        }
-        guard last.t - first.t <= 1.8 else { return (nil, "too long - make it one quick movement") }
         let paths = (0..<count).map { h in kept.map { $0.hands[h] } }
+        let tried = kept.count >= 2 && count > 0 ? paths : nil
+        guard kept.count >= 3, let first = kept.first, let last = kept.last, last.t - first.t >= 0.15 else {
+            return (nil, "too quick, or your hand was lost mid-way - a little slower", tried)
+        }
+        guard last.t - first.t <= 1.8 else { return (nil, "too long - make it one quick movement", tried) }
         let moved = paths.map { hypot($0.last!.x - $0.first!.x, $0.last!.y - $0.first!.y) }.max() ?? 0
         let turned = paths.map { abs($0.last!.z - $0.first!.z) / Self.turnScale * 180 / .pi }.max() ?? 0
         guard moved >= travel || turned >= Self.turnTravel else {
             return (nil, String(format: "too small - turned %.0f of %.0f degrees, moved %.1f of %.1f face heights",
-                                turned, Self.turnTravel, moved, travel))
+                                turned, Self.turnTravel, moved, travel), tried)
         }
-        return (paths, nil)
+        return (paths, nil, paths)
     }
 
     /// A stroke vector (see `vector`) in words - twist left, swipe up, hands
@@ -1068,6 +1081,47 @@ private struct MotionStroke {
         }
         let size = max(0.01, steps.joined().map { Self.distance($0, Hand()) }.max() ?? 0)
         return steps.joined().flatMap { [$0.x / size, $0.y / size, $0.z / size] }
+    }
+}
+
+/// One try while teaching a motion: the hands from where they held still.
+private struct MotionTry {
+    typealias Hand = MotionStroke.Hand
+    var frames: [(t: TimeInterval, hands: [Hand])]
+    let travel: Double
+
+    /// How big a move is, 1 = a whole stroke: the wrist's travel against
+    /// `travel`, or the turn against `turnTravel`, whichever is more.
+    func size(_ a: Hand, from b: Hand) -> Double {
+        max(hypot(a.x - b.x, a.y - b.y) / travel, abs(a.z - b.z) / MotionStroke.turnScale * 180 / .pi / MotionStroke.turnTravel)
+    }
+
+    /// The frame furthest from the start, and how far.
+    var far: (index: Int, size: Double) {
+        let start = frames[0].hands
+        return frames.indices.map { i in (i, zip(frames[i].hands, start).map { size($0, from: $1) }.max() ?? 0) }
+            .max { $0.1 < $1.1 } ?? (0, 0)
+    }
+
+    /// Done once it went somewhere and has gone no further for half a
+    /// second, or the hand dropped.
+    func done(now: TimeInterval, dropped: Bool) -> Bool {
+        let far = self.far
+        guard far.size >= 0.3 else { return false }
+        return dropped || now - frames[far.index].t >= 0.5
+    }
+
+    /// Each hand's path from the start to the furthest point.
+    var paths: [[Hand]] {
+        let end = far.index
+        return (0..<frames[0].hands.count).map { h in frames[0...max(1, end)].map { $0.hands[h] } }
+    }
+
+    var shortfall: String {
+        let start = frames[0].hands[0], end = frames[far.index].hands[0]
+        return String(format: "too small - turned %.0f of %.0f degrees, moved %.1f of %.1f face heights",
+                      abs(end.z - start.z) / MotionStroke.turnScale * 180 / .pi, MotionStroke.turnTravel,
+                      hypot(end.x - start.x, end.y - start.y), travel)
     }
 }
 
@@ -1599,8 +1653,7 @@ private final class CameraService {
             let parts = String(cString: buffer).split(separator: "|", omittingEmptySubsequences: false).map(String.init)
             return ok(["serial": parts.first ?? "", "firmware": parts.count > 1 ? parts[1] : ""])
         case ("POST", "/gesture_teach") where body["cancel"] as? Bool == true:
-            processor?.stopTeaching()
-            return ok(["ok": true])
+            return ok(["ok": true, "kept": processor?.stopTeaching(keep: body["keep"] as? Bool != false) ?? false])
         case ("POST", "/gesture_teach"):
             guard let processor, let gesture = body["gesture"] as? String,
                   ["thumbs_up", "thumbs_down", "open_palm", "number_1", "number_2", "number_3"].contains(gesture)
@@ -3762,9 +3815,13 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     private var templates = GestureTemplates.load()
     private var teaching: String?
     private var teachingMotion = false
-    // A motion teach records only after the hand held still at its start.
-    private var teachArmedAt: Date?
-    private var teachStillSince: Date?
+    private var teachStill: (at: [MotionStroke.Hand], since: Date)?
+    // The try in progress (nil until the hand has held still), and why the
+    // last one didn't count. Vision thread.
+    private var teachTry: MotionTry?
+    private var teachMiss: String?
+    // The last try while teaching a motion, counted or not: Stop keeps it.
+    private var teachLastTry: [Double]?
     private var teachSamples: [[Double]] = []
     private let teachTarget = 25
     private var motions = MotionTemplates.load()
@@ -3882,62 +3939,12 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             track.strokeQuietUntil = now.addingTimeInterval(1.0)
             return nil
         }
-        // Teaching: only what comes after the hand has held still where the
-        // motion starts counts - raising it into place and winding up (a knob
-        // twist starts by turning the other way) come before, and were
-        // getting recorded as the motion.
-        if let teach, teachArmedAt == nil {
-            if wrists.isEmpty || track.stroke.moving { teachStillSince = nil } else if teachStillSince == nil { teachStillSince = now }
-            if let since = teachStillSince, now.timeIntervalSince(since) >= 0.8 {
-                teachArmedAt = now
-                track.stroke = MotionStroke(frames: track.stroke.frames)
-            } else {
-                let why = track.stroke.miss.map { "that one didn't count - \($0). " } ?? ""
-                return "Teaching \(gestureTitle(teach)): \(why)put your hand where the motion starts and hold it still…"
-            }
-        }
-        guard let paths = stroke, now >= track.strokeQuietUntil, teach == nil || (teachArmedAt.map { now.timeIntervalSince($0) > 0.1 } ?? false) else {
-            // While teaching a motion, still gestures stay quiet.
-            guard let teach else { return nil }
-            if teachArmedAt != nil, !track.stroke.moving {
-                // A try that didn't count: hold still at the start again first.
-                if track.stroke.miss != nil { teachArmedAt = nil; teachStillSince = nil }
-                else { return "Teaching \(gestureTitle(teach)): go - do it once." }
-            }
-            if track.stroke.moving { return "Teaching \(gestureTitle(teach)): watching…" }
-            if let miss = track.stroke.miss { return "Teaching \(gestureTitle(teach)): that one didn't count - \(miss)." }
-            return "Teaching \(gestureTitle(teach)): do the motion, then drop your hand."
-        }
+        if let teach { return teachMotion(teach, track: &track, here: track.stroke.frames.last?.hands ?? [], now: now, travel: travel) }
+        guard let paths = stroke, now >= track.strokeQuietUntil else { return nil }
         // ponytail: a fixed second's quiet hides the hand coming back after a
         // swipe (which is itself the opposite swipe); a faster second swipe waits.
         track.strokeQuietUntil = now.addingTimeInterval(1.0)
         let vector = MotionStroke.vector(paths)
-        // One stroke per teach, then stop: the hand coming back (itself the
-        // opposite motion) and anything after it is never sampled.
-        if let teach {
-            settingsLock.lock()
-            // A wind-up (turning the other way first) is a stroke too: once the
-            // motion's direction is clear, refuse one that goes against it and
-            // keep listening for the real one.
-            if let usual = MotionStroke.majority(motions.samples[teach] ?? []), MotionStroke.label(vector) != usual {
-                settingsLock.unlock()
-                track.strokeQuietUntil = now
-                teachArmedAt = nil
-                teachStillSince = nil
-                return "Teaching \(gestureTitle(teach)): that was a \(MotionStroke.label(vector)), the others are a \(usual) - hold still at the start and do it again."
-            }
-            motions.samples[teach, default: []].append(vector)
-            motions.samples[teach] = Array(motions.samples[teach]!.suffix(motionLimit))
-            let count = motions.samples[teach]!.count
-            teaching = nil
-            teachingMotion = false
-            teachArmedAt = nil
-            let snapshot = motions
-            settingsLock.unlock()
-            try? snapshot.save()
-            note("Hubbubb camera: taught motion %@ (sample %d, %d hands)", teach, count, paths.count)
-            return "Got it - \(gestureTitle(teach)) has \(count) sample\(count == 1 ? "" : "s")."
-        }
         let limit = UserDefaults.standard.object(forKey: "motionMatch") as? Double ?? 0.35
         settingsLock.lock()
         let match = motions.match(vector, within: limit)
@@ -3954,23 +3961,106 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
 
     // MARK: - Teaching gestures
 
+    /// One frame of teaching a motion. Raising the hand into place and winding
+    /// up (a knob twist starts by turning the other way) come first, so only
+    /// what follows the hand holding still at the start counts: from there,
+    /// the try runs to the point furthest from the start, and ends when the
+    /// hand has gone no further for half a second - settled, or on its way
+    /// back - or drops. Speed doesn't matter, and coming straight back can't
+    /// turn it into the opposite. -> the status line.
+    private func teachMotion(_ teach: String, track: inout Track, here: [MotionStroke.Hand], now: Date, travel: Double) -> String {
+        let title = gestureTitle(teach)
+        guard var attempt = teachTry else {
+            // Still means the hand stays put (calibration knob: 0.25 face
+            // heights, or radians of turn) - not the stroke's moving test,
+            // which a still hand's turn jitter trips.
+            if here.isEmpty { teachStill = nil }
+            else if let still = teachStill, MotionStroke.holding(here, at: still.at, within: 0.25) {}
+            else { teachStill = (here, now) }
+            if let still = teachStill, now.timeIntervalSince(still.since) >= 0.8 {
+                teachTry = MotionTry(frames: [(now.timeIntervalSinceReferenceDate, here)], travel: travel)
+                note("Hubbubb camera: teaching %@: hand still, go", teach)
+                return "Teaching \(title): go - do it once."
+            }
+            return "Teaching \(title): \(teachMiss.map { "that one didn't count - \($0). " } ?? "")put your hand where the motion starts and hold it still…"
+        }
+        if !here.isEmpty, here.count == attempt.frames[0].hands.count { attempt.frames.append((now.timeIntervalSinceReferenceDate, here)) }
+        teachTry = attempt
+        let far = attempt.far
+        settingsLock.lock()
+        if far.size >= 0.3 { teachLastTry = MotionStroke.vector(attempt.paths) }
+        settingsLock.unlock()
+        guard attempt.done(now: now.timeIntervalSinceReferenceDate, dropped: here.isEmpty) else {
+            return "Teaching \(title): \(far.size < 0.3 ? "go - do it once." : "watching…")"
+        }
+        // Start again from holding still, whatever happens next.
+        teachTry = nil
+        teachStill = nil
+        track.strokeQuietUntil = now.addingTimeInterval(1.0)  // the hand coming back fires nothing
+        guard far.size >= 1 else {
+            teachMiss = attempt.shortfall
+            note("Hubbubb camera: teaching %@: a try didn't count (%@)", teach, attempt.shortfall)
+            return "Teaching \(title): that one didn't count - \(attempt.shortfall)."
+        }
+        let vector = MotionStroke.vector(attempt.paths)
+        settingsLock.lock()
+        // A wrong-way try (a wind-up done slowly enough to hold still first):
+        // once the motion's direction is clear, refuse it.
+        if let usual = MotionStroke.majority(motions.samples[teach] ?? []), MotionStroke.label(vector) != usual {
+            settingsLock.unlock()
+            teachMiss = "that was a \(MotionStroke.label(vector)), the others are a \(usual)"
+            return "Teaching \(title): \(teachMiss!) - hold still at the start and do it again."
+        }
+        motions.samples[teach, default: []].append(vector)
+        motions.samples[teach] = Array(motions.samples[teach]!.suffix(motionLimit))
+        let count = motions.samples[teach]!.count
+        teaching = nil
+        teachingMotion = false
+        teachLastTry = nil
+        teachMiss = nil
+        let snapshot = motions
+        settingsLock.unlock()
+        try? snapshot.save()
+        note("Hubbubb camera: taught motion %@ (sample %d, %d hands, %@)", teach, count, here.count, MotionStroke.label(vector))
+        return "Got it - \(title) has \(count) sample\(count == 1 ? "" : "s")."
+    }
+
     /// Start collecting samples of `gesture` from the next raised hand.
     func beginTeaching(_ gesture: String, motion: Bool = false) {
         settingsLock.lock()
         teaching = gesture
         teachingMotion = motion
         teachSamples = []
-        teachArmedAt = nil
-        teachStillSince = nil
+        teachTry = nil
+        teachStill = nil
+        teachMiss = nil
+        teachLastTry = nil
         settingsLock.unlock()
     }
 
-    func stopTeaching() {
+    /// Stop teaching. A motion keeps its last try, if there was one - even
+    /// one that was too small: that is what someone stopping after doing
+    /// it means. `keep: false` throws it away. -> whether a try was kept.
+    func stopTeaching(keep: Bool = true) -> Bool {
         settingsLock.lock()
+        let gesture = teaching, kept = keep && teachingMotion ? teachLastTry : nil
+        if let gesture, let kept {
+            motions.samples[gesture, default: []].append(kept)
+            motions.samples[gesture] = Array(motions.samples[gesture]!.suffix(motionLimit))
+        }
         teaching = nil
         teachingMotion = false
         teachSamples = []
+        teachLastTry = nil
+        teachTry = nil
+        teachMiss = nil
+        let snapshot = motions
         settingsLock.unlock()
+        if let gesture, kept != nil {
+            try? snapshot.save()
+            note("Hubbubb camera: teaching %@: stopped, kept the last try", gesture)
+        }
+        return kept != nil
     }
 
     /// Drop one sample of a taught motion. With none left it is still a
@@ -4009,6 +4099,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             "motions": Array(motions.samples.keys),
             "motion_samples": motions.samples,
             "teaching": teaching.map { ["gesture": $0, "samples": teachSamples.count, "motion": teachingMotion,
+                                        "last_try": teachLastTry.map(MotionStroke.label) ?? NSNull(),
                                         "target": teachingMotion ? 1 : teachTarget] } ?? NSNull(),
         ]
     }
