@@ -59,9 +59,30 @@ private struct RoomMap {
     static let needed = 30
     static let perBin = 3
     var bins: [Int: (count: Int, tiltSum: Float)] = [:]
+    // Bins marked "never look here" from the live view (a window, a shelf):
+    // no sighting there counts, and they survive relearning the room.
+    var never: Set<Int> = []
+
+    /// Mark `width` degrees round `pan` as somewhere nobody goes.
+    mutating func neverAt(pan: Float, width: Float) {
+        let low = Int(((pan - width / 2) / Self.binDegrees).rounded(.down))
+        let high = Int(((pan + width / 2) / Self.binDegrees).rounded(.down))
+        for bin in low...high { never.insert(bin); bins[bin] = nil }
+    }
+
+    /// The never-look spans, merged: [[low, high]] degrees.
+    var neverSpans: [[Float]] {
+        var spans: [[Float]] = []
+        for bin in never.sorted() {
+            let low = Float(bin) * Self.binDegrees
+            if let last = spans.last, last[1] == low { spans[spans.count - 1][1] = low + Self.binDegrees } else { spans.append([low, low + Self.binDegrees]) }
+        }
+        return spans
+    }
 
     mutating func add(pan: Float, tilt: Float) {
         let bin = Int((pan / Self.binDegrees).rounded(.down))
+        guard !never.contains(bin) else { return }
         let old = bins[bin] ?? (0, 0)
         // Capped so years of sitting on the couch don't drown out the kitchen.
         guard old.count < 1000 else { return }
@@ -74,7 +95,7 @@ private struct RoomMap {
     var trusted: [Int: (count: Int, tiltSum: Float)] {
         let busiest = bins.values.map(\.count).max() ?? 0
         let floor = max(Self.perBin, Int((Float(busiest) * Self.share).rounded(.up)))
-        return bins.filter { $0.value.count >= floor }
+        return bins.filter { $0.value.count >= floor && !never.contains($0.key) }
     }
     static let share: Float = 0.02
 
@@ -120,12 +141,14 @@ private struct RoomMap {
         for (key, value) in stored where value.count == 2 {
             if let bin = Int(key) { map.bins[bin] = (Int(value[0]), Float(value[1])) }
         }
+        map.never = Set(UserDefaults.standard.array(forKey: "roomNever") as? [Int] ?? [])
         return map
     }
 
     func save() {
         let stored = Dictionary(uniqueKeysWithValues: bins.map { (String($0.key), [Double($0.value.count), Double($0.value.tiltSum)]) })
         UserDefaults.standard.set(stored, forKey: "roomMap")
+        UserDefaults.standard.set(never.sorted(), forKey: "roomNever")
     }
 
     /// `HubbubbLocalCamera --self-test`
@@ -1164,6 +1187,10 @@ private enum Patrol {
         precondition(stops.count == 2 && stops[0].pan == -37.5 && stops[1].pan == 32.5, "stops only where people are: \(stops)")
         precondition(abs(stops[1].tilt + 8) < 0.01, "at the head height seen there")
         precondition(room.search!.low == -40 && room.search!.high == 35, "the search skips the strays too")
+        room.neverAt(pan: 32, width: 10)
+        room.add(pan: 30, tilt: -8)
+        precondition(room.stops(reach: 56)!.count == 1 && room.search!.high == -35, "never look here drops that spot, and new sightings there")
+        precondition(room.neverSpans == [[25, 40]], "as one span")
         precondition(index(step: 5, count: 1) == 0, "one stop stays put")
         precondition(PetLooks.overlap(CGRect(x: 0, y: 0, width: 1, height: 1), CGRect(x: 0, y: 0, width: 1, height: 1)) == 1, "a box is itself")
         precondition(PetLooks.overlap(CGRect(x: 0, y: 0, width: 0.2, height: 0.2), CGRect(x: 0.5, y: 0.5, width: 0.2, height: 0.2)) == 0, "apart is no overlap")
@@ -1553,6 +1580,11 @@ private final class CameraService {
             return ok(["items": processor?.items() ?? []])
         case ("POST", "/forget_item"):
             return ok(["ok": processor?.forgetItem(name: name) ?? false])
+        case ("POST", "/room_never"):
+            guard let processor else { return bad("camera not running") }
+            let result = processor.neverLookHere(clear: body["clear"] as? Bool == true)
+            if let error = result["error"] as? String { return bad(error) }
+            return ok(result)
         case ("POST", "/room_reset"):
             processor?.resetRoomMap()
             return ok(["ok": true])
@@ -2688,9 +2720,33 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
 
     func resetRoomMap() {
         ptzQueue.sync {
-            roomMap = RoomMap()
+            roomMap = RoomMap(never: roomMap.never)  // a window is still a window
             roomMap.save()
         }
+    }
+
+    /// Never look where the camera points now: the middle 60% of the view
+    /// leaves the room map and the watch, for good. nil clears every mark.
+    /// -> the span marked, or why not.
+    func neverLookHere(clear: Bool = false) -> [String: Any] {
+        settingsLock.lock()
+        let zoom = Float(currentZoomFactor)
+        settingsLock.unlock()
+        let marked: [String: Any] = ptzQueue.sync {
+            if clear {
+                roomMap.never = []
+                roomMap.save()
+                return ["ok": true]
+            }
+            guard let position = cameraPosition() else { return ["error": "Can't read where the camera points."] }
+            let width = 70 / max(1, zoom) * 0.6
+            roomMap.neverAt(pan: position.pan, width: width)
+            roomMap.save()
+            note("Hubbubb camera: never look at %.0f° ± %.0f°", Double(position.pan), Double(width / 2))
+            return ["ok": true, "low": position.pan - width / 2, "high": position.pan + width / 2]
+        }
+        patrolNextMove = .distantPast  // move on from it now
+        return marked
     }
 
     /// Play a mood ("listening", "thinking", "speaking", "idle") on the gimbal.
@@ -2823,9 +2879,9 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         ptzQueue.sync {
             let sightings = roomMap.bins.values.reduce(0) { $0 + $1.count }
             guard let search = roomMap.search else {
-                return ["learned": false, "sightings": sightings, "needed": RoomMap.needed]
+                return ["learned": false, "sightings": sightings, "needed": RoomMap.needed, "never": roomMap.neverSpans]
             }
-            return ["learned": true, "sightings": sightings, "low": search.low, "high": search.high]
+            return ["learned": true, "sightings": sightings, "low": search.low, "high": search.high, "never": roomMap.neverSpans]
         }
     }
 

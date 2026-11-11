@@ -70,6 +70,7 @@ PASSTHROUGH = {
     "camera_forget_item": ("POST", "forget_item"),
     "camera_learn": ("POST", "learn"),
     "camera_room_reset": ("POST", "room_reset"),
+    "camera_room_never": ("POST", "room_never"),
     "camera_look": ("POST", "look"),
     "camera_gesture_teach": ("POST", "gesture_teach"),
     "camera_gesture_forget": ("POST", "gesture_forget"),

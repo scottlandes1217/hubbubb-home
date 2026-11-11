@@ -218,6 +218,7 @@ camera_items:
 camera_forget_item:
 camera_learn:
 camera_room_reset:
+camera_room_never:
 camera_look:
 jarvis_presence_get:
 jarvis_presence_save:

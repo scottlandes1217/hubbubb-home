@@ -516,6 +516,10 @@ class HubbubbCamera extends LitElement {
           <section class="card">
             <h3>Camera</h3>
             <p class="muted">Drag the picture to move the camera; pinch or scroll to zoom. Click a person or animal to follow just them.</p>
+            <div class="pan">
+              <button ?disabled=${this._busy} title="Drops this direction from the room map and the room watch, for good"
+                @click=${() => this._neverHere()}>${this._confirm === "never" ? "Really never look here?" : html`<ha-icon icon="mdi:eye-off"></ha-icon> Never look here`}</button>
+            </div>
             ${s.focus
               ? html`<div class="pan"><button @click=${() => this._try(() => this._call("camera_focus", {})).then(() => this._poll())}><ha-icon icon="mdi:account-group"></ha-icon> Follow everyone again</button></div>`
               : nothing}
@@ -1060,6 +1064,10 @@ class HubbubbCamera extends LitElement {
             <button class="danger" ?disabled=${this._busy} @click=${() => this._resetRoom()}>${this._confirm === "room" ? "Really relearn?" : "Relearn the room"}</button>
           </div>
           <p class="muted small">Relearn after moving the camera or the furniture.</p>
+          ${(room.never || []).length
+            ? html`<p>Never looks at: ${room.never.map(([lo, hi]) => `${Math.round(lo)}° to ${Math.round(hi)}°`).join(", ")}.</p>
+                <div class="actions"><button ?disabled=${this._busy} @click=${() => this._try(() => this._call("camera_room_never", { clear: true })).then(() => this._poll())}>Look everywhere again</button></div>`
+            : html`<p class="muted small">Pointing at a window or a shelf nobody uses? Press <b>Never look here</b> on the Live tab while it's looking there.</p>`}
         </section>
       </div>
     `;
@@ -1147,6 +1155,13 @@ class HubbubbCamera extends LitElement {
     clearTimeout(this._knobTimer);
     // Sliders fire while dragging; send the value once it settles.
     if (Object.keys(changes).length) this._knobTimer = setTimeout(() => this._settings(changes), 300);
+  }
+
+  async _neverHere() {
+    if (this._confirm !== "never") return (this._confirm = "never");
+    this._confirm = null;
+    await this._try(() => this._call("camera_room_never", {}));
+    this._poll();
   }
 
   async _resetRoom() {
