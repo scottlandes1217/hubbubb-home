@@ -1055,6 +1055,35 @@ private enum Framing {
     }
 }
 
+/// Watching the room with following off: the pans to stop at, so every part
+/// of the span is seen at 1x. Pure, so `--self-test` checks it.
+private enum Patrol {
+    /// Stops across `low`...`high` (degrees) for a `view`-degree-wide frame,
+    /// overlapping by a third; one stop in the middle when it all fits.
+    static func stops(low: Float, high: Float, view: Float = 70) -> [Float] {
+        let span = high - low, reach = view * 0.8
+        guard span > reach else { return [(low + high) / 2] }
+        let count = Int(((span - reach) / (view * 0.67)).rounded(.up)) + 1
+        let first = low + reach / 2, last = high - reach / 2
+        return (0..<count).map { first + (last - first) * Float($0) / Float(count - 1) }
+    }
+
+    /// The stop for the `step`th move: there and back, 0 1 2 1 0 1...
+    static func index(step: Int, count: Int) -> Int {
+        guard count > 1 else { return 0 }
+        let period = 2 * (count - 1), k = step % period
+        return k < count ? k : period - k
+    }
+
+    static func selfTest() {
+        precondition(stops(low: -20, high: 20) == [0], "a room that fits in one view is one stop")
+        let wide = stops(low: -60, high: 60)
+        precondition(wide.count == 3 && wide.first! == -32 && wide.last! == 32, "120 degrees is three overlapping stops")
+        precondition((0..<6).map { index(step: $0, count: 3) } == [0, 1, 2, 1, 0, 1], "there and back")
+        precondition(index(step: 5, count: 1) == 0, "one stop stays put")
+    }
+}
+
 /// The follow controller's math, kept pure so `--self-test` can check it.
 private enum Gimbal {
     /// One correction, in degrees, for a subject `error` off center (in frame
@@ -1093,6 +1122,7 @@ private enum HubbubbLocalCameraApp {
         if CommandLine.arguments.contains("--self-test") {
             RoomMap.selfTest()
             Pets.selfTest()
+            Patrol.selfTest()
             return
         }
         // `--replay file.jsonl`: run recorded real hands through the shape rules.
@@ -1135,6 +1165,7 @@ private final class CameraService {
     // Each is read where it is used, from these same defaults.
     private static let knobs: [String: (range: ClosedRange<Double>, value: Double)] = [
         "followGain": (0.1...1.0, 0.45),
+        "patrolSeconds": (3...30, 8),
         "gestureReach": (0.5...3.0, 1.0),
         "hairReach": (0...2, 0.9),
         "chinReach": (0...1.5, 0.25),
@@ -1832,6 +1863,10 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     private var nobodyInView = true  // under settingsLock; read by the mood engine
     // Vision thread only: no re-framing until then (a hand is raised to gesture).
     private var framingHoldUntil = Date.distantPast
+    // Watching the room (following off): when to move to the next stop, and
+    // how many moves so far (ptzQueue only).
+    private var patrolNextMove = Date.distantPast
+    private var patrolStep = 0
     // Vision thread only: the last classify failed for unclear finger joints.
     private var fingersUnclear = false
     private let lookQueue = DispatchQueue(label: "com.hubbubb.camera.look")
@@ -1904,9 +1939,12 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     func updateSettings(autoZoom: Bool, zoomFactor: CGFloat, autoFollow: Bool) {
         settingsLock.lock()
         autoZoomEnabled = autoZoom
+        let switchedOff = autoFollowEnabled && !autoFollow
         autoFollowEnabled = autoFollow
         settingsLock.unlock()
         if !autoZoom { applyHardwareZoom(zoomFactor) }
+        // Following just switched off: start watching the room from its first stop.
+        if switchedOff { ptzQueue.async { [weak self] in self?.patrolStep = 0 } }
     }
 
     func captureOutput(
@@ -1998,8 +2036,16 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             settingsLock.lock()
             nobodyInView = visible.isEmpty
             settingsLock.unlock()
+            settingsLock.lock()
+            let watchRoom = !autoFollowEnabled && now > followPausedUntil
+            settingsLock.unlock()
             if followFocus(visible, animals: animals.map(\.boundingBox), now: now) {
                 faceLostSince = nil
+            } else if watchRoom {
+                // Following off: look around the whole room for gestures and pets
+                // instead of staring at one spot. Anyone mid-gesture holds it still.
+                faceLostSince = nil
+                patrol(now: now, busy: now < framingHoldUntil || tracks.contains { $0.heldMotion != nil || $0.stroke.moving })
             } else if visible.isEmpty {
                 // Jarvis's nodding pauses following; never let it keep the camera
                 // still while the person is out of view.
@@ -2963,6 +3009,30 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             }
             self.searchPan = next
             _ = hubbubbLinkCameraPointAt(next, tilt(next) + (self.searchRaised ? 15 : 0))
+        }
+    }
+
+    /// Following off: wide, stepping across the room's span (learned, else
+    /// around the last sighting), `patrolSeconds` (8) at each stop, and staying
+    /// while anyone is in the middle of a gesture. Auto-zoom off keeps the
+    /// zoom where it was put.
+    private func patrol(now: Date, busy: Bool) {
+        if busy { patrolNextMove = max(patrolNextMove, now.addingTimeInterval(3)); return }
+        guard now >= patrolNextMove else { return }
+        let dwell = UserDefaults.standard.object(forKey: "patrolSeconds") as? Double ?? 8
+        patrolNextMove = now.addingTimeInterval(dwell)
+        settingsLock.lock()
+        let autoZoom = autoZoomEnabled, zoom = currentZoomFactor
+        settingsLock.unlock()
+        if autoZoom, zoom > 1.05 { applyHardwareZoom(1) }
+        ptzQueue.async { [weak self] in
+            guard let self else { return }
+            let (low, high, tilt) = self.searchSpan()
+            let stops = Patrol.stops(low: low, high: high, view: 70 / Float(autoZoom ? 1 : max(1, zoom)))
+            let pan = stops[Patrol.index(step: self.patrolStep, count: stops.count)]
+            self.patrolStep += 1
+            guard stops.count > 1 || self.patrolStep == 1 else { return }  // one stop: aim once, then stay
+            _ = hubbubbLinkCameraPointAt(pan, tilt(pan))
         }
     }
 

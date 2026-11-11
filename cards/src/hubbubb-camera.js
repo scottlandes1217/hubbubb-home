@@ -29,6 +29,7 @@ export const KNOBS = [
   ["holdSeconds", "Hold time", "Seconds a gesture must be held before it counts. Longer means fewer accidents.", 0.1],
   ["handConfidence", "Hand clarity", "How clearly every finger must be seen. Higher ignores hands holding a phone or petting the dog.", 0.05],
   ["lookTurn", "Looking at the camera", "How far your face may turn from the camera and still count as looking (0 = straight at it, 0.5 = side-on). Works with your head tilted, lying down. Raise it if you're refused while looking at the camera; lower it if glancing at your phone counts.", 0.01],
+  ["patrolSeconds", "Room watch: seconds per stop", "With Follow off the camera watches the whole room, wide, stopping at each part of it for this long (and staying while anyone is mid-gesture).", 1],
   ["followGain", "Following speed", "How quickly the camera turns to keep you centred. Higher is snappier; too high and it wobbles.", 0.05],
   ["gestureReach", "Gesture height", "A hand counts as raised when its wrist is above its elbow, or when it is no more than this many face-heights below your chin. Raise it if chest-height gestures are missed; lower it if a phone or keyboard sets gestures off.", 0.1],
   ["faceTouch", "Touching your face", "How much of a hand must be on your face (cheek, mouth, chin, forehead) to pause gestures, whatever shape it makes. Lower pauses sooner — lower it if resting a hand on your face still fires gestures; raise it if gestures held near your face are blocked.", 0.05],
