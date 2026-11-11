@@ -30,6 +30,7 @@ export const KNOBS = [
   ["handConfidence", "Hand clarity", "How clearly every finger must be seen. Higher ignores hands holding a phone or petting the dog.", 0.05],
   ["lookTurn", "Looking at the camera", "How far your face may turn from the camera and still count as looking (0 = straight at it, 0.5 = side-on). Works with your head tilted, lying down. Raise it if you're refused while looking at the camera; lower it if glancing at your phone counts.", 0.01],
   ["patrolSeconds", "Room watch: seconds per stop", "With Follow off the camera watches the whole room, wide, stopping at each part of it for this long (and staying while anyone is mid-gesture).", 1],
+  ["petMatch", "Pet match strictness", "How closely an animal must look like a pet you showed it. Lower is stricter; raise it if your pet shows as just \u201cdog\u201d or \u201ccat\u201d.", 0.02],
   ["followGain", "Following speed", "How quickly the camera turns to keep you centred. Higher is snappier; too high and it wobbles.", 0.05],
   ["gestureReach", "Gesture height", "A hand counts as raised when its wrist is above its elbow, or when it is no more than this many face-heights below your chin. Raise it if chest-height gestures are missed; lower it if a phone or keyboard sets gestures off.", 0.1],
   ["faceTouch", "Touching your face", "How much of a hand must be on your face (cheek, mouth, chin, forehead) to pause gestures, whatever shape it makes. Lower pauses sooner — lower it if resting a hand on your face still fires gestures; raise it if gestures held near your face are blocked.", 0.05],
@@ -40,6 +41,12 @@ export const KNOBS = [
   ["searchDegrees", "Search width", "Degrees either side of the last sighting to search, until the room is learned.", 1],
   ["searchTilt", "Search tilt", "Degrees up (+) or down (−) to search at, until the room is learned.", 1],
 ];
+
+/* Where an animal is in the picture, in words: its box is [x, y, w, h]. */
+export const whereInView = (box = []) => {
+  const x = (box[0] ?? 0.5) + (box[2] ?? 0) / 2;
+  return x < 0.36 ? "on the left" : x > 0.64 ? "on the right" : "in the middle";
+};
 
 /* The camera's own picture controls: [name, label, helper]. */
 export const PICTURE = [
@@ -191,6 +198,7 @@ class HubbubbCamera extends LitElement {
     _ask: { state: true },
     _teach: { state: true },
     _picture: { state: true },
+    _naming: { state: true },
     _formReady: { state: true },
     _viewKey: { state: true },
     _jarvis: { state: true },
@@ -284,7 +292,7 @@ class HubbubbCamera extends LitElement {
     }
     if (this._tab === "jarvis") this._loadJarvis(false);
     if (this._tab === "tuning" && !this._picture) this._loadPicture();
-    if (this._tab === "people") this._pets = await this._call("camera_pets").catch(() => this._pets);
+    if (this._tab === "people" || (this._tab === "live" && !this._pets)) this._pets = await this._call("camera_pets").catch(() => this._pets);
     const fast = ["live", "people", "jarvis"].includes(this._tab) || this._state?.enrolling || this._state?.gestures?.teaching;
     this._timer = setTimeout(() => this._poll(), fast ? 1500 : 6000);
   }
@@ -503,6 +511,7 @@ class HubbubbCamera extends LitElement {
               ${animals.map((a) => html`<span class="chip animal"><ha-icon icon="mdi:paw"></ha-icon>${a}</span>`)}
               ${!people.length && !animals.length ? html`<span class="muted">Nobody recognized</span>` : nothing}
             </div>
+            ${this._renderAnimalNaming(s)}
           </section>
           <section class="card">
             <h3>Camera</h3>
@@ -807,7 +816,7 @@ class HubbubbCamera extends LitElement {
         ${pets.map(
           ([name, kind]) => html`<div class="row">
             <ha-icon icon=${kind === "cat" ? "mdi:cat" : "mdi:dog"}></ha-icon>
-            <div class="grow"><div class="name">${name}</div><div class="muted">${kind}${at[name] ? ` · at the ${at[name]} now` : inView.includes(name) ? " · in view now" : ""}</div></div>
+            <div class="grow"><div class="name">${name}</div><div class="muted">${kind}${this._pets?.by_sight?.[name] ? " · known by sight" : ""}${at[name] ? ` · at the ${at[name]} now` : inView.includes(name) ? " · in view now" : ""}</div></div>
             <button class="danger" ?disabled=${this._busy} @click=${() => this._petSave({ name, forget: true }, `pet:${name}`)}>${this._confirm === `pet:${name}` ? "Really forget?" : "Forget"}</button>
           </div>`
         )}
@@ -1058,6 +1067,46 @@ class HubbubbCamera extends LitElement {
 
   async _loadPicture() {
     this._picture = await this._call("camera_picture").catch(() => null);
+  }
+
+  _renderAnimalNaming(s) {
+    const learning = s.pet_learning;
+    if (learning)
+      return html`<div class="teach-box">
+        <div class="name">Learning what ${learning.name} looks like… ${learning.samples}/${learning.target}</div>
+        <div class="progress"><div style=${`width:${Math.round((100 * learning.samples) / learning.target)}%`}></div></div>
+        <p class="muted small">Keep ${learning.name} in view; moving around helps.</p>
+        <button @click=${() => this._try(() => this._call("camera_pet_learn", { cancel: true })).then(() => this._poll())}>Stop</button>
+      </div>`;
+    const boxes = s.animal_boxes || [];
+    if (!boxes.length) return nothing;
+    const pets = Object.keys(this._pets?.pets || {});
+    const f = this._naming;
+    return html`${boxes.map((a, i) => html`<div class="row">
+      <ha-icon icon=${a.kind === "cat" ? "mdi:cat" : "mdi:dog"}></ha-icon>
+      <div class="grow"><div class="name">${a.name}</div><div class="muted small">${whereInView(a.box)} · Vision says ${a.kind}</div></div>
+      ${f?.index === i
+        ? html`<form class="inline wrap" @submit=${(e) => { e.preventDefault(); this._learnPet(a); }}>
+            <select .value=${f.name} @change=${(e) => (this._naming = { ...f, name: e.target.value })}>
+              ${pets.map((p) => html`<option value=${p}>${p}</option>`)}
+              <option value="">Someone new…</option>
+            </select>
+            ${f.name ? nothing : html`<input placeholder="Name" .value=${f.newName} @input=${(e) => (this._naming = { ...f, newName: e.target.value })} />
+              <select .value=${f.kind} @change=${(e) => (this._naming = { ...f, kind: e.target.value })}><option value="dog">Dog</option><option value="cat">Cat</option></select>`}
+            <button class="primary" ?disabled=${this._busy || !(f.name || f.newName.trim())}>Learn</button>
+            <button type="button" @click=${() => (this._naming = null)}>Cancel</button>
+          </form>`
+        : html`<button ?disabled=${this._busy} @click=${() => (this._naming = { index: i, name: pets[0] || "", newName: "", kind: a.kind === "cat" ? "cat" : "dog" })}>This is…</button>`}
+    </div>`)}`;
+  }
+
+  async _learnPet(animal) {
+    const f = this._naming;
+    const name = f.name || f.newName.trim();
+    const kind = f.name ? this._pets?.pets?.[f.name] || "dog" : f.kind;
+    await this._try(() => this._call("camera_pet_learn", { name, kind, box: animal.box }));
+    this._naming = null;
+    this._poll();
   }
 
   _renderPicture() {

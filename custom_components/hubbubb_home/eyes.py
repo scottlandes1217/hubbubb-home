@@ -78,6 +78,7 @@ PASSTHROUGH = {
     "camera_pets": ("GET", "pets"),
     "camera_pets_save": ("POST", "pets"),
     "camera_pet_spot": ("POST", "pet_spot"),
+    "camera_pet_learn": ("POST", "pet_learn"),
     "camera_picture": ("GET", "picture"),
     "camera_picture_set": ("POST", "picture"),
 }

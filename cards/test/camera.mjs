@@ -1,6 +1,6 @@
 /* node cards/test/camera.mjs — the camera panel's pure parts. */
 import assert from "node:assert/strict";
-import { KNOBS, ago, changed, customGestureId, gestureCatalog, gestureForm, motionLabel, oddSamples, summarizeActions, PICTURE, lightNote } from "../src/hubbubb-camera.js";
+import { KNOBS, ago, changed, customGestureId, gestureCatalog, gestureForm, motionLabel, oddSamples, summarizeActions, PICTURE, lightNote, whereInView } from "../src/hubbubb-camera.js";
 
 assert.equal(summarizeActions([]), "Does nothing yet");
 assert.equal(summarizeActions(undefined), "Does nothing yet");
@@ -66,3 +66,8 @@ assert.match(lightNote(3557), /too dark/);
 assert.match(lightNote(400), /plenty/);
 assert.equal(lightNote(0), "");
 console.log("picture ok");
+
+assert.equal(whereInView([0.05, 0.4, 0.2, 0.3]), "on the left");
+assert.equal(whereInView([0.4, 0.4, 0.2, 0.3]), "in the middle");
+assert.equal(whereInView([0.7, 0.4, 0.2, 0.3]), "on the right");
+console.log("pets ok");

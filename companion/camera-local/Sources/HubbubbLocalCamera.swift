@@ -1055,6 +1055,52 @@ private enum Framing {
     }
 }
 
+/// Pets by sight: what each one looks like (feature prints of the animal's
+/// box), so the dog is Vader even when Vision calls him a cat.
+private enum PetLooks {
+    static var url: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("Hubbubb Local Camera/pets.archive")
+    }
+
+    static func load() -> [String: [VNFeaturePrintObservation]] {
+        guard let data = try? Data(contentsOf: url),
+              let stored = try? NSKeyedUnarchiver.unarchivedObject(
+                ofClasses: [NSDictionary.self, NSArray.self, NSString.self, VNFeaturePrintObservation.self], from: data
+              ) as? [String: [VNFeaturePrintObservation]] else { return [:] }
+        return stored
+    }
+
+    static func save(_ looks: [String: [VNFeaturePrintObservation]]) {
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        if let data = try? NSKeyedArchiver.archivedData(withRootObject: looks as NSDictionary, requiringSecureCoding: true) {
+            try? data.write(to: url, options: .atomic)
+        }
+    }
+
+    /// The pet these looks are nearest, if within `limit` and clearly nearer
+    /// than the next pet. -> (name, distance)
+    static func match(_ print: VNFeaturePrintObservation, looks: [String: [VNFeaturePrintObservation]], limit: Float) -> (String, Float)? {
+        let ranked = looks.compactMap { name, samples -> (String, Float)? in
+            samples.compactMap { sample -> Float? in
+                var distance: Float = 0
+                return (try? print.computeDistance(&distance, to: sample)) != nil ? distance : nil
+            }.min().map { (name, $0) }
+        }.sorted { $0.1 < $1.1 }
+        guard let best = ranked.first, best.1 < limit else { return nil }
+        if ranked.count > 1, ranked[1].1 < best.1 * 1.1 { return nil }
+        return best
+    }
+
+    /// How much two boxes overlap (intersection over union).
+    static func overlap(_ a: CGRect, _ b: CGRect) -> CGFloat {
+        let i = a.intersection(b)
+        guard !i.isNull else { return 0 }
+        let inter = i.width * i.height
+        return inter / max(0.0001, a.width * a.height + b.width * b.height - inter)
+    }
+}
+
 /// Watching the room with following off: the pans to stop at, so every part
 /// of the span is seen at 1x. Pure, so `--self-test` checks it.
 private enum Patrol {
@@ -1081,6 +1127,8 @@ private enum Patrol {
         precondition(wide.count == 3 && wide.first! == -32 && wide.last! == 32, "120 degrees is three overlapping stops")
         precondition((0..<6).map { index(step: $0, count: 3) } == [0, 1, 2, 1, 0, 1], "there and back")
         precondition(index(step: 5, count: 1) == 0, "one stop stays put")
+        precondition(PetLooks.overlap(CGRect(x: 0, y: 0, width: 1, height: 1), CGRect(x: 0, y: 0, width: 1, height: 1)) == 1, "a box is itself")
+        precondition(PetLooks.overlap(CGRect(x: 0, y: 0, width: 0.2, height: 0.2), CGRect(x: 0.5, y: 0.5, width: 0.2, height: 0.2)) == 0, "apart is no overlap")
     }
 }
 
@@ -1166,6 +1214,7 @@ private final class CameraService {
     private static let knobs: [String: (range: ClosedRange<Double>, value: Double)] = [
         "followGain": (0.1...1.0, 0.45),
         "patrolSeconds": (3...30, 8),
+        "petMatch": (0.2...1.2, 0.6),
         "gestureReach": (0.5...3.0, 1.0),
         "hairReach": (0...2, 0.9),
         "chinReach": (0...1.5, 0.25),
@@ -1402,6 +1451,18 @@ private final class CameraService {
                 processor.savePet(name: name, kind: body["forget"] as? Bool == true ? nil : kind)
             }
             return ok(processor.petInfo())
+        case ("POST", "/pet_learn"):
+            // {name, kind, box: [x, y, w, h] top-left fractions, from the live
+            // view's animal list}, or {cancel: true}.
+            guard let processor else { return bad("camera not running") }
+            if body["cancel"] as? Bool == true { processor.learnPet(name: nil); return ok(["ok": true]) }
+            let kind = body["kind"] as? String ?? "dog"
+            guard !name.isEmpty, name.count <= 40, ["dog", "cat"].contains(kind),
+                  let b = (body["box"] as? [NSNumber])?.map(\.doubleValue), b.count == 4 else {
+                return bad("send a name (up to 40 characters), kind dog or cat, and the animal's box")
+            }
+            processor.learnPet(name: name, kind: kind, box: CGRect(x: b[0], y: 1 - b[1] - b[3], width: b[2], height: b[3]))
+            return ok(["ok": true])
         case ("POST", "/pet_spot"):
             guard let processor, !name.isEmpty, name.count <= 40 else { return bad("send a spot name, up to 40 characters") }
             if body["forget"] as? Bool == true { return ok(["ok": processor.forgetSpot(name: name)]) }
@@ -1866,6 +1927,15 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     // Watching the room (following off): when to move to the next stop, and
     // how many moves so far (ptzQueue only).
     private var patrolNextMove = Date.distantPast
+    // Pets by sight (petLooks under settingsLock); a pet being learned from
+    // the live view, and the recent names by box so prints run ~every 2 s
+    // per animal, not every frame (Vision thread only).
+    private var petLooks = PetLooks.load()
+    private var petLearn: (name: String, kind: String, box: CGRect, samples: [VNFeaturePrintObservation])?
+    private let petLearnTarget = 8
+    private var petSeen: [(box: CGRect, name: String, at: Date)] = []
+    private var latestAnimalBoxes: [[String: Any]] = []
+    private var lastPetNote = Date.distantPast
     private var patrolStep = 0
     // Vision thread only: the last classify failed for unclear finger joints.
     private var fingersUnclear = false
@@ -2081,9 +2151,8 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                     self.settingsLock.lock(); self.knownPosition = p; self.settingsLock.unlock()
                 }
             }
-            let animalSpots: [(name: String, pan: Float, tilt: Float)] = animals.compactMap { animal in
-                guard let kind = animal.labels.first?.identifier.lowercased() else { return nil }
-                let name = Pets.name(kind: kind, pets: pets)
+            let animalLabels = nameAnimals(handler, animals, pets: pets, now: now)
+            let animalSpots: [(name: String, pan: Float, tilt: Float)] = zip(animals, animalLabels).map { animal, name in
                 guard let position else { return (name, .nan, .nan) }
                 let d = Pets.direction(of: animal.boundingBox, pan: position.pan, tilt: position.tilt, zoom: zoomNow)
                 return (name, d.pan, d.tilt)
@@ -2099,6 +2168,11 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 petWaiting(due.pet, due.spot, Int(waitMinutes.rounded()))
             }
             settingsLock.lock()
+            latestAnimalBoxes = zip(animals, animalLabels).map { animal, name in
+                let b = animal.boundingBox
+                return ["name": name, "kind": animal.labels.first?.identifier.lowercased() ?? "animal",
+                        "box": [b.minX, 1 - b.maxY, b.width, b.height].map { Double(Int($0 * 1000)) / 1000 }]
+            }
             latestAnimalSpots = animalSpots
             latestPetsAt = petsAt
             latestFrame = fullFrame
@@ -2237,8 +2311,11 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                     : raisedHands == 0
                     ? "Hands are low (typing?), so gestures are ignored. Raise a hand to chest height to gesture."
                     : "Hand raised. Hold a gesture steady to run its action.")
-            lastStatus = enrollMessage ?? messages.first ?? idle
-            preview(annotate(fullFrame, animals: animals), lastStatus)
+            settingsLock.lock()
+            let learning = petLearn.map { "Learning what \($0.name) looks like: \($0.samples.count)/\(petLearnTarget). Keep them in view." }
+            settingsLock.unlock()
+            lastStatus = enrollMessage ?? learning ?? messages.first ?? idle
+            preview(annotate(fullFrame, animals: animals, names: animalLabels), lastStatus)
             for event in fired { gesture(event.gesture, event.person, event.held) }
         } catch {
             if lastStatus != "Local Vision could not analyze this frame." {
@@ -2801,7 +2878,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     }
 
     /// The preview, half size, with people and animals boxed and labeled.
-    private func annotate(_ image: CGImage, animals: [VNRecognizedObjectObservation]) -> CGImage {
+    private func annotate(_ image: CGImage, animals: [VNRecognizedObjectObservation], names: [String] = []) -> CGImage {
         let width = min(image.width, 1920)
         let height = image.height * width / image.width
         guard let canvas = CGContext(data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
@@ -2827,8 +2904,8 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             if let nearest = track.nearest { label += String(format: "  (%@ %.2f)", nearest.name, nearest.distance) }
             box(track.face ?? track.body, track.name == nil ? .systemGreen : .systemBlue, label)
         }
-        for animal in animals {
-            box(animal.boundingBox, .systemOrange, animal.labels.first?.identifier ?? "Animal")
+        for (i, animal) in animals.enumerated() {
+            box(animal.boundingBox, .systemOrange, i < names.count ? names[i] : animal.labels.first?.identifier ?? "Animal")
         }
         return canvas.makeImage() ?? image
     }
@@ -3119,9 +3196,84 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
 
     // MARK: - Pets
 
+    /// A name for each animal: the pet it looks like, else (no pet known by
+    /// sight matches) the one registered pet of its kind, else its kind. Also
+    /// feeds a pet being learned from the animal it was pointed at.
+    private func nameAnimals(_ handler: VNImageRequestHandler, _ animals: [VNRecognizedObjectObservation],
+                             pets: [String: String], now: Date) -> [String] {
+        settingsLock.lock()
+        let looks = petLooks
+        var learn = petLearn
+        let started = petLearn
+        settingsLock.unlock()
+        // Calibration knob `petMatch`: how close an animal must look to a pet.
+        let limit = Float(UserDefaults.standard.object(forKey: "petMatch") as? Double ?? 0.6)
+        petSeen.removeAll { now.timeIntervalSince($0.at) > 2 }
+        var used = Set<Int>()
+        let names = animals.map { animal -> String in
+            let box = animal.boundingBox, kind = animal.labels.first?.identifier.lowercased() ?? "animal"
+            if var l = learn, PetLooks.overlap(box, l.box) > 0.2 {
+                l.box = box  // follow it as it moves
+                if frameNumber.isMultiple(of: 3), let print = featurePrint(handler, face: box) { l.samples.append(print) }
+                learn = l
+                return l.name
+            }
+            if let i = petSeen.indices.first(where: { !used.contains($0) && PetLooks.overlap(petSeen[$0].box, box) > 0.3 }) {
+                used.insert(i)
+                petSeen[i].box = box
+                return petSeen[i].name
+            }
+            var name = Pets.name(kind: kind, pets: pets)
+            if !looks.isEmpty, let print = featurePrint(handler, face: box) {
+                if let (pet, distance) = PetLooks.match(print, looks: looks, limit: limit) {
+                    name = pet
+                    if now.timeIntervalSince(lastPetNote) > 30 {
+                        lastPetNote = now
+                        note("Hubbubb camera: %@ (Vision: %@) by sight, distance %.2f", pet, kind, distance)
+                    }
+                } else if pets[name] != nil, looks[name] != nil {
+                    name = kind  // that pet is known by sight, and this doesn't look like them
+                }
+            }
+            petSeen.append((box, name, now))
+            used.insert(petSeen.count - 1)
+            return name
+        }
+        guard let l = learn else { return names }
+        settingsLock.lock()
+        // Stopped (or restarted) from Home Assistant mid-frame: theirs wins.
+        guard let current = petLearn, let was = started, current.name == was.name, current.box == was.box, current.samples.count == was.samples.count else {
+            settingsLock.unlock()
+            return names
+        }
+        if l.samples.count >= petLearnTarget {
+            petLooks[l.name, default: []] = Array((petLooks[l.name, default: []] + l.samples).suffix(40))
+            let snapshot = petLooks
+            petLearn = nil
+            settingsLock.unlock()
+            PetLooks.save(snapshot)
+            savePet(name: l.name, kind: l.kind)
+            petSeen.removeAll()
+            note("Hubbubb camera: learned what %@ looks like (%d samples)", l.name, snapshot[l.name]?.count ?? 0)
+        } else {
+            petLearn = l
+            settingsLock.unlock()
+        }
+        return names
+    }
+
+    /// Learn what the animal at `box` (Vision coordinates) looks like, as
+    /// `name`. nil to stop.
+    func learnPet(name: String?, kind: String = "dog", box: CGRect = .zero) {
+        settingsLock.lock()
+        petLearn = name.map { ($0, kind, box, []) }
+        settingsLock.unlock()
+    }
+
     func petInfo() -> [String: Any] {
         settingsLock.lock(); defer { settingsLock.unlock() }
         return ["pets": Pets.registry, "spots": Pets.spots, "pets_at": latestPetsAt,
+                "by_sight": petLooks.mapValues(\.count),
                 "wait_minutes": UserDefaults.standard.object(forKey: "petWaitMinutes") as? Double ?? 3]
     }
 
@@ -3129,6 +3281,12 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         var pets = Pets.registry
         pets[name] = kind
         UserDefaults.standard.set(pets, forKey: "pets")
+        guard kind == nil else { return }
+        settingsLock.lock()
+        petLooks[name] = nil
+        let snapshot = petLooks
+        settingsLock.unlock()
+        PetLooks.save(snapshot)
     }
 
     /// Mark the spot where an animal is right now (the dog sitting at the
@@ -3158,6 +3316,8 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         settingsLock.lock()
         defer { settingsLock.unlock() }
         return ["people": latestNames, "animals": latestAnimals, "pets_at": latestPetsAt, "focus": focusPoint != nil,
+                "animal_boxes": latestAnimalBoxes,
+                "pet_learning": petLearn.map { ["name": $0.name, "samples": $0.samples.count, "target": petLearnTarget] as [String: Any] } ?? NSNull(),
                 "heads": latestHeads, "hands": latestHandNotes]
     }
 
