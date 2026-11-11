@@ -3919,12 +3919,13 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         settingsLock.unlock()
     }
 
-    /// Drop one sample of a taught motion; the last one forgets the motion.
+    /// Drop one sample of a taught motion. With none left it is still a
+    /// motion (an empty list), so it stays one to record again.
     func forgetMotionSample(_ gesture: String, at index: Int) -> Bool {
         settingsLock.lock()
         guard var taught = motions.samples[gesture], taught.indices.contains(index) else { settingsLock.unlock(); return false }
         taught.remove(at: index)
-        motions.samples[gesture] = taught.isEmpty ? nil : taught
+        motions.samples[gesture] = taught
         let snapshot = motions
         settingsLock.unlock()
         try? snapshot.save()
@@ -3934,7 +3935,10 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     func forgetTeaching(_ gesture: String) -> Bool {
         settingsLock.lock()
         let shape = templates.samples.removeValue(forKey: gesture) != nil
-        let motion = motions.samples.removeValue(forKey: gesture) != nil
+        // Forgetting a motion's samples keeps it a motion (an empty list): the
+        // gesture and its actions live on in Home Assistant, untaught.
+        let motion = motions.samples[gesture] != nil
+        if motion { motions.samples[gesture] = [] }
         let (snapshot, motionSnapshot) = (templates, motions)
         settingsLock.unlock()
         if shape { try? snapshot.save() }

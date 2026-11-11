@@ -68,9 +68,11 @@ export const customGestureId = (name) => {
   return slug ? `custom_${slug}` : null;
 };
 
-/* The built-in gestures, then every one taught from scratch (or being taught). */
-export const gestureCatalog = (catalog = [], taught = {}, teaching = null, motions = []) => {
-  const ids = [...Object.keys(taught || {}), teaching?.gesture].filter((id) => id?.startsWith("custom_"));
+/* The built-in gestures, then every one of your own: taught, being taught, or
+   set up in Home Assistant with its samples forgotten - forgetting a
+   gesture's samples must never make the gesture disappear. */
+export const gestureCatalog = (catalog = [], taught = {}, teaching = null, motions = [], configured = []) => {
+  const ids = [...Object.keys(taught || {}), teaching?.gesture, ...configured].filter((id) => id?.startsWith("custom_"));
   const custom = [...new Set(ids)].sort().map((id) => {
     const words = id.slice(7).replace(/_/g, " ");
     const motion = motions.includes(id) || (teaching?.gesture === id && !!teaching.motion);
@@ -485,7 +487,7 @@ class HubbubbCamera extends LitElement {
 
   get _catalog() {
     const training = this._state?.gestures || {};
-    return gestureCatalog(this._gestures?.catalog, training.taught, training.teaching, training.motions);
+    return gestureCatalog(this._gestures?.catalog, training.taught, training.teaching, training.motions, Object.keys(this._gestures?.gestures || {}));
   }
 
   _iconFor(id) {
@@ -689,7 +691,7 @@ class HubbubbCamera extends LitElement {
           <div class="muted small">Record it one at a time; 3 to 5 good ones is plenty. Delete any that don't look like the others.</div>
         </div>
         <button class="primary" ?disabled=${this._busy || !!now} @click=${() => this._try(() => this._call("camera_gesture_teach", { gesture: c.id, motion: true })).then(() => this._poll())}>Record one</button>
-        ${samples.length ? html`<button ?disabled=${this._busy || !!now} @click=${() => this._forgetTeach(c.id)}>${this._confirm === `g:${c.id}` ? "Really forget all?" : "Forget all"}</button>` : nothing}
+        ${samples.length ? html`<button ?disabled=${this._busy || !!now} @click=${() => this._forgetTeach(c.id)}>${this._confirm === `g:${c.id}` ? "Really forget all recordings?" : "Forget all recordings"}</button>` : nothing}
       </div>
       ${samples.length ? html`<div class="chips samples">${samples.map((v, i) => html`<span class="sample ${odd[i] ? "odd" : ""}">
         ${i + 1}. ${motionLabel(v)}${odd[i] ? html` <b>· unlike the others</b>` : nothing}

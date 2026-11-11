@@ -71,3 +71,9 @@ assert.equal(whereInView([0.05, 0.4, 0.2, 0.3]), "on the left");
 assert.equal(whereInView([0.4, 0.4, 0.2, 0.3]), "in the middle");
 assert.equal(whereInView([0.7, 0.4, 0.2, 0.3]), "on the right");
 console.log("pets ok");
+
+// A gesture with its samples forgotten is still listed, as long as it's set up.
+const forgotten = gestureCatalog([], { custom_knob_right: 2, custom_knob_left: 0 }, null, ["custom_knob_right", "custom_knob_left"], ["custom_knob_left", "custom_old"]);
+assert.deepEqual(forgotten.map((g) => g.id), ["custom_knob_left", "custom_knob_right", "custom_old"]);
+assert.equal(forgotten[0].motion, true);
+console.log("forgotten ok");
