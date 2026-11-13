@@ -2093,6 +2093,12 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     private var nobodyInView = true  // under settingsLock; read by the mood engine
     // Vision thread only: no re-framing until then (a hand is raised to gesture).
     private var framingHoldUntil = Date.distantPast
+    // Watching the room: whose hand is up (last frame), and whether the lens
+    // has zoomed in on them for it, until when.
+    private var gestureTrack: Int?
+    private var gestureZoomed = false
+    private var gestureZoomedAt = Date.distantPast
+    private var restZoom: CGFloat = 1
     // Watching the room (following off): when to move to the next stop, and
     // how many moves so far (ptzQueue only).
     private var patrolNextMove = Date.distantPast
@@ -2181,6 +2187,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     func updateSettings(autoZoom: Bool, zoomFactor: CGFloat, autoFollow: Bool) {
         settingsLock.lock()
         autoZoomEnabled = autoZoom
+        restZoom = zoomFactor
         let switchedOff = autoFollowEnabled && !autoFollow
         autoFollowEnabled = autoFollow
         settingsLock.unlock()
@@ -2290,8 +2297,10 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 // Following off: look around the whole room for gestures and pets
                 // instead of staring at one spot. Anyone mid-gesture holds it still.
                 faceLostSince = nil
-                patrol(now: now, busy: now < framingHoldUntil || tracks.contains { $0.heldMotion != nil || $0.stroke.moving })
-                learnRoom(from: visible, now: now)
+                if !zoomForGesture(visible, now: now) {
+                    patrol(now: now, busy: now < framingHoldUntil || tracks.contains { $0.heldMotion != nil || $0.stroke.moving })
+                    learnRoom(from: visible, now: now)
+                }
             } else if visible.isEmpty {
                 // Jarvis's nodding pauses following; never let it keep the camera
                 // still while the person is out of view.
@@ -2381,6 +2390,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             var messages: [String] = []
             var fired: [(gesture: String, person: String?, held: Bool)] = []
             var raisedHands = 0
+            gestureTrack = nil
             var handNotes: [[String: Any]] = []  // why each hand was or wasn't raised
             var lookingAway = 0
             // A deliberate gesture comes with a look at the camera; scrolling a
@@ -2447,6 +2457,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                     raised = []
                 }
                 raisedHands += raised.count
+                if !raised.isEmpty { gestureTrack = track.id }
                 // Teaching: sample the raised hand instead of acting on it.
                 if let hand = raised.max(by: { $0.confidence < $1.confidence }), let line = teach(hand) {
                     messages.append(line)
@@ -3322,6 +3333,41 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     /// around the last sighting), `patrolSeconds` (8) at each stop, and staying
     /// while anyone is in the middle of a gesture. Auto-zoom off keeps the
     /// zoom where it was put.
+    /// Watching the room, a raised hand turns the camera to whoever raised it
+    /// and zooms in once, so their fingers are big enough to read; a few
+    /// seconds after the hands drop it zooms back out. -> true while it is
+    /// busy with them (the room watch waits).
+    private func zoomForGesture(_ visible: [Track], now: Date) -> Bool {
+        if let id = gestureTrack, let person = visible.first(where: { $0.id == id }), let face = person.face {
+            gestureZoomedAt = now
+            adjustGimbal(forFace: face, force: true)
+            // Zoom only once they are near the middle, or it pushes them out of
+            // frame; and once, since the next frames still show the old zoom.
+            // Calibration knob `gestureFace`: face height to zoom to (frame share).
+            if !gestureZoomed, abs(face.midX - 0.5) < 0.15, abs(face.midY - 0.5) < 0.2 {
+                gestureZoomed = true
+                settingsLock.lock()
+                let current = currentZoomFactor
+                settingsLock.unlock()
+                let want = CGFloat(UserDefaults.standard.object(forKey: "gestureFace") as? Double ?? 0.15)
+                let limit = CGFloat(UserDefaults.standard.object(forKey: "zoomMax") as? Double ?? 4)
+                applyHardwareZoom(min(limit, max(current, current * want / max(face.height, 0.01))))
+            }
+            return true
+        }
+        guard now.timeIntervalSince(gestureZoomedAt) > 4 else { return gestureZoomedAt != .distantPast }
+        if gestureZoomed {
+            gestureZoomed = false
+            settingsLock.lock()
+            let rest = restZoom
+            settingsLock.unlock()
+            applyHardwareZoom(rest)
+            ptzQueue.async { [weak self] in self?.patrolAt = nil }  // back to the stop it left
+        }
+        gestureZoomedAt = .distantPast
+        return false
+    }
+
     private func patrol(now: Date, busy: Bool) {
         if busy { patrolNextMove = max(patrolNextMove, now.addingTimeInterval(3)); return }
         guard now >= patrolNextMove else { return }
