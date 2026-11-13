@@ -1996,6 +1996,8 @@ private struct GestureVotes {
     var quietUntil = Date.distantPast
     // Frames in a row with no raised hand.
     var handless = 0
+    // Frames in a row with a hand held still in no gesture (relaxed, a fist).
+    var blank = 0
 }
 
 /// A person followed across frames: matched frame to frame by position, so
@@ -2673,6 +2675,15 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         fingersUnclear = false
         let rawGesture = steady ? primaryHand.flatMap { classifyGesture($0) } : nil
         if steady, let hand = primaryHand { recordUnrecognized(hand, result: rawGesture) }
+        // A raised hand relaxed for a moment ends the gesture too, so the next
+        // one (or the same again) fires without lowering the arm. Only a still
+        // hand seen clearly counts: a held pose wobbling or blurred is not a relax.
+        votes.blank = steady && rawGesture == nil && !fingersUnclear && primaryHand != nil ? votes.blank + 1 : 0
+        if votes.blank >= (UserDefaults.standard.object(forKey: "dropFrames") as? Int ?? 5) {
+            votes.recent.removeAll()
+            votes.latched = nil
+            votes.quietUntil = .distantPast
+        }
         // Calibration knob: seconds a gesture must be held (about 10 analysed
         // frames a second). A pose a hand only passes through never gets there.
         let holdSeconds = UserDefaults.standard.object(forKey: "holdSeconds") as? Double ?? 0.6
@@ -2710,7 +2721,7 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
             // A hand changing shape passes through other gestures (three
             // fingers opening into a palm); only the first one counts.
             if Date() < votes.quietUntil, votes.lastFired != detectedGesture {
-                return ("One gesture at a time - drop your hand, then make the next one.", nil)
+                return ("One gesture at a time - relax or drop your hand, then make the next one.", nil)
             }
             if let t = primaryHand.flatMap({ hand in face.map { handOverlapsFace(hand, faceBounds: $0, up: up) } }) {
                 note("Hubbubb camera: fired %@ - joints in face/head/jaw %.2f/%.2f/%.2f, upright %d, wrist %.1f,%.1f face heights from the face",
