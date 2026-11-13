@@ -2251,7 +2251,10 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 let turn = marks.flatMap { Self.faceTurn($0) }
                 tracks[index].turn = turn
                 // Eyes and nose when seen (tilt-proof); Vision's yaw only if not.
-                tracks[index].facing = turn.map { abs($0) <= turnLimit } ?? observation.map {
+                // Eyes and nose only see a turn, not a nod: looking down at a phone
+                // held in front keeps the nose centred, so Vision's pitch still gates.
+                let level = GestureGate.isFacing(yaw: nil, pitch: observation?.pitch?.doubleValue, limit: lookAngle)
+                tracks[index].facing = turn.map { abs($0) <= turnLimit && level } ?? observation.map {
                     GestureGate.isFacing(yaw: $0.yaw?.doubleValue, pitch: $0.pitch?.doubleValue, limit: lookAngle)
                 } ?? false
                 tracks[index].headAngles = observation.map {
