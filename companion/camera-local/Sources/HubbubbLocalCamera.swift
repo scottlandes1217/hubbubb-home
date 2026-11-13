@@ -2426,14 +2426,16 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
                 // Two hands together are a phone or a cup when held still -
                 // but two hands opening from together is a motion.
                 var raised = holding ? [] : lifted
-                // Any hand at the head, neck or above it ends the stroke unfired,
+                // A hand at the head, neck or above it ends the stroke unfired,
                 // and the hand coming away (itself a stroke) stays quiet too.
-                let touching = track.face.map { face in own.contains { handOverlapsFace($0, faceBounds: face, up: track.up).any } } ?? false
-                if touching {
+                // Only that hand: the other one may gesture while a head rests on it.
+                let atHead = { (hand: VNHumanHandPoseObservation) in track.face.map { self.handOverlapsFace(hand, faceBounds: $0, up: track.up).any } ?? false }
+                let freeLifted = lifted.filter { !atHead($0) }
+                if own.contains(where: atHead) && freeLifted.isEmpty {
                     tracks[index].stroke = MotionStroke()
                     tracks[index].strokeQuietUntil = now.addingTimeInterval(1.5)
                 }
-                let moving = touching || (requireLooking && !track.facing) ? [] : lifted
+                let moving = requireLooking && !track.facing ? [] : freeLifted
                 if let line = motion(&tracks[index], hands: moving, now: now, fired: &fired) {
                     messages.append(tracks[index].name.map { "\($0): \(line)" } ?? line)
                     continue
@@ -2610,20 +2612,19 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
     private func updateGestures(
         _ votes: inout GestureVotes, hands: [VNHumanHandPoseObservation], face: CGRect?, up: CGVector = Upright.vertical
     ) -> (message: String?, fired: (id: String, held: Bool)?) {
-        // Vision may return a weak duplicate/false hand: use its strongest.
-        let primaryHand = hands.max { $0.confidence < $1.confidence }
         let now = Date()
-        // Any hand at the head - eating, a scratch, hair - turns gestures off
-        // for two seconds; a meal keeps renewing that, so it stays off.
-        let touching = face.map { face in hands.map { handOverlapsFace($0, faceBounds: face, up: up) } } ?? []
-        if face != nil, GestureGate.pausesAtHead(
-            atHead: touching.contains { $0.atHead },
-            onFace: touching.contains { $0.onFace },
-            onNeck: touching.contains { $0.onNeck },
-            overhead: touching.contains { $0.overhead },
-            upright: touching.allSatisfy { $0.upright },
-            pose: primaryHand.flatMap { classifyGesture($0) }
-        ) {
+        // A hand at the head - eating, a scratch, hair, a head resting on it -
+        // is left out; the other hand may still gesture. With no other hand,
+        // gestures are off and stay off a moment; a meal keeps renewing that.
+        let free = hands.filter { hand in
+            guard let face else { return true }
+            let t = handOverlapsFace(hand, faceBounds: face, up: up)
+            return !GestureGate.pausesAtHead(atHead: t.atHead, onFace: t.onFace, onNeck: t.onNeck, overhead: t.overhead,
+                                             upright: t.upright, pose: classifyGesture(hand))
+        }
+        // Vision may return a weak duplicate/false hand: use its strongest.
+        let primaryHand = free.max { $0.confidence < $1.confidence }
+        if free.isEmpty && !hands.isEmpty {
             votes = GestureVotes(lastVolumeRepeat: votes.lastVolumeRepeat, pausedUntil: now.addingTimeInterval(1.2))
             return ("Gestures paused: a hand is at a face, mouth or hair.", nil)
         }
