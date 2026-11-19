@@ -52,7 +52,9 @@ DEED = re.compile(
 # reading it back from GetLiveContext is the honest way to say it.
 STATE = re.compile(
     r"\b(?:(?:is|are)\s+(?:now|being)|(?:has|have)\s+been"
-    r"|(?:sent|started|created|applied|switched|turned)\b)",
+    r"|(?:sent|started|created|applied|switched|turned)\b"
+    # 18 November: "are set to 80 percent", "Setting all house lights to 80%".
+    r"|set\s+to\b|(?:setting|turning|switching|dimming)\b)",
     re.IGNORECASE,
 )
 
@@ -84,6 +86,9 @@ def ungrounded(content) -> bool:
         return False
     tools = turn_tools(content)
     text = content[-1].content or ""
+    # "Shall I set them to 80?" offers, it claims nothing.
+    if text.rstrip().endswith("?"):
+        return False
     if DEED.search(text) and all(name in READ_ONLY for name in tools):
         return True
     return bool(STATE.search(text)) and not tools
@@ -164,6 +169,28 @@ def async_uninstall() -> None:
     else:
         cls.supports_streaming = _original["streaming"]
     _original.clear()
+
+
+# States that already are what a turn_on / turn_off asks for. A Samsung that
+# HA cannot reach reads "off", so turning it off "works" and changes nothing.
+_OFF = frozenset(("off", "standby", "idle_off"))
+_DEAD = frozenset(("unavailable", "unknown"))
+
+
+def nothing_changed(calls: dict[str, tuple[str, str | None]]) -> list[str]:
+    """Entities a turn's on/off calls could not have changed; [] if any could.
+
+    calls maps entity_id -> (service, state when the call was made). Only
+    when every target was already there (or unreachable) does it count: "turn
+    off the lights" with half of them off already is a normal request.
+    """
+    stuck = [
+        e for e, (service, state) in calls.items()
+        if state is None or state in _DEAD
+        or (service == "turn_off" and state in _OFF)
+        or (service == "turn_on" and state not in _OFF)
+    ]
+    return stuck if calls and len(stuck) == len(calls) else []
 
 
 # Words that carry no request of their own, so "set my lights to my bright

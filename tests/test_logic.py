@@ -189,7 +189,7 @@ from hubbubb_home.nightly import FindingsReport, _days  # noqa: E402
 from hubbubb_home.review import ReviewReport, parse_proposals  # noqa: E402
 from hubbubb_home.appletv import _TEMPLATE, _match_source, decide_plan  # noqa: E402
 from hubbubb_home.companion import relevant_text  # noqa: E402
-from hubbubb_home.grounding import same_request, trim_by_turns, ungrounded  # noqa: E402
+from hubbubb_home.grounding import nothing_changed, same_request, trim_by_turns, ungrounded  # noqa: E402
 
 
 # --- memory: spoken question -> FTS5 query -----------------------------------
@@ -2736,6 +2736,31 @@ def test_grounding_catches_tonights_claims_with_no_tool_behind_them():
         assert ungrounded(_turn(reply)), reply
     # A look is not a deed.
     assert ungrounded(_turn("Done sir, the fan is on.", "assist__GetLiveContext"))
+
+
+def test_grounding_catches_set_to_claims():
+    # 18-19 November: "Turn all lights to 80%. Hey. Huh, man." - no tool ran.
+    for reply in (
+        "All the house lights are set to 80 percent brightness now, sir.",
+        "Setting all house lights to 80% brightness now.",
+    ):
+        assert ungrounded(_turn(reply)), reply
+    assert not ungrounded(_turn("Shall I set them to 80 percent sir?"))
+    assert not ungrounded(_turn("Lights set to 80 sir.", "assist__HassLightSet"))
+
+
+def test_nothing_changed_only_when_every_target_was_already_there():
+    # 19 November: HA held an unreachable Samsung at "off" for four days.
+    tv = "media_player.living_room_tv"
+    assert nothing_changed({tv: ("turn_off", "off")}) == [tv]
+    assert nothing_changed({tv: ("turn_off", "on")}) == []
+    assert nothing_changed({tv: ("turn_on", "unavailable")}) == [tv]
+    assert nothing_changed({"light.a": ("turn_on", "on")}) == ["light.a"]
+    # Half the lights already off is a normal "turn off the lights".
+    assert nothing_changed({
+        "light.a": ("turn_off", "off"), "light.b": ("turn_off", "on"),
+    }) == []
+    assert nothing_changed({}) == []
 
 
 def test_grounding_lets_real_actions_and_plain_answers_through():

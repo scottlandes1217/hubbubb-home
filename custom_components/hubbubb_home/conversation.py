@@ -22,13 +22,13 @@ import time
 
 from homeassistant.components import conversation
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import MATCH_ALL
-from homeassistant.core import HomeAssistant
+from homeassistant.const import EVENT_CALL_SERVICE, MATCH_ALL
+from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
 from homeassistant.helpers.intent import IntentResponse, IntentResponseType
 
 from .companion import CompanionError
-from .grounding import leaked_tool_call, same_request
+from .grounding import leaked_tool_call, nothing_changed, same_request
 from .const import (
     CONF_ACK,
     CONF_ANNOUNCE,
@@ -246,18 +246,28 @@ class FrontDoorConversationEntity(conversation.ConversationEntity):
             self._asked = time.time()
             return self._reply(user_input, chat_log, ASK, ask=True)
 
-        earlier = self._repeat_of(user_input.text)
-        if earlier and self.hass.states.get(FALLBACK_AGENT):
-            result = await self._escalate(user_input, chat_log, earlier)
-        else:
-            result, by_brain = await self._answer(user_input, chat_log)
-            if by_brain:
-                self._tries.append((
-                    time.time(),
-                    user_input.text,
-                    result.response.speech.get("plain", {}).get("speech", ""),
-                ))
+        calls: dict[str, tuple[str, str | None]] = {}
+        unsub = self.hass.bus.async_listen(
+            EVENT_CALL_SERVICE, self._watch(user_input.context.id, calls)
+        )
+        try:
+            earlier = self._repeat_of(user_input.text)
+            if earlier and self.hass.states.get(FALLBACK_AGENT):
+                result = await self._escalate(user_input, chat_log, earlier)
+            else:
+                result, by_brain = await self._answer(user_input, chat_log)
+                if by_brain:
+                    self._tries.append((
+                        time.time(),
+                        user_input.text,
+                        result.response.speech.get("plain", {}).get("speech", ""),
+                    ))
+        finally:
+            unsub()
         speech = result.response.speech.get("plain", {}).get("speech", "")
+        if stuck := nothing_changed(calls):
+            _LOGGER.warning("%r changed nothing: %s", user_input.text, calls)
+            speech = self._stuck_reply(stuck, calls)
         person, _, _ = speakers.resolve(user_input.device_id)
         speech = address(
             " ".join(p for p in (greeting, speech) if p),
@@ -268,6 +278,42 @@ class FrontDoorConversationEntity(conversation.ConversationEntity):
             response=result.response,
             conversation_id=cid,
             continue_conversation=result.continue_conversation,
+        )
+
+    def _watch(self, context_id: str, calls: dict):
+        """Note each plain on/off this turn makes, with the state it found.
+
+        The call event fires before the service runs, so the state read here
+        is the one the call met.
+        """
+        @callback
+        def seen(event: Event) -> None:
+            data = event.data.get("service_data") or {}
+            service = event.data.get("service")
+            if event.context.id != context_id or service not in ("turn_on", "turn_off"):
+                return
+            # A turn_on that sets brightness or colour changes a light that is
+            # already on, so only a bare one is checked.
+            if service == "turn_on" and set(data) - {"entity_id"}:
+                return
+            ids = data.get("entity_id") or []
+            for entity_id in [ids] if isinstance(ids, str) else ids:
+                state = self.hass.states.get(entity_id)
+                calls.setdefault(entity_id, (service, state.state if state else None))
+        return seen
+
+    def _stuck_reply(self, stuck: list[str], calls: dict) -> str:
+        def name(entity_id):
+            state = self.hass.states.get(entity_id)
+            return state.name if state else entity_id
+        names = " and ".join(name(e) for e in stuck)
+        service, state = calls[stuck[0]]
+        if state is None or state in ("unavailable", "unknown"):
+            return f"Sorry sir, {names} isn't responding, so nothing happened."
+        word = "off" if service == "turn_off" else "on"
+        return (
+            f"Sir, {names} already showed as {word}, so nothing changed. "
+            "If it isn't, I'm not reaching it."
         )
 
     def _should_ask(self, chat_log, event: dict | None) -> bool:
@@ -373,6 +419,19 @@ class FrontDoorConversationEntity(conversation.ConversationEntity):
             chat_log,
             intent_filter=lambda r: r.intent.name in LLM_INTENTS,
         )
+        # A command with the room's chatter appended matches nothing whole;
+        # its opening sentence often does, and the brain must not guess at it.
+        if response is None and not asked and (
+            match := TRAILING_SPEECH.match(user_input.text.strip())
+        ):
+            response = await conversation.async_handle_intents(
+                self.hass,
+                dataclasses.replace(user_input, text=match.group(1).strip()),
+                chat_log,
+                intent_filter=lambda r: r.intent.name in LLM_INTENTS,
+            )
+            if response is not None:
+                _LOGGER.info("handled %r after dropping trailing speech", match.group(1))
         if response is not None:
             speech = response.speech.get("plain", {}).get("speech", "")
             chat_log.async_add_assistant_content_without_tools(
