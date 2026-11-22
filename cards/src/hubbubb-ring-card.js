@@ -2793,7 +2793,7 @@ class HubbubbRingCard extends LitElement {
 
   /* Ending is destructive and there is no undo, so the first press only arms
      it. _confirmKill holds the id being confirmed, so arming a row in the list
-     cannot arm a different one. */
+     cannot arm a different one. "*" ends every session at once. */
   async _killSession(id) {
     if (!id) return;
     if (this._confirmKill !== id) {
@@ -2804,13 +2804,16 @@ class HubbubbRingCard extends LitElement {
     }
     clearTimeout(this._confirmT);
     this._confirmKill = null;
+    const ids = id === "*" ? (this._sessions || []).map((s) => s.id) : [id];
     try {
-      await this._api("agent_kill", { id });
+      for (const one of ids) {
+        await this._api("agent_kill", { id: one });
+        this._store(`draft:${one}`, null);
+      }
       this._swipe = null;
-      this._store(`draft:${id}`, null);
-      this._queue = (this._queue || []).filter((q) => q.id !== id);
+      this._queue = (this._queue || []).filter((q) => !ids.includes(q.id));
       this._saveQueue();
-      if (this._sel === id) {
+      if (ids.includes(this._sel)) {
         this._sel = null;
         this._msgs = null;
         this._store("sel", null);
@@ -6217,6 +6220,13 @@ class HubbubbRingCard extends LitElement {
       <div class="phead">
         <button class="hbtn back" data-ai="toggle-build-mode" title="Back" @click=${() => this._setBuild(false)}>‹</button>
         <span class="ptitle">${this._name} Agents</span>
+        ${sessions?.length
+          ? html`<button
+              class="hbtn"
+              data-ai="end-all-sessions"
+              @click=${() => this._killSession("*")}
+            >${this._confirmKill === "*" ? "Sure?" : "End all"}</button>`
+          : nothing}
         <button
           class="hbtn"
           data-ai="create-session"
