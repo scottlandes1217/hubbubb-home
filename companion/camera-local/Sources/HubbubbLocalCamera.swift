@@ -3289,6 +3289,9 @@ private final class LocalVisionProcessor: NSObject, AVCaptureVideoDataOutputSamp
         // A newly detected person immediately stops the sweep.
         guard lostFor > 1.5, now.timeIntervalSince(lastAutoFollowUpdate) > 0.28 else { return }
         lastAutoFollowUpdate = now
+        // Sweep wide too: the chase above is skipped when they were only ever
+        // seen as a body (no face centre), and that left it searching at 3.9x.
+        if autoZoom, current > 1.05 { applyHardwareZoom(1) }
         ptzQueue.async { [weak self] in
             guard let self else { return }
             let (low, high, tilt) = self.searchSpan()
