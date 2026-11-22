@@ -31,6 +31,11 @@ intents:
           - "stop remembering {query}"
   HubbubbRemember:
     data:
+      # "My favorite X is Y" is a fact even with no "remember" in it; the
+      # local brain heard "just say ok" as the whole job and stored nothing.
+      - sentences:
+          - "my (favorite|favourite) {thing} is {value} [and] just say (ok|okay)"
+          - "my (favorite|favourite) {thing} is {value}"
       - sentences:
           - "remember that {fact}"
           - "remember {fact}"
@@ -47,6 +52,10 @@ intents:
           - "my name is {person}"
 lists:
   fact:
+    wildcard: true
+  thing:
+    wildcard: true
+  value:
     wildcard: true
   query:
     wildcard: true

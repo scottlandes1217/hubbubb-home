@@ -30,6 +30,7 @@ from .companion import CompanionError
 from .const import DOMAIN
 from .hubbubb import HubbubbError, HubbubbPending
 from .intents import _open_items, match_item, pick_list
+from .phone import phone_tools
 from .speakers import CONFIDENT, SpeakerServiceError
 
 _LOGGER = logging.getLogger(__name__)
@@ -68,6 +69,7 @@ def agent_tools(runtime) -> list[llm.Tool]:
         tools.append(LearnItemTool(runtime))
     if runtime.speakers.configured:
         tools.append(TrainWakeWordTool(runtime))
+    tools += phone_tools(runtime)
     return tools
 
 
@@ -119,6 +121,16 @@ class HubbubbAPI(llm.API):
             "steps and the page it came from. Saved recipes are not entities: "
             "they show in the Recipes panel in the Home Assistant sidebar, "
             "so if asked where a saved recipe is, say that."
+        )
+        # "My favourite X is Y, just say ok" got a bare "ok" and nothing
+        # stored: the model took "just say ok" as the whole job.
+        prompt += (
+            "\n\nWhen the speaker tells you a fact about themselves or the "
+            "house - a favourite, a preference, a name, a code, a schedule "
+            "(\"my favorite dog breed is beagle\") - call remember with it "
+            "before you reply, even if they say \"just say ok\"; that only "
+            "sets the reply. When asked what you know about them or the "
+            "house (\"what is my favorite...\"), call recall first."
         )
         # A scene or "natural" hands the lights to Hue or Adaptive Lighting;
         # a brightness call after it counts as a manual override and pins
@@ -215,8 +227,10 @@ class RememberTool(_RuntimeTool):
     name = "remember"
     description = (
         "Store one durable fact about this household - a preference, a "
-        "schedule, a code, a name, a past decision. Use it whenever you are "
-        "told something worth knowing next week. Write one short "
+        "favourite, a schedule, a code, a name, a past decision. Call it "
+        "whenever the speaker states such a fact, even when they add 'just "
+        "say ok' (that only sets your reply): 'my favorite dog breed is "
+        "beagle' -> fact 'Favorite dog breed is beagle.'. Write one short "
         "self-contained sentence; do not store passwords or anything the "
         "speaker asked you to keep out of memory. personal=true files it "
         "under whoever is speaking (their preferences, their schedule); "
@@ -763,7 +777,9 @@ class LearnItemTool(_RuntimeTool):
         "something is. name: what they call it, short ('AirPods case'). "
         "where: which thing to look at, in their words; leave it out when "
         "they are holding it up. Teaching a name again replaces it. If it "
-        "cannot make the thing out, ask them to hold it closer and try again."
+        "cannot make the thing out, ask them to hold it closer and try again. "
+        "Only for a thing in front of the camera - a spoken fact or "
+        "preference ('my favorite dog is a beagle') is remember, not this."
     )
     parameters = vol.Schema(
         {

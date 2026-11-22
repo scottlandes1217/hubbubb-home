@@ -297,12 +297,20 @@ def _sounds_personal(fact: str) -> bool:
 
 class RememberHandler(_Handler):
     intent_type = INTENT_REMEMBER
-    slot_schema = {vol.Required("fact"): cv.string}
+    slot_schema = {
+        vol.Optional("fact"): cv.string,
+        vol.Optional("thing"): cv.string,
+        vol.Optional("value"): cv.string,
+    }
     description = "Store one durable fact about the household"
 
     async def async_handle(self, intent_obj: intent.Intent):
         slots = self.async_validate_slots(intent_obj.slots)
-        fact = slots["fact"]["value"]
+        if "thing" in slots:
+            fact = (f"my favorite {slots['thing']['value']} is "
+                    f"{slots['value']['value']}")
+        else:
+            fact = slots["fact"]["value"]
         person, _, _ = self._speaker(intent_obj)
         try:
             await self._runtime.memory.async_add(
