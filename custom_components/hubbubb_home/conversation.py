@@ -36,6 +36,7 @@ from .const import (
     CONF_VOICE,
     DEFAULT_ACK,
     DOMAIN,
+    EVENT_SAID,
 )
 from .speakers import SpeakerServiceError, address, spoken_name
 
@@ -223,6 +224,22 @@ class FrontDoorConversationEntity(conversation.ConversationEntity):
         return MATCH_ALL
 
     async def _async_handle_message(
+        self,
+        user_input: conversation.ConversationInput,
+        chat_log: conversation.ChatLog,
+    ) -> conversation.ConversationResult:
+        result = await self._turn(user_input, chat_log)
+        # The ring card subtitles the puck from this: it cannot see the
+        # pipeline's text, only that the satellite is responding.
+        self.hass.bus.async_fire(EVENT_SAID, {
+            "heard": user_input.text,
+            "reply": result.response.speech.get("plain", {}).get("speech", ""),
+            "device_id": user_input.device_id,
+            "satellite_id": getattr(user_input, "satellite_id", None),
+        })
+        return result
+
+    async def _turn(
         self,
         user_input: conversation.ConversationInput,
         chat_log: conversation.ChatLog,

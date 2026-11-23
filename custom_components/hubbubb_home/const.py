@@ -141,6 +141,7 @@ MEMORY_DB = "hubbubb_home_memory.db"
 # to speak it. This is how a companion announces a finished agent turn.
 WEBHOOK_MESSAGE = f"{DOMAIN}_message"
 EVENT_MESSAGE = f"{DOMAIN}_message"
+EVENT_SAID = f"{DOMAIN}_said"
 
 # The voice service on the companion machine POSTs one event here per
 # utterance: {"person", "confidence", "ts", "text", "candidates"}.

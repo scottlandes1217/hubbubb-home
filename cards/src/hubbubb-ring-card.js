@@ -19,6 +19,7 @@ console.info(`hubbubb-ring-card ${BUILD}`);
 // live DOM value instead of the last rendered one.
 import { live } from "lit/directives/live.js";
 import { deadMicWatch, downsampler, rmsEnvelope } from "./envelope.js";
+import "./captions.js";
 import { createMembrane, membranePoint, SHELL_RADII } from "./im3-membrane.js";
 import { nowNext, parseEvent } from "./hubbubb-calendar.js";
 import { groupProposals } from "./review-groups.js";
@@ -397,6 +398,10 @@ const CLAIM_WINDOW = 3000;
    shared constant, so untouched screens tie exactly and the random
    tie-break picks one — instead of comparing their wall clocks. */
 const NEVER_TOUCHED = 1e12;
+/* What he says the moment the mic opens on a tap. */
+const LISTEN_CUE = "Yes?";
+/* How long the last subtitle stays up after he stops, in ms. */
+const CAPTION_HOLD = 2600;
 
 /* The same tile again, as a CSS background.
 
@@ -482,6 +487,7 @@ class HubbubbRingCard extends LitElement {
     _picking: { state: true },
     _pending: { state: true },
     _voiceState: { state: true },
+    _cap: { state: true },
     _announce: { state: true },
     _messages: { state: true },
     _dictating: { state: true },
@@ -925,6 +931,8 @@ class HubbubbRingCard extends LitElement {
       this._electAndSpeak(msg);
     };
     track(hass.connection.subscribeEvents(speak, "hubbubb_home_message"));
+    track(hass.connection.subscribeEvents((ev) => this._puckSaid(ev?.data), "hubbubb_home_said"));
+    this._loadCue();
     /* ponytail: legacy event name from before the integration owned the
        webhook; drop once no hand-rolled automation fires it any more. */
     track(hass.connection.subscribeEvents(speak, "jarvis_claude_message"));
@@ -1061,6 +1069,7 @@ class HubbubbRingCard extends LitElement {
         this._speechBlob = URL.createObjectURL(new Blob([buf], { type: "audio/mpeg" }));
         el.src = this._speechBlob;
         this._trackSpeech(el, this._speechBlob, buf);
+        this._caption({ say: text, el });
       } catch (e) {
         this._trackSpeech(el, url);
         el.src = url; // better a stalled element than no attempt at all
@@ -3064,7 +3073,9 @@ class HubbubbRingCard extends LitElement {
       src: null,
       handlerId: null,
       unsub: null,
+      gate: 0,
     });
+    if (mode === "converse") this._playCue(voice);
     /* Without this every tap is a fresh conversation and he has no idea what
        you just said to him. HA drops a conversation after about five minutes
        of silence, so an older id is not worth sending — the agent would
@@ -3101,7 +3112,8 @@ class HubbubbRingCard extends LitElement {
         else this._toast("This device's microphone is sending silence.");
         return;
       }
-      if (voice.handlerId == null) return;
+      // his "Yes?" is not part of what you said
+      if (voice.handlerId == null || ctx.currentTime < voice.gate) return;
       const pcm = down(f);
       const out = new Uint8Array(1 + pcm.length * 2);
       out[0] = voice.handlerId;
@@ -3145,8 +3157,15 @@ class HubbubbRingCard extends LitElement {
         } else {
           this._closeMic(); // heard you; stop capturing while it thinks
           this._voiceState = "processing";
+          const heard = ev.data?.stt_output?.text || "";
+          this._caption(heard ? { you: heard, fixed: true } : null);
         }
         break;
+      case "tts-start": {
+        const say = ev.data?.tts_input || "";
+        if (say) this._caption({ you: this._cap?.you, say, el: v.audio });
+        break;
+      }
       case "tts-end": {
         const url = ev.data?.tts_output?.url;
         if (!url) return this._stopLocalVoice();
@@ -3211,10 +3230,116 @@ class HubbubbRingCard extends LitElement {
     this._envEl = null;
     this._env = null;
     this._envUrl = null;
+    if (this._cap?.fixed) this._caption(null); // nothing more is coming
   }
 
   _toast(message) {
     fireEvent(this, "hass-notification", { message });
+  }
+
+  /* ---------------- listening cue ---------------- */
+  /* Fetched once in his own voice so the tap is answered the moment the mic
+     is live; a two-note chime stands in until it has loaded. */
+  async _loadCue() {
+    if (this._cueReq) return;
+    this._cueReq = true;
+    try {
+      const url = await this._ttsUrl(LISTEN_CUE);
+      if (url) this._cueBytes = await (await fetch(url)).arrayBuffer();
+    } catch {
+      this._cueReq = false; // try again on the next connection
+    }
+  }
+
+  /* Played through the mic's own context (made inside the tap, so iOS lets
+     it sound), and the mic is gated until it ends so the pipeline never
+     hears him say it. */
+  async _playCue(voice) {
+    const ctx = voice.ctx;
+    voice.gate = Infinity;
+    let buf = null;
+    try {
+      if (this._cueBytes) buf = await ctx.decodeAudioData(this._cueBytes.slice(0));
+    } catch {
+      /* a bad clip: the chime below */
+    }
+    if (this._voice !== voice) return;
+    const t = ctx.currentTime;
+    if (buf) {
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      src.start(t);
+      voice.gate = t + buf.duration + 0.12;
+      this._caption({ say: LISTEN_CUE, fixed: true });
+      return;
+    }
+    for (const [f, dt] of [[660, 0], [990, 0.09]]) {
+      const osc = ctx.createOscillator();
+      const g = ctx.createGain();
+      osc.frequency.value = f;
+      g.gain.setValueAtTime(0, t + dt);
+      g.gain.linearRampToValueAtTime(0.16, t + dt + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0001, t + dt + 0.18);
+      osc.connect(g).connect(ctx.destination);
+      osc.start(t + dt);
+      osc.stop(t + dt + 0.2);
+    }
+    voice.gate = t + 0.32;
+  }
+
+  /* ---------------- subtitles ---------------- */
+  _caption(c) {
+    this._cap = c ? { at: performance.now(), ...c } : null;
+  }
+
+  /* A turn the front door just answered. Only this card's own puck, and
+     never while this screen is running its own conversation - those are
+     captioned from the pipeline events directly. */
+  _puckSaid(d) {
+    if (!d?.reply || this._voice) return;
+    const sat = this._config?.entity;
+    const dev = this._hass?.entities?.[sat]?.device_id;
+    if (d.satellite_id !== sat && !(dev && d.device_id === dev)) return;
+    // ponytail: ~15 characters a second is the house voice's pace; the puck
+    // reports no position, so this estimate is the clock.
+    this._caption({ you: d.heard, say: d.reply, est: Math.max(1.2, d.reply.length / 15) });
+  }
+
+  /* Per frame: how far through the reply he is, then hold the last words
+     a moment and fade. Played here, the element is the clock; on the puck
+     it is the time since the satellite started responding. */
+  _capTick(now) {
+    const c = this._cap;
+    if (!c) return;
+    let p = 1;
+    let done = false;
+    if (c.fixed) {
+      if (now - c.at > 30000) done = true;
+    } else if (c.el) {
+      const el = c.el;
+      const d = el.duration;
+      p = el.ended ? 1 : isFinite(d) && d > 0 ? el.currentTime / d : 0;
+      done = el.ended || (el.paused && el.currentTime > 0) || (!el.currentTime && now - c.at > 15000);
+    } else {
+      const speaking = this._effectiveState() === "responding";
+      if (speaking && !c.t0) c.t0 = now;
+      p = c.t0 ? Math.min(0.97, (now - c.t0) / 1000 / c.est) : 0;
+      if (c.t0 && !speaking) p = 1;
+      done = (c.t0 && !speaking) || (!c.t0 && now - c.at > 20000);
+    }
+    if (done && !c.doneAt) c.doneAt = now;
+    if (c.doneAt) {
+      const held = now - c.doneAt;
+      if (held > CAPTION_HOLD + 800) return this._caption(null);
+      if (held > CAPTION_HOLD && !c.fading) {
+        c.fading = true;
+        this.requestUpdate();
+      }
+    }
+    c.p = p; // kept so a card re-render doesn't rewind the words
+    const el = this.renderRoot?.querySelector("hubbubb-caption");
+    if (el) el.progress = p;
   }
 
   /* The composer mic is pure dictation: what you say lands in the message
@@ -4166,6 +4291,7 @@ class HubbubbRingCard extends LitElement {
       this._last = now;
       this._perfTick(raw);
       this._draw(dt);
+      this._capTick(now);
     };
     this._raf = requestAnimationFrame(frame);
   }
@@ -6709,6 +6835,10 @@ class HubbubbRingCard extends LitElement {
                 <circle class="rim-outer" cx="100" cy="100" r="40.5" />
               </g>
             </svg>
+            ${this._cap && !build
+              ? html`<hubbubb-caption class="cap" .you=${this._cap.you || ""} .say=${this._cap.say || ""}
+                  .who=${this._name} .progress=${this._cap.p ?? (this._cap.fixed ? 1 : 0)} ?fading=${!!this._cap.fading}></hubbubb-caption>`
+              : nothing}
           </div>
           ${this._renderDock(build)}
           ${this._sheet ? this._renderSheet() : nothing}
@@ -6825,6 +6955,17 @@ class HubbubbRingCard extends LitElement {
     }
     .ring:active {
       filter: brightness(1.25);
+    }
+    /* Subtitles over the ring's lower edge, wider than the ring itself on a
+       small dashboard tile, never wider than the screen. */
+    .cap {
+      --cw: min(calc(100vw - 24px), 560px);
+      position: absolute;
+      left: 50%;
+      bottom: 2%;
+      width: var(--cw);
+      margin-left: calc(var(--cw) / -2);
+      z-index: 2;
     }
 
     /* ---------------- start-up ---------------- */
