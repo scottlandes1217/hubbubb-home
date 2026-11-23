@@ -42,3 +42,18 @@ export function downsampler(from, to) {
     return k === out.length ? out : out.subarray(0, k);
   };
 }
+
+/* Dead-mic detector: feed it each live mic buffer, it answers true once
+   `seconds` of input in a row have been exact zeros from the very start.
+   A real microphone always hisses, so only a capture that never connected
+   reads like this (iOS WebKit has opened the mic and streamed nothing).
+   One live sample and it stays false for good. */
+export function deadMicWatch(rate, seconds = 1.5) {
+  let zeros = 0, alive = false;
+  return (f) => {
+    if (alive) return false;
+    for (let i = 0; i < f.length; i++) if (f[i] !== 0) return !(alive = true);
+    zeros += f.length;
+    return zeros >= rate * seconds;
+  };
+}

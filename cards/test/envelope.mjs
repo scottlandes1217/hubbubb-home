@@ -2,7 +2,7 @@
    A 1s tone at half amplitude then 1s of silence must come out as a second
    of 1s followed by a second of 0s, read back at the right bin. */
 import assert from "node:assert/strict";
-import { downsampler, rmsEnvelope } from "../src/envelope.js";
+import { deadMicWatch, downsampler, rmsEnvelope } from "../src/envelope.js";
 
 const RATE = 8000, HZ = 50;
 const ch = new Float32Array(RATE * 2);
@@ -39,3 +39,19 @@ console.log("envelope ok");
   assert.deepEqual([...same], [0, 0x7fff, -0x8000]);
 }
 console.log("downsampler ok");
+
+{
+  // all-zero input trips after 1.5 s, not before
+  const dead = deadMicWatch(1000);
+  const zeros = new Float32Array(500);
+  assert.equal(dead(zeros), false);
+  assert.equal(dead(zeros), false);
+  assert.equal(dead(zeros), true, "1.5 s of exact zeros is a dead mic");
+  // a single live sample anywhere and it never trips, even on later silence
+  const live = deadMicWatch(1000);
+  const hiss = new Float32Array(500); hiss[250] = 1e-5;
+  assert.equal(live(zeros), false);
+  assert.equal(live(hiss), false);
+  for (let i = 0; i < 10; i++) assert.equal(live(zeros), false, "quiet after speech is not dead");
+}
+console.log("deadMicWatch ok");

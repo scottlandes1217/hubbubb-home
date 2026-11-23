@@ -18,7 +18,7 @@ console.info(`hubbubb-ring-card ${BUILD}`);
 // option, so plain binding cannot pull it back. live() compares against the
 // live DOM value instead of the last rendered one.
 import { live } from "lit/directives/live.js";
-import { downsampler, rmsEnvelope } from "./envelope.js";
+import { deadMicWatch, downsampler, rmsEnvelope } from "./envelope.js";
 import { createMembrane, membranePoint, SHELL_RADII } from "./im3-membrane.js";
 import { nowNext, parseEvent } from "./hubbubb-calendar.js";
 import { groupProposals } from "./review-groups.js";
@@ -3005,7 +3005,7 @@ class HubbubbRingCard extends LitElement {
     return navigator.mediaDevices.getUserMedia({ audio: true });
   }
 
-  async _startLocalVoice(mode = "converse") {
+  async _startLocalVoice(mode = "converse", onSilent = null) {
     if (this._voice || this._micOpening) return true;
     this._micOpening = true;
     /* Flip the ring before the mic prompt so the tap answers instantly —
@@ -3013,16 +3013,37 @@ class HubbubbRingCard extends LitElement {
        noticeable moment. */
     if (mode === "converse") this._voiceState = "listening";
     else this._dictating = true;
+    /* The context and the playback unlock are made here, still inside the
+       tap, before anything is awaited. Built after the mic prompt, iOS
+       (the companion app's WebKit) handed us a context that ran but fed
+       the pipeline nothing but zeros: 9 s of silence that Whisper turned
+       into "peace". The context runs at the device's own rate and we
+       resample to the 16k the pipeline expects ourselves - asking for a
+       16k context garbles speech on iOS, which keeps the mic at 48k. */
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    const ctx = new Ctx();
+    ctx.resume?.().catch(() => {});
+    /* Unlock audio output too, so the TTS reply is allowed to play seconds
+       later (iOS autoplay rules). Dictation never plays audio. */
+    let audio = null;
+    if (mode === "converse") {
+      audio = new Audio(
+        "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA="
+      );
+      audio.play().catch(() => {});
+    }
     let stream;
     try {
       stream = await this._openMic();
     } catch {
       this._voiceState = null;
       this._dictating = false;
+      ctx.close().catch(() => {});
       return "microphone permission denied";
     } finally {
       this._micOpening = false;
     }
+    if (ctx.state === "suspended") ctx.resume?.().catch(() => {});
     /* A Continuity/Bluetooth mic can vanish mid-capture (the phone locks,
        the headset sleeps); without this we keep streaming a dead track and
        he listens to silence. stop() doesn't fire ended, only real loss does. */
@@ -3033,22 +3054,6 @@ class HubbubbRingCard extends LitElement {
         this._toast("The microphone disconnected.");
         this._stopLocalVoice();
       };
-    /* The context runs at the device's own rate and we resample to the 16k
-       the pipeline expects ourselves. Asking for a 16k context looked right,
-       but iOS keeps the mic at 48k and WebKit's conversion between the two
-       garbles speech — Whisper then transcribes gibberish. */
-    const Ctx = window.AudioContext || window.webkitAudioContext;
-    const ctx = new Ctx();
-    /* Unlock audio output while we're still inside the tap gesture, so the
-       TTS reply is allowed to play seconds later (iOS autoplay rules).
-       Dictation never plays audio, so it skips the unlock. */
-    let audio = null;
-    if (mode === "converse") {
-      audio = new Audio(
-        "data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA="
-      );
-      audio.play().catch(() => {});
-    }
 
     const voice = (this._voice = {
       mode,
@@ -3084,9 +3089,20 @@ class HubbubbRingCard extends LitElement {
     const src = (voice.src = ctx.createMediaStreamSource(stream));
     const proc = (voice.proc = ctx.createScriptProcessor(2048, 1, 1));
     const down = downsampler(ctx.sampleRate, 16000);
+    const silent = deadMicWatch(ctx.sampleRate);
     proc.onaudioprocess = (e) => {
+      const f = e.inputBuffer.getChannelData(0);
+      /* A mic that opens but delivers exact zeros (not a quiet room - real
+         mics always hiss) would otherwise be transcribed as hallucinations
+         and answered. Drop out and let the caller find another way in. */
+      if (silent(f) && this._voice === voice) {
+        this._stopLocalVoice();
+        if (onSilent) onSilent();
+        else this._toast("This device's microphone is sending silence.");
+        return;
+      }
       if (voice.handlerId == null) return;
-      const pcm = down(e.inputBuffer.getChannelData(0));
+      const pcm = down(f);
       const out = new Uint8Array(1 + pcm.length * 2);
       out[0] = voice.handlerId;
       const dv = new DataView(out.buffer, 1);
@@ -3279,7 +3295,9 @@ class HubbubbRingCard extends LitElement {
     };
     if (!window.isSecureContext) return elsewhere("No microphone on a plain-http page");
     if (!navigator.mediaDevices?.getUserMedia) return elsewhere("This browser exposes no microphone");
-    const result = await this._startLocalVoice();
+    const result = await this._startLocalVoice("converse", () =>
+      elsewhere("This device's mic is sending silence")
+    );
     if (result !== true) elsewhere(`Couldn't use this device's mic (${result})`);
   }
 
