@@ -399,9 +399,13 @@ const CLAIM_WINDOW = 3000;
    tie-break picks one — instead of comparing their wall clocks. */
 const NEVER_TOUCHED = 1e12;
 /* What he says the moment the mic opens on a tap. */
-const LISTEN_CUE = "Yes?";
+const LISTEN_CUE = "Hello, sir.";
 /* How long the last subtitle stays up after he stops, in ms. */
 const CAPTION_HOLD = 2600;
+/* The house voice's pace, characters a second (measured 15.7 on a short
+   reply, 14.5 on a long one). The clock for the puck, and for a phone
+   whose player reports no duration for a streamed reply. */
+const CAPTION_RATE = 15;
 
 /* The same tile again, as a CSS background.
 
@@ -3291,6 +3295,10 @@ class HubbubbRingCard extends LitElement {
   /* ---------------- subtitles ---------------- */
   _caption(c) {
     this._cap = c ? { at: performance.now(), ...c } : null;
+    /* The element is reused (the tap's unlock clip, the line before), so
+       its ended/paused say nothing about this reply until it plays. */
+    const cap = this._cap;
+    cap?.el?.addEventListener?.("playing", () => (cap.live = true), { once: true });
   }
 
   /* A turn the front door just answered. Only this card's own puck, and
@@ -3301,9 +3309,7 @@ class HubbubbRingCard extends LitElement {
     const sat = this._config?.entity;
     const dev = this._hass?.entities?.[sat]?.device_id;
     if (d.satellite_id !== sat && !(dev && d.device_id === dev)) return;
-    // ponytail: ~15 characters a second is the house voice's pace; the puck
-    // reports no position, so this estimate is the clock.
-    this._caption({ you: d.heard, say: d.reply, est: Math.max(1.2, d.reply.length / 15) });
+    this._caption({ you: d.heard, say: d.reply });
   }
 
   /* Per frame: how far through the reply he is, then hold the last words
@@ -3318,13 +3324,22 @@ class HubbubbRingCard extends LitElement {
       if (now - c.at > 30000) done = true;
     } else if (c.el) {
       const el = c.el;
-      const d = el.duration;
-      p = el.ended ? 1 : isFinite(d) && d > 0 ? el.currentTime / d : 0;
-      done = el.ended || (el.paused && el.currentTime > 0) || (!el.currentTime && now - c.at > 15000);
+      /* iOS reports Infinity for a streamed reply until it has all of it,
+         which held every word dark until he had finished speaking. The
+         envelope decoded for the ring's mouth knows the true length; the
+         character-rate guess is only for when even that is missing. */
+      let d = el.duration;
+      if (!(isFinite(d) && d > 0) && this._envEl === el && this._env) d = this._env.length / ENV_HZ;
+      const est = Math.max(1.2, (c.say || "").length / CAPTION_RATE);
+      if (!c.live) p = 0;
+      else if (el.ended) p = 1;
+      else p = isFinite(d) && d > 0 ? el.currentTime / d : Math.min(0.97, el.currentTime / est);
+      done = c.live ? el.ended || el.paused : now - c.at > 30000;
     } else {
       const speaking = this._effectiveState() === "responding";
       if (speaking && !c.t0) c.t0 = now;
-      p = c.t0 ? Math.min(0.97, (now - c.t0) / 1000 / c.est) : 0;
+      const est = Math.max(1.2, (c.say || "").length / CAPTION_RATE);
+      p = c.t0 ? Math.min(0.97, (now - c.t0) / 1000 / est) : 0;
       if (c.t0 && !speaking) p = 1;
       done = (c.t0 && !speaking) || (!c.t0 && now - c.at > 20000);
     }
@@ -5791,7 +5806,10 @@ class HubbubbRingCard extends LitElement {
           `intelligence, and I'm here to assist you with a variety of tasks as ` +
           `best I can, 24 hours a day, 7 days a week. Importing all preferences ` +
           `from home interface. Systems are now fully operational.`;
-      setTimeout(() => say(message).catch(() => this._toast(`${name} could not speak the introduction.`)), 900);
+      setTimeout(() => {
+        this._caption({ say: message });
+        say(message).catch(() => this._toast(`${name} could not speak the introduction.`));
+      }, 900);
       return;
     }
     const T = IM3_BOOT;
@@ -5841,6 +5859,7 @@ class HubbubbRingCard extends LitElement {
           try {
             const blob = await fetched[i];
             if (this._introRun !== run) { URL.revokeObjectURL(blob); return; }
+            this._caption({ say: text, el });
             await this._playHere(el, blob, run,
               at === T.imp ? preferencesPlaying : at === T.reactor ? () => this._beginIntroPower(run, el) : null,
               at === T.reactor ? () => this._endIntroPower(run) : null);
@@ -5861,6 +5880,7 @@ class HubbubbRingCard extends LitElement {
             this._introPowerCue = () => this._beginIntroPower(run);
             if (this._config.follow_media_player === false || !this._resolveMediaPlayer(this._hass)) this._introPowerCue();
           }
+          this._caption({ say: text });
           await say(text);
           if (at === T.reactor) this._endIntroPower(run);
           // Some devices do not publish a playback state; release the hold
