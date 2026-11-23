@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.hubbubb.wake-shadow</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/scottlandes/Projects/hubbubb-home/companion/voice-service/wakeword/.venv/bin/python</string>
+    <string>listen.py</string>
+    <string>--puck</string><string>192.168.1.200</string>
+  </array>
+  <key>WorkingDirectory</key><string>/Users/scottlandes/Projects/hubbubb-home-wake-shadow/companion/voice-service/wakeword</string>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>ProcessType</key><string>Background</string>
+  <key>StandardOutPath</key><string>/Users/scottlandes/.hubbubb-voice/wake-shadow/listen.log</string>
+  <key>StandardErrorPath</key><string>/Users/scottlandes/.hubbubb-voice/wake-shadow/listen.log</string>
+</dict>
+</plist>
