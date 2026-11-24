@@ -354,7 +354,11 @@ def main():
                  "--adapter-path", ADAPTER, "--batch-size", "1",
                  "--num-layers", str(LAYERS), "--iters", str(iters),
                  "--steps-per-report", "10", "--save-every", str(iters),
-                 "--grad-checkpoint"])
+                 "--grad-checkpoint"],
+                # mx.compile of the step over the gated-delta token loop runs
+                # Metal out of memory even at 2-4 layers; uncompiled, 8 layers
+                # at 1.2k tokens peak ~32 GB (mlx 0.32.4 / mlx-lm 0.32.2).
+                env={**os.environ, "MLX_DISABLE_COMPILE": "1"})
         record["train_seconds"] = round(time.time() - started)
 
         merge(ADAPTER / "adapters.safetensors", hf_dir)
@@ -368,6 +372,7 @@ def main():
             [sys.executable, HERE / "eval_house.py", "jarvis-house-candidate", current],
             capture_output=True, text=True, cwd=HERE,
             timeout=None if deadline is None else max(1, deadline - time.time()))
+        sys.stderr.write(verdict.stderr)  # the nightly log is the only trace of a crash
         result = json.loads(verdict.stdout)
         # A 20-iteration smoke model proves the chain; it must never serve.
         record.update(eval=result, promoted=result["promote"] and not args.smoke)

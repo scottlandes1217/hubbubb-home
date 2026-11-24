@@ -7,7 +7,7 @@ escalated. The result is auditioned against the model serving now and
 only a clean win is installed in ollama as **`jarvis-house`**.
 The abliterated base is never modified.
 
-    uv venv .venv && VIRTUAL_ENV=.venv uv pip install mlx-lm==0.32.2   # once (0.31.x: gather_axis VJP crash)
+    uv venv .venv && VIRTUAL_ENV=.venv uv pip install mlx-lm==0.32.2 mlx==0.32.4   # once (mlx-lm 0.31: gather_axis VJP crash; mlx 0.32.2: gather_qmm has no global_scale)
     /usr/bin/python3 train_house.py --smoke   # prove the chain, ~30 min
     /usr/bin/python3 train_house.py           # the real run
     /usr/bin/python3 train_house.py --nightly # what launchd runs at 01:30
