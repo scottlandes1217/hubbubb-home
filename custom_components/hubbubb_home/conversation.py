@@ -285,10 +285,9 @@ class FrontDoorConversationEntity(conversation.ConversationEntity):
         if stuck := nothing_changed(calls):
             _LOGGER.warning("%r changed nothing: %s", user_input.text, calls)
             speech = self._stuck_reply(stuck, calls)
-        person, _, _ = speakers.resolve(user_input.device_id)
         speech = address(
             " ".join(p for p in (greeting, speech) if p),
-            speakers.title_for(person),
+            speakers.sure_title(user_input.device_id),
         )
         result.response.async_set_speech(speech)
         return conversation.ConversationResult(

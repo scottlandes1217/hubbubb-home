@@ -184,6 +184,16 @@ class SpeakerBook:
             return self._devices[device_id], 0.5, "device"
         return None, 0.0, None
 
+    def sure_title(self, device_id: str | None = None) -> str:
+        """The title for a reply: only someone known for sure gets theirs.
+
+        A weak voice match is a guess, and a guest guessed as Scott was
+        called "sir" - so an unsure match gets no title at all.
+        """
+        person, confidence, source = self.resolve(device_id)
+        sure = source == "told" or confidence >= CONFIDENT
+        return self.title_for(person if sure else None)
+
     def prompt_line(self, device_id: str | None = None) -> str:
         """One sentence about the speaker, for a language model's prompt."""
         person, confidence, source = self.resolve(device_id)

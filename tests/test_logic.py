@@ -951,6 +951,14 @@ def test_titles_replace_sir():
     assert address("On it sir.", "Vega") == "On it Vega."
     assert address("Sir, the door is open.", "ma'am") == "Ma'am, the door is open."
     assert address("On it sir.", "") == "On it."
+    # Only a sure match is titled: a guest guessed as Scott is not "sir".
+    import time as _time
+
+    sure = SpeakerBook(None, "", "", titles="Scott: sir")
+    sure.record({"person": "Scott", "confidence": 0.65, "ts": _time.time()})
+    assert sure.sure_title() == ""
+    sure.record({"person": "Scott", "confidence": 0.8, "ts": _time.time()})
+    assert sure.sure_title() == "sir"
     assert address("Yes, sir. Done.", "") == "Yes. Done."
     assert address("Sir, the door is open.", "") == "The door is open."
     assert address("I desire coffee sir", "") == "I desire coffee"
