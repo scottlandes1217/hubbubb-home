@@ -83,4 +83,12 @@ t.api = lambda path, payload, **kw: (calls.append((path, payload)) or
     {"models": [{"name": "jarvis-house:latest"}, {"name": t.SERVING_BASE}]})
 t.unload_all_but("jarvis-house:latest")
 assert calls[1:] == [("/api/generate", {"model": t.SERVING_BASE, "keep_alive": 0})]
+# Repeats teach answers, never a handoff for a device the model can work.
+import dataset
+dataset.pair_lines = lambda: [json.dumps(r) + "\n" for r in (
+    {"kind": "escalation", "prompt": "is the heater on", "response": "Yes sir.", "note": "repeat"},
+    {"kind": "escalation", "prompt": "an octopus fact", "response": "Three hearts.", "note": "repeat"},
+    {"kind": "escalation", "prompt": "is the heater on", "response": "", "note": ""})]
+got = dataset.harvested_samples({"heater"})
+assert [m["messages"][-1].get("content") for m in got][0] == "Three hearts." and len(got) == 2, got
 print("ok")

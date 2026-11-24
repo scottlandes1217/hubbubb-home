@@ -227,6 +227,11 @@ def harvested_samples(names):
         # "is the porch light on" is a snapshot; training on it teaches state
         # as fact (CURRICULUM lesson 1), so anything naming a device hands off.
         mentions_device = any(n in prompt.lower() for n in names)
+        # A repeat is often a false alarm (the first answer was right, the
+        # speaker just said it again), so it must never teach a handoff for
+        # something the local model can already do.
+        if pair.get("note") == "repeat" and (mentions_device or not response):
+            continue
         if response and not mentions_device:
             out.append(_convo(prompt, _say(response)))
         else:

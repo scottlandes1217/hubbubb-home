@@ -46,7 +46,8 @@ def cases():
         "write me a python script that backs up my photos",
         "research the best robot vacuum for pet hair")]
     try:
-        rows = [json.loads(l) for l in pair_lines() if '"escalation"' in l]
+        rows = [r for r in map(json.loads, (l for l in pair_lines() if '"escalation"' in l))
+                if r.get("note") != "repeat"]  # repeats are not all real escalations
         out += [("escalate", r["prompt"], None) for r in rows[-5:] if r.get("prompt")]
     except (OSError, ValueError):
         pass
