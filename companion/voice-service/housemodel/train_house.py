@@ -54,7 +54,6 @@ DATA = WORK / "data"
 ADAPTER = WORK / "adapter"
 MERGED = WORK / "merged"
 LAST_RUN = WORK / "last-run.json"
-PAIRS = Path(os.path.expanduser("~/.claude/hooks/finetune/pairs.jsonl"))
 OLLAMA = shutil.which("ollama") or "/opt/homebrew/bin/ollama"
 API = "http://127.0.0.1:11434"
 MIN_NEW = 20
@@ -90,10 +89,8 @@ def api(path, payload, timeout=300, method=None):
 
 
 def escalation_count():
-    try:
-        return sum('"escalation"' in line for line in open(PAIRS))
-    except OSError:
-        return 0
+    from dataset import pair_lines
+    return sum('"escalation"' in line for line in pair_lines())
 
 
 def serving_model():

@@ -18,7 +18,7 @@ import re
 import sys
 import urllib.request
 
-from dataset import PAIRS, SYSTEM, TOOLS, exposed_entities
+from dataset import SYSTEM, pair_lines, TOOLS, exposed_entities
 
 OLLAMA = "http://127.0.0.1:11434/api/chat"
 SYNTAX = re.compile(r'<tool_call>|<function=|\{\s*"(name|parameters|arguments)"')
@@ -46,7 +46,7 @@ def cases():
         "write me a python script that backs up my photos",
         "research the best robot vacuum for pet hair")]
     try:
-        rows = [json.loads(l) for l in open(PAIRS) if '"escalation"' in l]
+        rows = [json.loads(l) for l in pair_lines() if '"escalation"' in l]
         out += [("escalate", r["prompt"], None) for r in rows[-5:] if r.get("prompt")]
     except (OSError, ValueError):
         pass

@@ -26,6 +26,20 @@ import random
 
 STORAGE = os.path.expanduser("~/.hamounts/config/.storage")
 PAIRS = os.path.expanduser("~/.claude/hooks/finetune/pairs.jsonl")
+# Repeats HA handed to Claude ("asked twice"), written by the integration
+# into its own config dir and read here over the Samba mount.
+HA_PAIRS = os.path.expanduser("~/.hamounts/config/hubbubb_home_pairs.jsonl")
+
+
+def pair_lines():
+    """Every logged escalation line, from the companion and from HA."""
+    lines = []
+    for path in (PAIRS, HA_PAIRS):
+        try:
+            lines += open(path).readlines()
+        except OSError:
+            pass
+    return lines
 OUT = os.path.expanduser("~/.hubbubb-voice/housemodel/data")
 
 SYSTEM = (
@@ -200,11 +214,7 @@ def plain_samples():
 def harvested_samples(names):
     """Escalations the companion logged: Claude's answer, or the handoff."""
     out = []
-    try:
-        lines = open(PAIRS).readlines()
-    except OSError:
-        return out
-    for line in lines:
+    for line in pair_lines():
         try:
             pair = json.loads(line)
         except ValueError:
