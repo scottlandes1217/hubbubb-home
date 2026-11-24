@@ -86,13 +86,7 @@ class HubbubbAPI(llm.API):
         runtime = self._runtime
         tools = agent_tools(runtime)
 
-        speaker = runtime.speakers.prompt_line(
-            getattr(llm_context, "device_id", None)
-        )
-        prompt = f"{runtime.persona()}\n\n{speaker}"
-        # HA's own date line has no weekday, and a model asked about "today"
-        # invents one.
-        prompt += f"\n\nToday is {dt_util.now().strftime('%A, %B %-d, %Y')}."
+        prompt = runtime.persona()
         # Home Assistant's own Assist API drops its timer tools and adds
         # "This device is not able to start timers." whenever the request
         # arrives without a timer-capable device - a dashboard, the phone
@@ -185,6 +179,17 @@ class HubbubbAPI(llm.API):
                 "when its tool succeeded; if it returned an error, say what "
                 "failed. Never guess and never apologize at length."
             )
+        # Per-turn lines go last. The local model is hybrid/recurrent, so
+        # llama.cpp keeps cache checkpoints only near the end of a prompt: a
+        # change ~800 tokens from the end (the speaker line, which varies
+        # with every voice-match score) re-read all ~15k tokens, 26 s.
+        speaker = runtime.speakers.prompt_line(
+            getattr(llm_context, "device_id", None)
+        )
+        prompt += f"\n\n{speaker}"
+        # HA's own date line has no weekday, and a model asked about "today"
+        # invents one.
+        prompt += f"\n\nToday is {dt_util.now().strftime('%A, %B %-d, %Y')}."
         return llm.APIInstance(
             api=self,
             api_prompt=prompt,
