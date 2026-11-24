@@ -1,13 +1,13 @@
 # The house model
 
-LoRA-tunes the local brain (`qwen3.6:35b-a3b`, a 35B mixture-of-experts)
+LoRA-tunes the local brain (`huihui_ai/Qwen3.6-abliterated:35b-a3b`, a 35B mixture-of-experts)
 on *this* house - its device names, rooms, tool-call discipline, the
 dismissal manners - and on what Claude answered when the local model
 escalated. The result is auditioned against the model serving now and
-only a clean win is installed in ollama as **`jarvis-house`**. The stock
-`qwen3.6:35b-a3b` is never modified.
+only a clean win is installed in ollama as **`jarvis-house`**.
+The abliterated base is never modified.
 
-    uv venv .venv && VIRTUAL_ENV=.venv uv pip install mlx-lm==0.32.0   # once
+    uv venv .venv && VIRTUAL_ENV=.venv uv pip install mlx-lm==0.32.2 mlx==0.32.4   # once (mlx-lm 0.31: gather_axis VJP crash; mlx 0.32.2: gather_qmm has no global_scale)
     /usr/bin/python3 train_house.py --smoke   # prove the chain, ~30 min
     /usr/bin/python3 train_house.py           # the real run
     /usr/bin/python3 train_house.py --nightly # what launchd runs at 01:30
@@ -25,11 +25,11 @@ steps run in `.venv` on their own.
    `~/.claude/hooks/finetune/pairs.jsonl`: Claude's answer becomes the
    training target; rows that name a device, or have no answer, teach the
    handoff instead.
-2. mlx_lm LoRA on `mlx-community/Qwen3.6-35B-A3B-4bit` - every linear layer
+2. mlx_lm LoRA on a 4-bit MLX build quantised once from huihui's bf16 (`~/.hubbubb-voice/housemodel/base-4bit`) - every linear layer
    in the last 8 blocks except the routed experts. ~36 GB peak; ollama's
    models are unloaded first, so Jarvis is offline while it trains.
 3. The deltas are added to the original bf16 checkpoint
-   (`Qwen/Qwen3.6-35B-A3B`, ~70 GB in the HF cache). Measured dead ends on
+   (`huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated`, ~66 GB in the HF cache). Measured dead ends on
    ollama 0.33: `mlx_lm fuse` output carries mlx tensor names the
    quantizer rejects, and safetensors `ADAPTER` import does not support
    qwen35moe. The routed experts are excluded because mlx restacks them;

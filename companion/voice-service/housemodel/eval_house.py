@@ -83,6 +83,10 @@ def score(kind, expected, content, calls):
 def ask(model, prompt):
     body = json.dumps({
         "model": model, "stream": False, "think": False, "tools": TOOLS,
+        # Replies are a sentence or a tool call. Uncapped, one sampled reply
+        # that never ends ran 18k tokens into the 300 s timeout and the whole
+        # audition died with nothing on stdout (2026-11-24).
+        "options": {"num_predict": 400},
         "messages": [{"role": "system", "content": SYSTEM},
                      {"role": "user", "content": prompt}],
     }).encode()
@@ -96,7 +100,11 @@ def ask(model, prompt):
 def run(model, suite):
     passed, hard = 0, []
     for kind, prompt, expected in suite:
-        content, calls = ask(model, prompt)
+        try:
+            content, calls = ask(model, prompt)
+        except OSError as err:  # timeout or ollama error: a miss, not a crash
+            hard.append({"prompt": prompt, "why": f"no reply: {err}"[:120], "reply": ""})
+            continue
         ok, why = score(kind, expected, content, calls)
         passed += ok
         if why:
