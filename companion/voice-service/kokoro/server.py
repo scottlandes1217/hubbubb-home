@@ -24,7 +24,10 @@ from wyoming.audio import AudioChunk, AudioStart, AudioStop
 from wyoming.event import Event
 from wyoming.info import Attribution, Describe, Info, TtsProgram, TtsVoice
 from wyoming.server import AsyncEventHandler, AsyncTcpServer
-from wyoming.tts import Synthesize
+from wyoming.tts import (
+    Synthesize, SynthesizeChunk, SynthesizeStart, SynthesizeStop,
+    SynthesizeStopped,
+)
 
 _LOGGER = logging.getLogger("hubbubb-kokoro")
 
@@ -120,23 +123,58 @@ class KokoroHandler(AsyncEventHandler):
         super().__init__(*args, **kwargs)
         self.service = service
         self.info = info
+        self.stream: dict | None = None
 
     async def handle_event(self, event: Event) -> bool:
         if Describe.is_type(event.type):
             await self.write_event(self.info.event())
             return True
-        if not Synthesize.is_type(event.type):
+        # Streaming (HA sends text as it is written): speak each sentence as
+        # soon as it is complete, instead of after the whole reply. The plain
+        # Synthesize HA also sends, for older servers, is then ignored.
+        if SynthesizeStart.is_type(event.type):
+            start = SynthesizeStart.from_event(event)
+            self.stream = {"voice": self._voice(start.voice), "pending": "",
+                           "text": "", "seconds": 0.0}
+            return True
+        if SynthesizeChunk.is_type(event.type) and self.stream:
+            stream = self.stream
+            stream["pending"] += SynthesizeChunk.from_event(event).text
+            sentences = split_sentences(stream["pending"])
+            if len(sentences) > 1:  # the last one may still be growing
+                stream["pending"] = sentences[-1]
+                await self._say(sentences[:-1], stream)
+            return True
+        if SynthesizeStop.is_type(event.type) and self.stream:
+            stream, self.stream = self.stream, None
+            if stream["pending"].strip():
+                await self._say([stream["pending"]], stream)
+            await self.write_event(SynthesizeStopped().event())
+            note_playback(stream["text"].strip(), stream["seconds"])
+            return True
+        if not Synthesize.is_type(event.type) or self.stream:
             return True
 
         synthesize = Synthesize.from_event(event)
-        voice = self.service.args.voice
-        if synthesize.voice and synthesize.voice.name:
-            voice = synthesize.voice.name
-        loop = asyncio.get_running_loop()
         # One sentence at a time, so the first one is playing while the rest
         # are still being synthesized: total time is the same, time to the
         # first word is not.
-        sentences = split_sentences(synthesize.text) or [synthesize.text]
+        stream = {"voice": self._voice(synthesize.voice), "text": "",
+                  "seconds": 0.0}
+        await self._say(split_sentences(synthesize.text) or [synthesize.text],
+                        stream)
+        # One entry for the whole reply, written when the last chunk is out -
+        # same text and same total duration the self-echo fence saw before,
+        # within a few milliseconds of the same timestamp.
+        note_playback(synthesize.text, stream["seconds"])
+        return True
+
+    def _voice(self, voice) -> str:
+        return voice.name if voice and voice.name else self.service.args.voice
+
+    async def _say(self, sentences: list[str], stream: dict) -> None:
+        """One audio-start..audio-stop for these sentences."""
+        loop = asyncio.get_running_loop()
         rate, spoken_bytes = 0, 0
         # ponytail: one synthesis at a time - one house, one puck. Held across
         # the writes too, so two replies cannot interleave chunks between the
@@ -145,7 +183,7 @@ class KokoroHandler(AsyncEventHandler):
             try:
                 for sentence in sentences:
                     samples, sentence_rate = await loop.run_in_executor(
-                        None, self.service.synthesize, sentence, voice
+                        None, self.service.synthesize, sentence, stream["voice"]
                     )
                     pcm = (np.clip(samples, -1.0, 1.0) * 32767).astype(
                         "<i2"
@@ -177,11 +215,8 @@ class KokoroHandler(AsyncEventHandler):
                 # if a later sentence blew up mid-reply.
                 if rate:
                     await self.write_event(AudioStop().event())
-        # One entry for the whole reply, written when the last chunk is out -
-        # same text and same total duration the self-echo fence saw before,
-        # within a few milliseconds of the same timestamp.
-        note_playback(synthesize.text, spoken_bytes / (2 * rate) if rate else 0)
-        return True
+        stream["text"] += " " + " ".join(sentences)
+        stream["seconds"] += spoken_bytes / (2 * rate) if rate else 0
 
 
 class Service:
@@ -210,6 +245,7 @@ def make_info(service: Service) -> Info:
                 attribution=attribution,
                 installed=True,
                 version="1.0.0",
+                supports_synthesize_streaming=True,
                 voices=[
                     TtsVoice(
                         name=name,
