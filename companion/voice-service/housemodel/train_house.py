@@ -1,13 +1,13 @@
 """LoRA-tune the local brain on this house, audition it, maybe promote it.
 
-The serving model is qwen3.6:35b-a3b (a 35B mixture-of-experts). The chain:
+The serving model is huihui_ai/Qwen3.6-abliterated:35b-a3b (a 35B mixture-of-experts). The chain:
 
   1. dataset.py regenerates train/valid from the registries + escalations.
   2. mlx_lm LoRA on the 4-bit MLX build (~36 GB peak). Every linear layer
      except the routed experts: mlx stacks the experts into `switch_mlp`,
      which has no 1:1 tensor in the original checkpoint.
   3. The LoRA deltas are added straight onto the ORIGINAL bf16 checkpoint
-     (Qwen/Qwen3.6-35B-A3B). Every adapted tensor there has the same name
+     (huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated). Every adapted tensor there has the same name
      and layout mlx trained on - mlx only renames the prefix - so the
      merge is exact and ollama's own converter does the rest. (Shorter
      routes measured dead on ollama 0.33: mlx_lm fuse writes mlx tensor
@@ -41,10 +41,15 @@ HERE = Path(__file__).parent
 # mlx steps only. dataset/eval read the HA share, which launchd lets only
 # /usr/bin/python3 (Full Disk Access) see - they run under sys.executable.
 PYTHON = HERE / ".venv" / "bin" / "python"
-BASE = "mlx-community/Qwen3.6-35B-A3B-4bit"
-HF_BASE = "Qwen/Qwen3.6-35B-A3B"
-SERVING_BASE = "qwen3.6:35b-a3b"
 WORK = Path(os.path.expanduser("~/.hubbubb-voice/housemodel"))
+# The brain Jarvis and the local Claude sessions share (huihui's GGUF), and
+# huihui's own bf16 upload of the same weights. Nobody publishes an MLX build
+# of that exact upload, so BASE is quantised here once, from HF_BASE.
+HF_BASE = "huihui-ai/Huihui-Qwen3.6-35B-A3B-abliterated"
+BASE = WORK / "base-4bit"
+SERVING_BASE = "huihui_ai/Qwen3.6-abliterated:35b-a3b"
+# Local Claude sessions run on the same model; two resident 23 GB models swap.
+BRAIN_SETTINGS = Path(os.path.expanduser("~/.claude/hooks/local-brain-settings.json"))
 DATA = WORK / "data"
 ADAPTER = WORK / "adapter"
 MERGED = WORK / "merged"
@@ -76,8 +81,9 @@ def run(cmd, **kw):
     subprocess.run([str(c) for c in cmd], check=True, timeout=left, **kw)
 
 
-def api(path, payload, timeout=300):
-    req = urllib.request.Request(f"{API}{path}", data=json.dumps(payload).encode(),
+def api(path, payload, timeout=300, method=None):
+    req = urllib.request.Request(f"{API}{path}", method=method,
+                                 data=None if payload is None else json.dumps(payload).encode(),
                                  headers={"Content-Type": "application/json"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
         return json.load(resp)
@@ -184,6 +190,22 @@ def set_agent_model(model):
         raise RuntimeError(f"agent not switched: {done}")
 
 
+def set_brain_settings(model):
+    """Local Claude sessions follow the agent onto `model` - one brain."""
+    settings = json.loads(BRAIN_SETTINGS.read_text())
+    for key in settings["env"]:
+        if key.startswith("ANTHROPIC_") and key.endswith("MODEL"):
+            settings["env"][key] = model
+    BRAIN_SETTINGS.write_text(json.dumps(settings, indent=2) + "\n")
+
+
+def unload_all_but(model):
+    """KEEP_ALIVE=-1 pins whatever the eval loaded; only the brain may stay."""
+    for m in api("/api/ps", None, method="GET").get("models", []):
+        if m["name"] != model:
+            api("/api/generate", {"model": m["name"], "keep_alive": 0})
+
+
 @contextlib.contextmanager
 def ollama_offline():
     """Ollama down for the body, Jarvis on Claude meanwhile. On every exit:
@@ -285,7 +307,9 @@ def main():
     escalations = escalation_count()
     last = json.loads(LAST_RUN.read_text()) if LAST_RUN.exists() else {}
     record = {"started": datetime.datetime.now().isoformat(timespec="seconds"),
-              "escalations": escalations, "iters": iters}
+              # a smoke run learns nothing, so the nightly still owes them
+              "escalations": last.get("escalations", 0) if args.smoke else escalations,
+              "iters": iters}
     if args.nightly:
         new = escalations - last.get("escalations", 0)
         if new < MIN_NEW:
@@ -309,8 +333,8 @@ def main():
     try:
         run([sys.executable, HERE / "dataset.py"] + (["--smoke"] if args.smoke else []))
         hf_dir = subprocess.run(
-            [str(PYTHON), "-c", "import sys; from huggingface_hub import snapshot_download as s; "
-             f"s('{BASE}'); print(s('{HF_BASE}'))"],
+            [str(PYTHON), "-c", "from huggingface_hub import snapshot_download as s; "
+             f"print(s('{HF_BASE}'))"],
             capture_output=True, text=True, check=True).stdout.strip().splitlines()[-1]
 
         for path in (ADAPTER, MERGED):
@@ -320,6 +344,11 @@ def main():
             "keys": LORA_KEYS, "rank": RANK, "scale": SCALE, "dropout": 0.0}}))
         started = time.time()
         with ollama_offline():
+            if not (BASE / "config.json").exists():
+                # Once, ~10 min; mlx-community's recipe (4-bit, group 64).
+                shutil.rmtree(BASE, ignore_errors=True)
+                run([PYTHON, "-m", "mlx_lm", "convert", "--hf-path", hf_dir,
+                     "--mlx-path", BASE, "-q", "--q-bits", "4", "--q-group-size", "64"])
             run([PYTHON, "-m", "mlx_lm", "lora", "-c", config,
                  "--model", BASE, "--train", "--data", DATA,
                  "--adapter-path", ADAPTER, "--batch-size", "1",
@@ -340,8 +369,9 @@ def main():
             capture_output=True, text=True, cwd=HERE,
             timeout=None if deadline is None else max(1, deadline - time.time()))
         result = json.loads(verdict.stdout)
-        record.update(eval=result, promoted=result["promote"])
-        if result["promote"]:
+        # A 20-iteration smoke model proves the chain; it must never serve.
+        record.update(eval=result, promoted=result["promote"] and not args.smoke)
+        if record["promoted"]:
             run([OLLAMA, "cp", "jarvis-house-candidate", "jarvis-house"])
             # A winner nobody talks to teaches nothing. After the first
             # promotion the agent is already on jarvis-house and the cp alone
@@ -349,6 +379,7 @@ def main():
             if current != "jarvis-house:latest":
                 try:
                     set_agent_model("jarvis-house:latest")
+                    set_brain_settings("jarvis-house:latest")
                     record["switched"] = True
                 except (OSError, ValueError, KeyError, RuntimeError) as err:
                     record["switch_failed"] = str(err)[:300]
@@ -373,9 +404,12 @@ def main():
         LAST_RUN.write_text(json.dumps(record, indent=1))
         # Put the serving model back in memory so the house isn't cold at dawn.
         try:
+            unload_all_but(serving_model())
             api("/api/generate", {"model": serving_model(), "keep_alive": -1})
         except OSError:
             pass
+        # Ollama restarted, so its prompt cache is empty; re-read the voice prompt.
+        subprocess.run(["launchctl", "kickstart", f"gui/{os.getuid()}/com.scottlandes.jarvis-warm"])
     if record.get("failed"):
         sys.exit(1)
 

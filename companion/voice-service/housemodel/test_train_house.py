@@ -67,4 +67,20 @@ try:
     raise AssertionError("a refused switch must raise")
 except RuntimeError:
     pass
+# Local Claude sessions follow onto the promoted model; nothing else changes.
+import json, pathlib, tempfile
+t.BRAIN_SETTINGS = pathlib.Path(tempfile.mkdtemp()) / "s.json"
+t.BRAIN_SETTINGS.write_text(json.dumps({"env": {
+    "ANTHROPIC_MODEL": t.SERVING_BASE, "ANTHROPIC_DEFAULT_OPUS_MODEL": t.SERVING_BASE,
+    "ANTHROPIC_BASE_URL": "http://localhost:11434"}, "permissions": {}}))
+t.set_brain_settings("jarvis-house:latest")
+assert json.loads(t.BRAIN_SETTINGS.read_text()) == {"env": {
+    "ANTHROPIC_MODEL": "jarvis-house:latest", "ANTHROPIC_DEFAULT_OPUS_MODEL": "jarvis-house:latest",
+    "ANTHROPIC_BASE_URL": "http://localhost:11434"}, "permissions": {}}
+# After the eval only the serving brain stays resident.
+calls = []
+t.api = lambda path, payload, **kw: (calls.append((path, payload)) or
+    {"models": [{"name": "jarvis-house:latest"}, {"name": t.SERVING_BASE}]})
+t.unload_all_but("jarvis-house:latest")
+assert calls[1:] == [("/api/generate", {"model": t.SERVING_BASE, "keep_alive": 0})]
 print("ok")
