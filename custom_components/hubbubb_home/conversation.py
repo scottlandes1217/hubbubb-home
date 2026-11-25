@@ -16,6 +16,7 @@ can't reach anything" is worse than no agent.
 from __future__ import annotations
 
 import dataclasses
+import json
 import logging
 import re
 import time
@@ -191,6 +192,17 @@ FIX_BRIEF = (
     "change nothing and say so. First ask: {first!r}, local reply: {reply!r}. "
     "Repeat: {repeat!r}. Claude's reply: {fixed!r}."
 )
+
+
+PAIRS_FILE = "hubbubb_home_pairs.jsonl"
+
+
+def _append_pair(path: str, prompt: str, response: str) -> None:
+    """One training pair, in the companion's pairs.jsonl shape."""
+    row = {"date": time.strftime("%Y-%m-%d"), "kind": "escalation",
+           "prompt": prompt, "response": response, "note": "repeat"}
+    with open(path, "a", encoding="utf-8") as handle:
+        handle.write(json.dumps(row) + "\n")
 
 
 class FrontDoorConversationEntity(conversation.ConversationEntity):
@@ -375,6 +387,13 @@ class FrontDoorConversationEntity(conversation.ConversationEntity):
             conversation.AssistantContent(agent_id=self.entity_id, content=fixed)
         )
         _LOGGER.info("repeat of %r went to %s", earlier[1], FALLBACK_AGENT)
+        if result.response.response_type != IntentResponseType.ERROR and fixed:
+            # The nightly house-model trainer reads this over the Samba mount:
+            # a repeat is the clearest sign the local brain got it wrong.
+            self.hass.async_add_executor_job(
+                _append_pair, self.hass.config.path(PAIRS_FILE),
+                user_input.text, fixed,
+            )
         if (
             result.response.response_type != IntentResponseType.ERROR
             and self._runtime.companion.configured
